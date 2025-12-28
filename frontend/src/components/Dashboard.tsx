@@ -10,6 +10,7 @@ import type { IChartApi, ISeriesApi, AreaSeriesPartialOptions } from 'lightweigh
 
 interface SystemStatus {
     connected: boolean;
+    nautilus_active: boolean;
     net_liquidation: string;
     account_id: string | null;
     redis_connected: boolean;
@@ -19,6 +20,7 @@ interface SystemStatus {
 export default function Dashboard() {
     const [status, setStatus] = useState<SystemStatus>({
         connected: false,
+        nautilus_active: false,
         net_liquidation: "N/A",
         account_id: null,
         redis_connected: false,
@@ -172,6 +174,11 @@ export default function Dashboard() {
             label: 'Redis Pub/Sub',
             connected: status.redis_connected,
             description: 'Real-time message broker'
+        },
+        {
+            label: 'NautilusTrader',
+            connected: status.nautilus_active,
+            description: 'Event-driven trading engine'
         },
         {
             label: 'IB Gateway',

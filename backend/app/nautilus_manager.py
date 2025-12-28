@@ -170,6 +170,7 @@ class NautilusManager:
         """
         return {
             "connected": self._connected,
+            "nautilus_active": self.node is not None,
             "net_liquidation": self._net_liquidation,
             "account_id": self._account_id,
         }
