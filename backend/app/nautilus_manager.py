@@ -53,9 +53,6 @@ class NautilusManager:
                 ibg_host=self.host,
                 ibg_port=self.port,
                 ibg_client_id=101,
-                username=username,
-                password=password,
-                trading_mode=trading_mode,
             )
 
             # Configure Interactive Brokers execution client
@@ -64,9 +61,6 @@ class NautilusManager:
                 ibg_port=self.port,
                 ibg_client_id=101,
                 account_id=account_id,
-                username=username,
-                password=password,
-                trading_mode=trading_mode,
             )
 
             # Configure instrument provider
