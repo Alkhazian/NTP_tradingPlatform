@@ -3,4 +3,4 @@ uvicorn[standard]==0.31.0
 redis==5.0.0
 websockets==12.0
 ibapi
-nautilus_trader
+nautilus_trader[ib]

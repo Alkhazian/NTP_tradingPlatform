@@ -21,6 +21,10 @@ services:
       - REDIS_URL=redis://redis:6379
       - IB_GATEWAY_HOST=ib-gateway
       - IB_GATEWAY_PORT=4004
+      - TWS_ACCOUNT=${TWS_ACCOUNT}
+      - TWS_USERID=${TWS_USERID}
+      - TWS_PASSWORD=${TWS_PASSWORD}
+      - TRADING_MODE=${TRADING_MODE:-paper}
     depends_on:
       - redis
       - ib-gateway

@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 from .redis_manager import RedisManager
-from .ib_connector import IBConnector
+from .nautilus_manager import NautilusManager
 import json
 
 logging.basicConfig(level=logging.INFO)
@@ -24,19 +24,33 @@ redis_manager = RedisManager()
 # Connect to IB Gateway using environment variables
 IB_HOST = os.getenv("IB_GATEWAY_HOST", "ib-gateway")
 IB_PORT = int(os.getenv("IB_GATEWAY_PORT", "4002"))
-ib_connector = IBConnector(host=IB_HOST, port=IB_PORT, client_id=101)
+nautilus_manager = NautilusManager(host=IB_HOST, port=IB_PORT)
 
 @app.on_event("startup")
 async def startup_event():
     await redis_manager.connect()
-    logger.info("Starting IB Connector...")
-    ib_connector.connect()
+    logger.info("Starting NautilusTrader Manager...")
+    try:
+        await nautilus_manager.start()
+        logger.info("NautilusTrader started successfully")
+    except Exception as e:
+        logger.error(f"Failed to start NautilusTrader: {e}")
+    
     asyncio.create_task(broadcast_status())
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info("Shutting down NautilusTrader...")
+    await nautilus_manager.stop()
+    await redis_manager.close()
 
 async def broadcast_status():
     while True:
         try:
-            status = ib_connector.get_status()
+            # Update account state from NautilusTrader
+            await nautilus_manager.update_status()
+            
+            status = nautilus_manager.get_status()
             
             redis_status = False
             try:
@@ -62,7 +76,7 @@ async def websocket_endpoint(websocket: WebSocket):
     logger.info("WebSocket connection accepted")
     
     # Send initial status immediately
-    status = ib_connector.get_status()
+    status = nautilus_manager.get_status()
     try:
         if redis_manager.redis:
             status["redis_connected"] = await redis_manager.redis.ping()
@@ -83,7 +97,7 @@ async def websocket_endpoint(websocket: WebSocket):
         else:
             # Fallback if Redis fails, just loop status
             while True:
-                status = ib_connector.get_status()
+                status = nautilus_manager.get_status()
                 status["redis_connected"] = False
                 await websocket.send_text(json.dumps(status))
                 await asyncio.sleep(1)
@@ -99,3 +113,4 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
