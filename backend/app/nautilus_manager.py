@@ -144,11 +144,11 @@ class NautilusManager:
                         # Use the first available balance
                         balance = balances[0]
                         self._net_liquidation = f"{balance.total.as_double():.2f} {balance.total.currency.code}"
-                        logger.debug(f"Account updated - Net Liquidation: {self._net_liquidation}")
+                        logger.info(f"Account updated - Net Liquidation: {self._net_liquidation}")
                     else:
-                        logger.debug(f"No individual balances found in account {target_account_id}")
+                        logger.info(f"No individual balances found in account {target_account_id}")
                 else:
-                    logger.debug(f"No balances found for account {target_account_id}")
+                    logger.info(f"No balances found for account {target_account_id}")
             else:
                 logger.warning(f"Account {target_account_id} not found in cache")
 
