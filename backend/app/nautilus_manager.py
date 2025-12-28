@@ -120,7 +120,8 @@ class NautilusManager:
             target_account_id = f"InteractiveBrokers-{self._account_id}"
             
             account = None
-            for acc in portfolio.accounts():
+            # Use node cache to find accounts
+            for acc in self.node.cache.accounts():
                 if str(acc.id) == target_account_id:
                     account = acc
                     break
