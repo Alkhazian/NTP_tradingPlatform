@@ -13,7 +13,7 @@ from nautilus_trader.adapters.interactive_brokers.factories import (
 )
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.live.node import TradingNode
-from nautilus_trader.model.identifiers import AccountId
+from nautilus_trader.model.identifiers import AccountId, Venue
 
 logger = logging.getLogger(__name__)
 
@@ -117,8 +117,9 @@ class NautilusManager:
             portfolio = self.node.portfolio
 
             # Get account state
+            venue_obj = Venue("INTERACTIVE_BROKERS")
             account_id_obj = AccountId(f"InteractiveBrokers-{self._account_id}")
-            account = portfolio.account(account_id_obj)
+            account = portfolio.account(venue=venue_obj, account_id=account_id_obj)
 
             if account:
                 # Get net liquidation value (total equity)
