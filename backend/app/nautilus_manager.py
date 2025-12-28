@@ -7,6 +7,10 @@ from nautilus_trader.adapters.interactive_brokers.config import (
     InteractiveBrokersExecClientConfig,
     InteractiveBrokersInstrumentProviderConfig,
 )
+from nautilus_trader.adapters.interactive_brokers.factories import (
+    InteractiveBrokersDataClientFactory,
+    InteractiveBrokersExecClientFactory,
+)
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import AccountId
@@ -84,6 +88,12 @@ class NautilusManager:
 
             # Create and build the trading node
             self.node = TradingNode(config=config)
+            self.node.add_data_client_factory(
+                "InteractiveBrokers", InteractiveBrokersDataClientFactory
+            )
+            self.node.add_exec_client_factory(
+                "InteractiveBrokers", InteractiveBrokersExecClientFactory
+            )
             self.node.build()
             await self.node.run_async()
 
