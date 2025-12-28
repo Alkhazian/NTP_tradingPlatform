@@ -1,0 +1,86 @@
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: ntd-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - ntd-network
+
+  backend:
+    build: ./backend
+    container_name: ntd-backend
+    expose:
+      - "8000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - IB_GATEWAY_HOST=ib-gateway
+      - IB_GATEWAY_PORT=4004
+    depends_on:
+      - redis
+      - ib-gateway
+    networks:
+      - ntd-network
+
+  frontend:
+    build: ./frontend
+    container_name: ntd-frontend
+    expose:
+      - "5173"
+    environment:
+      - VITE_API_URL=/
+    depends_on:
+      - backend
+    networks:
+      - ntd-network
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+
+  redis:
+    image: redis:alpine
+    container_name: ntd-redis
+    expose:
+      - "6379"
+    networks:
+      - ntd-network
+
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:latest
+    container_name: ntd-ib-gateway
+    restart: unless-stopped
+    environment:
+      # Login credentials (from .env file)
+      TWS_USERID: ${TWS_USERID}
+      TWS_PASSWORD: ${TWS_PASSWORD}
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      # VNC for 2FA - connect with VNC client to port 5900
+      VNC_SERVER_PASSWORD: ${VNC_SERVER_PASSWORD:-}
+      # 2FA settings
+      TWOFA_TIMEOUT_ACTION: ${TWOFA_TIMEOUT_ACTION:-exit}
+      RELOGIN_AFTER_TWOFA_TIMEOUT: ${RELOGIN_AFTER_TWOFA_TIMEOUT:-no}
+      TWOFA_EXIT_INTERVAL: ${TWOFA_EXIT_INTERVAL:-60}
+      # API settings
+      READ_ONLY_API: ${READ_ONLY_API:-no}
+      TWS_ACCEPT_INCOMING: ${TWS_ACCEPT_INCOMING:-accept}
+      EXISTING_SESSION_DETECTED_ACTION: ${EXISTING_SESSION_DETECTED_ACTION:-primary}
+      # Timezone
+      TIME_ZONE: ${TIME_ZONE:-Etc/UTC}
+      TZ: ${TIME_ZONE:-Etc/UTC}
+    ports:
+      # VNC port for 2FA access (use VNC client)
+      - "5900:5900"
+      # IB API port - mapped to standard 4001/4002 on host
+      - "4001:4003"
+      - "4002:4004"
+    networks:
+      - ntd-network
+
+networks:
+  ntd-network:
+    driver: bridge
