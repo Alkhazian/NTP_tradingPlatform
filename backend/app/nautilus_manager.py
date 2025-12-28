@@ -95,13 +95,12 @@ class NautilusManager:
                 "InteractiveBrokers", InteractiveBrokersLiveExecClientFactory
             )
             self.node.build()
-            await self.node.run_async()
+            
+            # Start the node in the background
+            asyncio.create_task(self.node.run_async())
 
             self._connected = True
-            logger.info("NautilusTrader TradingNode started successfully")
-
-            # Fetch initial account state
-            await self._update_account_state()
+            logger.info("NautilusTrader TradingNode started in background")
 
         except Exception as e:
             logger.error(f"Failed to start NautilusTrader: {e}")
