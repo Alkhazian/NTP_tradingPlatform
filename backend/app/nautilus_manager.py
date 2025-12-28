@@ -45,6 +45,7 @@ class NautilusManager:
         self._net_exposure = "0.0"
         self._leverage = "1.0"
         self._margin_usage_percent = "0.0"
+        self._recent_trades = []
 
     async def start(self):
         """Initialize and start the NautilusTrader TradingNode"""
@@ -317,7 +318,91 @@ class NautilusManager:
         except Exception as e:
             logger.error(f"Error updating account state: {e}", exc_info=True)
 
+    async def _get_recent_trades(self, hours: int = 24):
+        """Fetch recent trade activity from the last N hours"""
+        try:
+            if not self.node or not self._connected:
+                return []
+
+            from datetime import datetime, timezone, timedelta
+            
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+            cutoff_ns = int(cutoff_time.timestamp() * 1_000_000_000)
+            
+            
+            trades = []
+            
+            # Get all orders from cache
+            for order in self.node.cache.orders():
+                # Only include filled orders
+                if not hasattr(order, 'is_closed') or not order.is_closed:
+                    continue
+                
+                # Check if order was filled within the time window
+                if hasattr(order, 'ts_last') and order.ts_last:
+                    if order.ts_last < cutoff_ns:
+                        continue
+                    
+                    # Extract order details
+                    try:
+                        # Determine trade type
+                        trade_type = "buy" if str(order.side) == "OrderSide.BUY" else "sell"
+                        
+                        # Get symbol
+                        symbol = str(order.instrument_id).split('.')[0] if hasattr(order, 'instrument_id') else "UNKNOWN"
+                        
+                        # Get quantity
+                        quantity = float(order.quantity) if hasattr(order, 'quantity') else 0.0
+                        
+                        # Get average fill price
+                        avg_price = 0.0
+                        if hasattr(order, 'avg_px') and order.avg_px:
+                            avg_price = float(order.avg_px) if not hasattr(order.avg_px, 'as_double') else float(order.avg_px.as_double())
+                        
+                        # Calculate time ago
+                        filled_time = datetime.fromtimestamp(order.ts_last / 1_000_000_000, tz=timezone.utc)
+                        time_diff = datetime.now(timezone.utc) - filled_time
+                        
+                        if time_diff.days > 0:
+                            time_ago = f"{time_diff.days} day{'s' if time_diff.days > 1 else ''} ago"
+                        elif time_diff.seconds >= 3600:
+                            hours_ago = time_diff.seconds // 3600
+                            time_ago = f"{hours_ago} hour{'s' if hours_ago > 1 else ''} ago"
+                        elif time_diff.seconds >= 60:
+                            minutes_ago = time_diff.seconds // 60
+                            time_ago = f"{minutes_ago} minute{'s' if minutes_ago > 1 else ''} ago"
+                        else:
+                            time_ago = "Just now"
+                        
+                        trades.append({
+                            "type": trade_type,
+                            "symbol": symbol,
+                            "quantity": quantity,
+                            "price": avg_price,
+                            "time": time_ago,
+                            "timestamp": order.ts_last
+                        })
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing order {order}: {e}")
+                        continue
+            
+            # Sort by timestamp (most recent first)
+            trades.sort(key=lambda x: x['timestamp'], reverse=True)
+            
+            # Keep timestamp for frontend filtering
+            # for trade in trades:
+            #     trade.pop('timestamp', None)
+            
+            logger.info(f"Found {len(trades)} recent trades in the last {hours} hours")
+            return trades  # Return all trades for frontend filtering
+            
+        except Exception as e:
+            logger.error(f"Error fetching recent trades: {e}", exc_info=True)
+            return []
+
     async def stop(self):
+
 
         """Stop the NautilusTrader TradingNode"""
         if self.node:
@@ -349,8 +434,10 @@ class NautilusManager:
             "total_realized_pnl": self._total_realized_pnl,
             "net_exposure": self._net_exposure,
             "leverage": self._leverage,
+            "recent_trades": self._recent_trades,
         }
 
     async def update_status(self):
         """Update account state - call periodically for fresh data"""
         await self._update_account_state()
+        self._recent_trades = await self._get_recent_trades(hours=24)

@@ -26,6 +26,7 @@ interface SystemStatus {
     total_realized_pnl?: string;
     net_exposure?: string;
     leverage?: string;
+    recent_trades?: Trade[];
 }
 
 interface Position {
@@ -34,6 +35,16 @@ interface Position {
     avg_price: number;
     unrealized_pnl: number;
 }
+
+interface Trade {
+    type: 'buy' | 'sell';
+    symbol: string;
+    quantity: number;
+    price: number;
+    time: string;
+    timestamp: number;
+}
+
 
 export default function Dashboard() {
     const [status, setStatus] = useState<SystemStatus>({
@@ -47,7 +58,8 @@ export default function Dashboard() {
         backend_connected: false,
         open_positions: 0,
         positions: [],
-        day_realized_pnl: "0.0 USD"
+        day_realized_pnl: "0.0 USD",
+        recent_trades: []
     });
     const [activeNav, setActiveNav] = useState('dashboard');
     const [, setCurrentTime] = useState(new Date());
@@ -425,47 +437,33 @@ export default function Dashboard() {
                                 <div>
                                     <CardTitle>Recent Activity</CardTitle>
                                     <p className="text-sm text-muted-foreground mt-1">
-                                        Latest trades and events
+                                        Latest trades (Current Session)
                                     </p>
                                 </div>
-                                <Badge variant="outline">
-                                    Last 24 hours
+                                <Badge variant="outline" className="border-cyan-500/20 text-cyan-400 bg-cyan-500/5">
+                                    Live
                                 </Badge>
                             </CardHeader>
                             <CardContent>
                                 <div className="space-y-4">
                                     {/* Activity items */}
-                                    <ActivityItem
-                                        type="buy"
-                                        symbol="AAPL"
-                                        quantity={100}
-                                        price={178.50}
-                                        time="2 hours ago"
-                                        currency={status.account_currency}
-                                    />
-                                    <ActivityItem
-                                        type="sell"
-                                        symbol="MSFT"
-                                        quantity={50}
-                                        price={378.25}
-                                        time="4 hours ago"
-                                        currency={status.account_currency}
-                                    />
-                                    <ActivityItem
-                                        type="buy"
-                                        symbol="GOOGL"
-                                        quantity={25}
-                                        price={141.80}
-                                        time="6 hours ago"
-                                        currency={status.account_currency}
-                                    />
-                                    <ActivityItem
-                                        type="dividend"
-                                        symbol="SPY"
-                                        amount={45.67}
-                                        time="Yesterday"
-                                        currency={status.account_currency}
-                                    />
+                                    {status.recent_trades && status.recent_trades.length > 0 ? (
+                                        status.recent_trades.map((trade, index) => (
+                                            <ActivityItem
+                                                key={`${trade.symbol}-${index}`}
+                                                type={trade.type}
+                                                symbol={trade.symbol}
+                                                quantity={trade.quantity}
+                                                price={trade.price}
+                                                time={trade.time}
+                                                currency={status.account_currency}
+                                            />
+                                        ))
+                                    ) : (
+                                        <div className="text-center py-8 text-muted-foreground text-sm">
+                                            No recent trades in current session
+                                        </div>
+                                    )}
                                 </div>
                             </CardContent>
                         </Card>
