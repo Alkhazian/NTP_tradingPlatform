@@ -37,6 +37,14 @@ class NautilusManager:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._buying_power = "0.0"
         self._day_realized_pnl = "0.0"
+        # Additional portfolio metrics
+        self._margin_used = "0.0"
+        self._margin_available = "0.0"
+        self._total_unrealized_pnl = "0.0"
+        self._total_realized_pnl = "0.0"
+        self._net_exposure = "0.0"
+        self._leverage = "1.0"
+        self._margin_usage_percent = "0.0"
 
     async def start(self):
         """Initialize and start the NautilusTrader TradingNode"""
@@ -233,6 +241,76 @@ class NautilusManager:
                 except Exception as e:
                     logger.error(f"Error calculating daily realized P&L: {e}", exc_info=True)
                     self._day_realized_pnl = "0.00 USD"
+
+                # Extract additional portfolio metrics
+                try:
+                    # Get margin information
+                    if hasattr(account, 'margins_init') and callable(account.margins_init):
+                        margins_init = account.margins_init()
+                        if margins_init:
+                            margin_list = list(margins_init.values()) if hasattr(margins_init, 'values') else list(margins_init)
+                            if margin_list:
+                                margin_init = margin_list[0]
+                                self._margin_used = f"{margin_init.as_double():.2f} {margin_init.currency.code}"
+                    
+                    # Calculate margin available (buying power - margin used)
+                    try:
+                        buying_power_val = float(self._buying_power.split()[0])
+                        margin_used_val = float(self._margin_used.split()[0]) if self._margin_used != "0.0" else 0.0
+                        margin_available = buying_power_val - margin_used_val
+                        self._margin_available = f"{margin_available:.2f} {self._account_currency}"
+                        
+                        # Calculate margin usage percentage
+                        net_liq_val = float(self._net_liquidation.split()[0])
+                        if net_liq_val > 0:
+                            margin_pct = (margin_used_val / net_liq_val) * 100
+                            self._margin_usage_percent = f"{margin_pct:.1f}"
+                    except Exception:
+                        pass
+
+                    # Get portfolio-level metrics
+                    portfolio = self.node.portfolio
+                    
+                    # Total unrealized P&L
+                    if hasattr(portfolio, 'unrealized_pnls'):
+                        unrealized_pnls = portfolio.unrealized_pnls(None)  # None for all venues
+                        if unrealized_pnls:
+                            pnl_list = list(unrealized_pnls.values()) if hasattr(unrealized_pnls, 'values') else list(unrealized_pnls)
+                            if pnl_list:
+                                total_unrealized = sum(p.as_double() for p in pnl_list if p is not None)
+                                self._total_unrealized_pnl = f"{total_unrealized:.2f} {self._account_currency}"
+                    
+                    # Total realized P&L (all time)
+                    if hasattr(portfolio, 'realized_pnls'):
+                        realized_pnls = portfolio.realized_pnls(None)
+                        if realized_pnls:
+                            pnl_list = list(realized_pnls.values()) if hasattr(realized_pnls, 'values') else list(realized_pnls)
+                            if pnl_list:
+                                total_realized = sum(p.as_double() for p in pnl_list if p is not None)
+                                self._total_realized_pnl = f"{total_realized:.2f} {self._account_currency}"
+                    
+                    # Net exposure
+                    if hasattr(portfolio, 'net_exposures'):
+                        net_exposures = portfolio.net_exposures(None)
+                        if net_exposures:
+                            exp_list = list(net_exposures.values()) if hasattr(net_exposures, 'values') else list(net_exposures)
+                            if exp_list:
+                                total_exposure = sum(e.as_double() for e in exp_list if e is not None)
+                                self._net_exposure = f"{abs(total_exposure):.2f} {self._account_currency}"
+                    
+                    # Leverage
+                    if hasattr(account, 'leverages'):
+                        leverages = account.leverages()
+                        if leverages:
+                            lev_list = list(leverages.values()) if hasattr(leverages, 'values') else list(leverages)
+                            if lev_list:
+                                # Get the first leverage value
+                                self._leverage = f"{lev_list[0]:.2f}"
+                    
+                    logger.info(f"Portfolio metrics - Margin Used: {self._margin_used}, Unrealized P&L: {self._total_unrealized_pnl}, Net Exposure: {self._net_exposure}")
+                    
+                except Exception as e:
+                    logger.error(f"Error extracting portfolio metrics: {e}", exc_info=True)
             else:
                 logger.warning(f"Account {target_account_id} not found in cache")
 
@@ -263,6 +341,14 @@ class NautilusManager:
             "buying_power": self._buying_power,
             "account_currency": self._account_currency,
             "day_realized_pnl": self._day_realized_pnl,
+            # Additional portfolio metrics
+            "margin_used": self._margin_used,
+            "margin_available": self._margin_available,
+            "margin_usage_percent": self._margin_usage_percent,
+            "total_unrealized_pnl": self._total_unrealized_pnl,
+            "total_realized_pnl": self._total_realized_pnl,
+            "net_exposure": self._net_exposure,
+            "leverage": self._leverage,
         }
 
     async def update_status(self):
