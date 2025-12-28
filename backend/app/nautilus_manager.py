@@ -30,6 +30,8 @@ class NautilusManager:
         self.node: Optional[TradingNode] = None
         self._connected = False
         self._net_liquidation = "0.0"
+        self._open_positions = 0
+        self._positions = []
         self._account_id: Optional[str] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -149,6 +151,42 @@ class NautilusManager:
                         logger.info(f"No individual balances found in account {target_account_id}")
                 else:
                     logger.info(f"No balances found for account {target_account_id}")
+
+                # Update open positions details
+                positions_data = []
+                try:
+                    for p in self.node.cache.positions():
+                        if not p.is_closed:
+                            # Safely extract PnL if available
+                            pnl = 0.0
+                            try:
+                                if p.unrealized_pnl:
+                                    pnl = float(p.unrealized_pnl.as_double())
+                            except Exception:
+                                pass
+
+                            # Safely extract price
+                            avg_price = 0.0
+                            try:
+                                if p.avg_px_open is not None:
+                                    if hasattr(p.avg_px_open, "as_double"):
+                                        avg_price = float(p.avg_px_open.as_double())
+                                    else:
+                                        avg_price = float(p.avg_px_open)
+                            except Exception:
+                                pass
+
+                            positions_data.append({
+                                "symbol": str(p.instrument_id),
+                                "quantity": float(p.quantity),
+                                "avg_price": avg_price,
+                                "unrealized_pnl": pnl
+                            })
+                except Exception as e:
+                    logger.error(f"Error processing positions: {e}")
+                
+                self._positions = positions_data
+                self._open_positions = len(self._positions)
             else:
                 logger.warning(f"Account {target_account_id} not found in cache")
 
@@ -156,6 +194,7 @@ class NautilusManager:
             logger.error(f"Error updating account state: {e}", exc_info=True)
 
     async def stop(self):
+
         """Stop the NautilusTrader TradingNode"""
         if self.node:
             logger.info("Stopping NautilusTrader TradingNode")
@@ -172,6 +211,8 @@ class NautilusManager:
             "connected": self._connected,
             "nautilus_active": self.node is not None,
             "net_liquidation": self._net_liquidation,
+            "open_positions": self._open_positions,
+            "positions": self._positions,
             "account_id": self._account_id,
         }
 

@@ -15,6 +15,15 @@ interface SystemStatus {
     account_id: string | null;
     redis_connected: boolean;
     backend_connected: boolean;
+    open_positions: number;
+    positions?: Position[];
+}
+
+interface Position {
+    symbol: string;
+    quantity: number;
+    avg_price: number;
+    unrealized_pnl: number;
 }
 
 export default function Dashboard() {
@@ -24,7 +33,9 @@ export default function Dashboard() {
         net_liquidation: "N/A",
         account_id: null,
         redis_connected: false,
-        backend_connected: false
+        backend_connected: false,
+        open_positions: 0,
+        positions: []
     });
     const [activeNav, setActiveNav] = useState('dashboard');
     const [, setCurrentTime] = useState(new Date());
@@ -253,7 +264,7 @@ export default function Dashboard() {
                         />
                         <StatCard
                             title="Open Positions"
-                            value="12"
+                            value={status.open_positions.toString()}
                             icon="activity"
                             subtitle="Active trades"
                         />
@@ -296,6 +307,60 @@ export default function Dashboard() {
                             </CardHeader>
                             <CardContent>
                                 <SystemStatusPanel statuses={systemStatuses} />
+                            </CardContent>
+                        </Card>
+                    </section>
+
+                    {/* Open Positions Table */}
+                    <section>
+                        <Card variant="glass">
+                            <CardHeader className="flex flex-row items-center justify-between">
+                                <div>
+                                    <CardTitle>Open Positions</CardTitle>
+                                    <p className="text-sm text-muted-foreground mt-1">
+                                        Real-time portfolio holdings
+                                    </p>
+                                </div>
+                                <Badge variant="outline">
+                                    {status.positions?.length || 0} Open
+                                </Badge>
+                            </CardHeader>
+                            <CardContent>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-left text-sm">
+                                        <thead className="border-b border-white/10 uppercase text-xs text-muted-foreground">
+                                            <tr>
+                                                <th className="px-4 py-3">Symbol</th>
+                                                <th className="px-4 py-3 text-right">Qty</th>
+                                                <th className="px-4 py-3 text-right">Avg Price</th>
+                                                <th className="px-4 py-3 text-right">Unrealized P&L</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-white/5">
+                                            {status.positions && status.positions.length > 0 ? (
+                                                status.positions.map((pos) => (
+                                                    <tr key={pos.symbol} className="hover:bg-white/5 transition-colors">
+                                                        <td className="px-4 py-3 font-medium">{pos.symbol}</td>
+                                                        <td className="px-4 py-3 text-right tabular-nums">{pos.quantity}</td>
+                                                        <td className="px-4 py-3 text-right tabular-nums">
+                                                            {new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(pos.avg_price)}
+                                                        </td>
+                                                        <td className={`px-4 py-3 text-right tabular-nums font-medium ${pos.unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'
+                                                            }`}>
+                                                            {new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', signDisplay: 'always' }).format(pos.unrealized_pnl)}
+                                                        </td>
+                                                    </tr>
+                                                ))
+                                            ) : (
+                                                <tr>
+                                                    <td colSpan={4} className="px-4 py-8 text-center text-muted-foreground">
+                                                        No open positions
+                                                    </td>
+                                                </tr>
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
                             </CardContent>
                         </Card>
                     </section>
