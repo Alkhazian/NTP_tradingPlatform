@@ -117,9 +117,13 @@ class NautilusManager:
             portfolio = self.node.portfolio
 
             # Get account state
-            venue_obj = Venue("INTERACTIVE_BROKERS")
-            account_id_obj = AccountId(f"InteractiveBrokers-{self._account_id}")
-            account = portfolio.account(venue_obj, account_id_obj)
+            target_account_id = f"InteractiveBrokers-{self._account_id}"
+            
+            account = None
+            for acc in portfolio.accounts():
+                if str(acc.id) == target_account_id:
+                    account = acc
+                    break
 
             if account:
                 # Get net liquidation value (total equity)
