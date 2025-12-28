@@ -8,7 +8,7 @@ from nautilus_trader.adapters.interactive_brokers.config import (
     InteractiveBrokersInstrumentProviderConfig,
 )
 from nautilus_trader.adapters.interactive_brokers.factories import (
-    InteractiveBrokersDataClientFactory,
+    InteractiveBrokersLiveDataClientFactory,
     InteractiveBrokersExecClientFactory,
 )
 from nautilus_trader.config import TradingNodeConfig
@@ -89,7 +89,7 @@ class NautilusManager:
             # Create and build the trading node
             self.node = TradingNode(config=config)
             self.node.add_data_client_factory(
-                "InteractiveBrokers", InteractiveBrokersDataClientFactory
+                "InteractiveBrokers", InteractiveBrokersLiveDataClientFactory
             )
             self.node.add_exec_client_factory(
                 "InteractiveBrokers", InteractiveBrokersExecClientFactory
