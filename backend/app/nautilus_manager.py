@@ -127,13 +127,17 @@ class NautilusManager:
                     break
 
             if account:
-                # Get net liquidation value (total equity)
-                balance = account.balance_total()
-                if balance:
+                # Get balances
+                balances = account.balances()
+                if balances:
+                    # Use the first available balance
+                    balance = balances[0]
                     self._net_liquidation = f"{balance.total.as_double():.2f} {balance.total.currency.code}"
-                    logger.info(f"Account updated - Net Liquidation: {self._net_liquidation}")
+                    logger.debug(f"Account updated - Net Liquidation: {self._net_liquidation}")
+                else:
+                    logger.debug(f"No balances found for account {target_account_id}")
             else:
-                logger.warning(f"Account {account_id_obj} not found in portfolio")
+                logger.warning(f"Account {target_account_id} not found in cache")
 
         except Exception as e:
             logger.error(f"Error updating account state: {e}")
