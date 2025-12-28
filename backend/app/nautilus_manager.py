@@ -119,7 +119,7 @@ class NautilusManager:
             # Get account state
             venue_obj = Venue("INTERACTIVE_BROKERS")
             account_id_obj = AccountId(f"InteractiveBrokers-{self._account_id}")
-            account = portfolio.account(venue=venue_obj, account_id=account_id_obj)
+            account = portfolio.account(venue_obj, account_id_obj)
 
             if account:
                 # Get net liquidation value (total equity)
