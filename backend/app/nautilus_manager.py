@@ -9,7 +9,7 @@ from nautilus_trader.adapters.interactive_brokers.config import (
 )
 from nautilus_trader.adapters.interactive_brokers.factories import (
     InteractiveBrokersLiveDataClientFactory,
-    InteractiveBrokersExecClientFactory,
+    InteractiveBrokersLiveExecClientFactory,
 )
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.live.node import TradingNode
@@ -92,7 +92,7 @@ class NautilusManager:
                 "InteractiveBrokers", InteractiveBrokersLiveDataClientFactory
             )
             self.node.add_exec_client_factory(
-                "InteractiveBrokers", InteractiveBrokersExecClientFactory
+                "InteractiveBrokers", InteractiveBrokersLiveExecClientFactory
             )
             self.node.build()
             await self.node.run_async()
