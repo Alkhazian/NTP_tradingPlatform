@@ -36,6 +36,7 @@ class NautilusManager:
         self._account_currency = "USD"
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._buying_power = "0.0"
+        self._day_realized_pnl = "0.0"
 
     async def start(self):
         """Initialize and start the NautilusTrader TradingNode"""
@@ -201,6 +202,37 @@ class NautilusManager:
                 
                 self._positions = positions_data
                 self._open_positions = len(self._positions)
+
+                # Calculate daily realized P&L from closed positions today
+                try:
+                    from datetime import datetime, timezone
+                    
+                    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+                    daily_realized = 0.0
+                    
+                    # Get all positions (including closed ones)
+                    for p in self.node.cache.positions():
+                        if p.is_closed:
+                            # Check if position was closed today
+                            if hasattr(p, 'ts_closed') and p.ts_closed:
+                                # Convert nanoseconds timestamp to datetime
+                                closed_time = datetime.fromtimestamp(p.ts_closed / 1_000_000_000, tz=timezone.utc)
+                                
+                                if closed_time >= today_start:
+                                    # Add realized PnL from this position
+                                    if hasattr(p, 'realized_pnl') and p.realized_pnl:
+                                        try:
+                                            pnl_value = float(p.realized_pnl.as_double())
+                                            daily_realized += pnl_value
+                                        except Exception:
+                                            pass
+                    
+                    self._day_realized_pnl = f"{daily_realized:.2f} {self._account_currency}"
+                    logger.info(f"Daily realized P&L: {self._day_realized_pnl}")
+                    
+                except Exception as e:
+                    logger.error(f"Error calculating daily realized P&L: {e}", exc_info=True)
+                    self._day_realized_pnl = "0.00 USD"
             else:
                 logger.warning(f"Account {target_account_id} not found in cache")
 
@@ -230,6 +262,7 @@ class NautilusManager:
             "account_id": self._account_id,
             "buying_power": self._buying_power,
             "account_currency": self._account_currency,
+            "day_realized_pnl": self._day_realized_pnl,
         }
 
     async def update_status(self):

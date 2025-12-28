@@ -19,6 +19,7 @@ interface SystemStatus {
     backend_connected: boolean;
     open_positions: number;
     positions?: Position[];
+    day_realized_pnl?: string;
 }
 
 interface Position {
@@ -39,7 +40,8 @@ export default function Dashboard() {
         redis_connected: false,
         backend_connected: false,
         open_positions: 0,
-        positions: []
+        positions: [],
+        day_realized_pnl: "0.0 USD"
     });
     const [activeNav, setActiveNav] = useState('dashboard');
     const [, setCurrentTime] = useState(new Date());
@@ -248,16 +250,20 @@ export default function Dashboard() {
                             value={formatCurrency(status.net_liquidation)}
                             icon="dollarSign"
                             status="success"
-                            trend={{ value: 2.5, isPositive: true }}
                             subtitle="Total account value"
                         />
                         <StatCard
                             title="Day P&L"
-                            value={formatCurrency("1234.56")}
-                            icon="trendingUp"
-                            status="success"
-                            trend={{ value: 1.2, isPositive: true }}
-                            subtitle="Unrealized gains today"
+                            value={formatCurrency(status.day_realized_pnl || "0.0")}
+                            icon={(() => {
+                                const pnl = parseFloat((status.day_realized_pnl || "0.0").replace(/[^0-9.-]/g, ''));
+                                return pnl >= 0 ? "trendingUp" : "trendingDown";
+                            })()}
+                            status={(() => {
+                                const pnl = parseFloat((status.day_realized_pnl || "0.0").replace(/[^0-9.-]/g, ''));
+                                return pnl >= 0 ? "success" : "destructive";
+                            })()}
+                            subtitle="Realized P&L today"
                         />
                         <StatCard
                             title="Buying Power"
