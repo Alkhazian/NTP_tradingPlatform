@@ -127,20 +127,33 @@ class NautilusManager:
                     break
 
             if account:
-                # Get balances
-                balances = account.balances()
-                if balances:
-                    # Use the first available balance
-                    balance = balances[0]
-                    self._net_liquidation = f"{balance.total.as_double():.2f} {balance.total.currency.code}"
-                    logger.debug(f"Account updated - Net Liquidation: {self._net_liquidation}")
+                # Get balances - handle both method and property
+                try:
+                    balances_raw = account.balances() if callable(getattr(account, "balances", None)) else account.balances
+                except Exception:
+                    balances_raw = getattr(account, "balances", [])
+
+                if balances_raw:
+                    # Convert to list if it's a mapping/dict
+                    if hasattr(balances_raw, "values"):
+                        balances = list(balances_raw.values())
+                    else:
+                        balances = list(balances_raw)
+                    
+                    if balances:
+                        # Use the first available balance
+                        balance = balances[0]
+                        self._net_liquidation = f"{balance.total.as_double():.2f} {balance.total.currency.code}"
+                        logger.debug(f"Account updated - Net Liquidation: {self._net_liquidation}")
+                    else:
+                        logger.debug(f"No individual balances found in account {target_account_id}")
                 else:
                     logger.debug(f"No balances found for account {target_account_id}")
             else:
                 logger.warning(f"Account {target_account_id} not found in cache")
 
         except Exception as e:
-            logger.error(f"Error updating account state: {e}")
+            logger.error(f"Error updating account state: {e}", exc_info=True)
 
     async def stop(self):
         """Stop the NautilusTrader TradingNode"""
