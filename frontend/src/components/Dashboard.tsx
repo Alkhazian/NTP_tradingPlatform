@@ -1,12 +1,10 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from './ui/card';
 import { Badge } from './ui/badge';
 import { StatCard } from './ui/stat-card';
 import { SystemStatusPanel } from './ui/status-indicator';
 import { Header, Sidebar, SidebarItem } from './layout';
 import { Icons } from './ui/icons';
-import { createChart, ColorType } from 'lightweight-charts';
-import type { IChartApi, ISeriesApi, AreaSeriesPartialOptions } from 'lightweight-charts';
 
 interface SystemStatus {
     connected: boolean;
@@ -20,6 +18,14 @@ interface SystemStatus {
     open_positions: number;
     positions?: Position[];
     day_realized_pnl?: string;
+    // Portfolio metrics
+    margin_used?: string;
+    margin_available?: string;
+    margin_usage_percent?: string;
+    total_unrealized_pnl?: string;
+    total_realized_pnl?: string;
+    net_exposure?: string;
+    leverage?: string;
 }
 
 interface Position {
@@ -45,9 +51,6 @@ export default function Dashboard() {
     });
     const [activeNav, setActiveNav] = useState('dashboard');
     const [, setCurrentTime] = useState(new Date());
-    const chartContainerRef = useRef<HTMLDivElement>(null);
-    const chartRef = useRef<IChartApi | null>(null);
-    const seriesRef = useRef<ISeriesApi<"Area"> | null>(null);
 
     // Update time every second
     useEffect(() => {
@@ -86,88 +89,6 @@ export default function Dashboard() {
         }
 
         return () => ws.close();
-    }, []);
-
-    useEffect(() => {
-        if (chartContainerRef.current && !chartRef.current) {
-            const chart = createChart(chartContainerRef.current, {
-                layout: {
-                    background: { type: ColorType.Solid, color: 'transparent' },
-                    textColor: 'rgba(255, 255, 255, 0.5)',
-                    fontFamily: 'Inter, system-ui, sans-serif',
-                },
-                grid: {
-                    vertLines: { color: 'rgba(255, 255, 255, 0.05)' },
-                    horzLines: { color: 'rgba(255, 255, 255, 0.05)' },
-                },
-                width: chartContainerRef.current.clientWidth,
-                height: 350,
-                rightPriceScale: {
-                    borderColor: 'rgba(255, 255, 255, 0.1)',
-                },
-                timeScale: {
-                    borderColor: 'rgba(255, 255, 255, 0.1)',
-                    timeVisible: true,
-                },
-                crosshair: {
-                    vertLine: {
-                        color: 'rgba(14, 165, 233, 0.5)',
-                        labelBackgroundColor: '#0ea5e9',
-                    },
-                    horzLine: {
-                        color: 'rgba(14, 165, 233, 0.5)',
-                        labelBackgroundColor: '#0ea5e9',
-                    },
-                },
-            });
-
-            chartRef.current = chart;
-
-            const areaSeriesOptions: AreaSeriesPartialOptions = {
-                lineColor: '#0ea5e9',
-                topColor: 'rgba(14, 165, 233, 0.4)',
-                bottomColor: 'rgba(14, 165, 233, 0.0)',
-                lineWidth: 2,
-            };
-
-            const newSeries = chart.addAreaSeries(areaSeriesOptions);
-            seriesRef.current = newSeries;
-
-            // Sample portfolio data
-            const baseValue = 100000;
-            const today = new Date();
-            const data = [];
-
-            for (let i = 30; i >= 0; i--) {
-                const date = new Date(today);
-                date.setDate(date.getDate() - i);
-                const dateStr = date.toISOString().split('T')[0];
-                const randomChange = (Math.random() - 0.48) * 2000;
-                const value = baseValue + randomChange + (30 - i) * 100;
-                data.push({ time: dateStr, value: Math.round(value * 100) / 100 });
-            }
-
-            newSeries.setData(data);
-            chart.timeScale().fitContent();
-
-            const handleResize = () => {
-                if (chartContainerRef.current && chartRef.current) {
-                    chartRef.current.applyOptions({
-                        width: chartContainerRef.current.clientWidth
-                    });
-                }
-            };
-
-            window.addEventListener('resize', handleResize);
-
-            return () => {
-                window.removeEventListener('resize', handleResize);
-                if (chartRef.current) {
-                    chartRef.current.remove();
-                    chartRef.current = null;
-                }
-            };
-        }
     }, []);
 
     const formatCurrency = useCallback((value: string, currency?: string) => {
@@ -282,27 +203,149 @@ export default function Dashboard() {
 
                     {/* Charts and Status */}
                     <section className="grid gap-6 lg:grid-cols-3">
-                        {/* Portfolio Chart */}
+                        {/* Risk & Margin Panel */}
                         <Card variant="glass" className="lg:col-span-2">
                             <CardHeader className="flex flex-row items-center justify-between">
                                 <div>
-                                    <CardTitle>Portfolio Performance</CardTitle>
+                                    <CardTitle>Risk & Margin</CardTitle>
                                     <p className="text-sm text-muted-foreground mt-1">
-                                        30-day account value history
+                                        Portfolio risk metrics and margin utilization
                                     </p>
                                 </div>
                                 <div className="flex items-center gap-2">
                                     <Badge variant="success" pulse>
                                         Live Data
                                     </Badge>
-                                    <button className="p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
-                                        <Icons.refresh className="w-4 h-4 text-muted-foreground" />
-                                    </button>
                                 </div>
                             </CardHeader>
                             <CardContent>
-                                <div className="chart-container">
-                                    <div ref={chartContainerRef} className="w-full h-[350px]" />
+                                <div className="grid gap-6 md:grid-cols-2">
+                                    {/* Margin Usage */}
+                                    <div className="space-y-4">
+                                        <div>
+                                            <div className="flex items-center justify-between mb-2">
+                                                <span className="text-sm font-medium text-muted-foreground">Margin Usage</span>
+                                                <span className="text-sm font-bold text-cyan-400">
+                                                    {status.margin_usage_percent || "0"}%
+                                                </span>
+                                            </div>
+                                            <div className="h-2 bg-white/5 rounded-full overflow-hidden">
+                                                <div
+                                                    className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 transition-all duration-500"
+                                                    style={{ width: `${Math.min(parseFloat(status.margin_usage_percent || "0"), 100)}%` }}
+                                                />
+                                            </div>
+                                            <div className="flex items-center justify-between mt-2 text-xs text-muted-foreground">
+                                                <span>Used: {formatCurrency(status.margin_used || "0")}</span>
+                                                <span>Available: {formatCurrency(status.margin_available || "0")}</span>
+                                            </div>
+                                        </div>
+
+                                        {/* Net Exposure */}
+                                        <div className="p-4 rounded-xl bg-white/5 border border-white/10">
+                                            <div className="flex items-center gap-3">
+                                                <div className="p-3 rounded-lg bg-purple-500/10">
+                                                    <Icons.activity className="w-5 h-5 text-purple-400" />
+                                                </div>
+                                                <div className="flex-1">
+                                                    <p className="text-xs text-muted-foreground">Net Exposure</p>
+                                                    <p className="text-lg font-bold tabular-nums">
+                                                        {formatCurrency(status.net_exposure || "0")}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* Leverage */}
+                                        <div className="p-4 rounded-xl bg-white/5 border border-white/10">
+                                            <div className="flex items-center gap-3">
+                                                <div className="p-3 rounded-lg bg-orange-500/10">
+                                                    <Icons.zap className="w-5 h-5 text-orange-400" />
+                                                </div>
+                                                <div className="flex-1">
+                                                    <p className="text-xs text-muted-foreground">Leverage</p>
+                                                    <p className="text-lg font-bold tabular-nums">
+                                                        {status.leverage || "1.0"}x
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* P&L Metrics */}
+                                    <div className="space-y-4">
+                                        {/* Total Unrealized P&L */}
+                                        <div className="p-4 rounded-xl bg-white/5 border border-white/10">
+                                            <div className="flex items-center gap-3">
+                                                <div className={`p-3 rounded-lg ${parseFloat((status.total_unrealized_pnl || "0").replace(/[^0-9.-]/g, '')) >= 0
+                                                    ? 'bg-emerald-500/10'
+                                                    : 'bg-red-500/10'
+                                                    }`}>
+                                                    <Icons.trendingUp className={`w-5 h-5 ${parseFloat((status.total_unrealized_pnl || "0").replace(/[^0-9.-]/g, '')) >= 0
+                                                        ? 'text-emerald-400'
+                                                        : 'text-red-400'
+                                                        }`} />
+                                                </div>
+                                                <div className="flex-1">
+                                                    <p className="text-xs text-muted-foreground">Unrealized P&L</p>
+                                                    <p className={`text-lg font-bold tabular-nums ${parseFloat((status.total_unrealized_pnl || "0").replace(/[^0-9.-]/g, '')) >= 0
+                                                        ? 'text-emerald-400'
+                                                        : 'text-red-400'
+                                                        }`}>
+                                                        {formatCurrency(status.total_unrealized_pnl || "0")}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* Total Realized P&L */}
+                                        <div className="p-4 rounded-xl bg-white/5 border border-white/10">
+                                            <div className="flex items-center gap-3">
+                                                <div className={`p-3 rounded-lg ${parseFloat((status.total_realized_pnl || "0").replace(/[^0-9.-]/g, '')) >= 0
+                                                    ? 'bg-emerald-500/10'
+                                                    : 'bg-red-500/10'
+                                                    }`}>
+                                                    <Icons.dollarSign className={`w-5 h-5 ${parseFloat((status.total_realized_pnl || "0").replace(/[^0-9.-]/g, '')) >= 0
+                                                        ? 'text-emerald-400'
+                                                        : 'text-red-400'
+                                                        }`} />
+                                                </div>
+                                                <div className="flex-1">
+                                                    <p className="text-xs text-muted-foreground">Total Realized P&L</p>
+                                                    <p className={`text-lg font-bold tabular-nums ${parseFloat((status.total_realized_pnl || "0").replace(/[^0-9.-]/g, '')) >= 0
+                                                        ? 'text-emerald-400'
+                                                        : 'text-red-400'
+                                                        }`}>
+                                                        {formatCurrency(status.total_realized_pnl || "0")}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* Day Realized P&L */}
+                                        <div className="p-4 rounded-xl bg-white/5 border border-white/10">
+                                            <div className="flex items-center gap-3">
+                                                <div className={`p-3 rounded-lg ${parseFloat((status.day_realized_pnl || "0").replace(/[^0-9.-]/g, '')) >= 0
+                                                    ? 'bg-emerald-500/10'
+                                                    : 'bg-red-500/10'
+                                                    }`}>
+                                                    <Icons.clock className={`w-5 h-5 ${parseFloat((status.day_realized_pnl || "0").replace(/[^0-9.-]/g, '')) >= 0
+                                                        ? 'text-emerald-400'
+                                                        : 'text-red-400'
+                                                        }`} />
+                                                </div>
+                                                <div className="flex-1">
+                                                    <p className="text-xs text-muted-foreground">Day Realized P&L</p>
+                                                    <p className={`text-lg font-bold tabular-nums ${parseFloat((status.day_realized_pnl || "0").replace(/[^0-9.-]/g, '')) >= 0
+                                                        ? 'text-emerald-400'
+                                                        : 'text-red-400'
+                                                        }`}>
+                                                        {formatCurrency(status.day_realized_pnl || "0")}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
                             </CardContent>
                         </Card>
