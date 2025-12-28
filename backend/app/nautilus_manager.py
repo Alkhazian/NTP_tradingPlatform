@@ -84,6 +84,7 @@ class NautilusManager:
 
             # Create and build the trading node
             self.node = TradingNode(config=config)
+            self.node.build()
             await self.node.run_async()
 
             self._connected = True
