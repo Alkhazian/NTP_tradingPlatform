@@ -33,7 +33,9 @@ class NautilusManager:
         self._open_positions = 0
         self._positions = []
         self._account_id: Optional[str] = None
+        self._account_currency = "USD"
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._buying_power = "0.0"
 
     async def start(self):
         """Initialize and start the NautilusTrader TradingNode"""
@@ -145,8 +147,20 @@ class NautilusManager:
                     if balances:
                         # Use the first available balance
                         balance = balances[0]
-                        self._net_liquidation = f"{balance.total.as_double():.2f} {balance.total.currency.code}"
-                        logger.info(f"Account updated - Net Liquidation: {self._net_liquidation}")
+                        self._account_currency = str(balance.total.currency.code)
+                        self._net_liquidation = f"{balance.total.as_double():.2f} {self._account_currency}"
+                        
+                        # Extract buying power (free balance)
+                        try:
+                            if hasattr(balance, "free"):
+                                self._buying_power = f"{balance.free.as_double():.2f} {balance.free.currency.code}"
+                            else:
+                                # Fallback if free not directly available (unlikely for Balance object)
+                                self._buying_power = f"{balance.total.as_double():.2f} {balance.total.currency.code}"
+                        except Exception:
+                            self._buying_power = "0.00 USD"
+                            
+                        logger.info(f"Account updated - Net Liquidation: {self._net_liquidation}, Buying Power: {self._buying_power}")
                     else:
                         logger.info(f"No individual balances found in account {target_account_id}")
                 else:
@@ -214,6 +228,8 @@ class NautilusManager:
             "open_positions": self._open_positions,
             "positions": self._positions,
             "account_id": self._account_id,
+            "buying_power": self._buying_power,
+            "account_currency": self._account_currency,
         }
 
     async def update_status(self):

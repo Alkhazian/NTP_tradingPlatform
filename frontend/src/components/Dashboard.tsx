@@ -12,6 +12,8 @@ interface SystemStatus {
     connected: boolean;
     nautilus_active: boolean;
     net_liquidation: string;
+    buying_power: string;
+    account_currency: string;
     account_id: string | null;
     redis_connected: boolean;
     backend_connected: boolean;
@@ -31,6 +33,8 @@ export default function Dashboard() {
         connected: false,
         nautilus_active: false,
         net_liquidation: "N/A",
+        buying_power: "N/A",
+        account_currency: "USD",
         account_id: null,
         redis_connected: false,
         backend_connected: false,
@@ -164,16 +168,16 @@ export default function Dashboard() {
         }
     }, []);
 
-    const formatCurrency = useCallback((value: string) => {
+    const formatCurrency = useCallback((value: string, currency?: string) => {
         if (value === "N/A") return value;
         const num = parseFloat(value.replace(/[^0-9.-]/g, ''));
         if (isNaN(num)) return value;
         return new Intl.NumberFormat('en-US', {
             style: 'currency',
-            currency: 'USD',
+            currency: currency || status.account_currency || 'USD',
             minimumFractionDigits: 2
         }).format(num);
-    }, []);
+    }, [status.account_currency]);
 
     const systemStatuses = [
         {
@@ -249,7 +253,7 @@ export default function Dashboard() {
                         />
                         <StatCard
                             title="Day P&L"
-                            value="+$1,234.56"
+                            value={formatCurrency("1234.56")}
                             icon="trendingUp"
                             status="success"
                             trend={{ value: 1.2, isPositive: true }}
@@ -257,7 +261,7 @@ export default function Dashboard() {
                         />
                         <StatCard
                             title="Buying Power"
-                            value="$25,000.00"
+                            value={formatCurrency(status.buying_power)}
                             icon="zap"
                             status="info"
                             subtitle="Available margin"
@@ -343,11 +347,11 @@ export default function Dashboard() {
                                                         <td className="px-4 py-3 font-medium">{pos.symbol}</td>
                                                         <td className="px-4 py-3 text-right tabular-nums">{pos.quantity}</td>
                                                         <td className="px-4 py-3 text-right tabular-nums">
-                                                            {new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(pos.avg_price)}
+                                                            {new Intl.NumberFormat('en-US', { style: 'currency', currency: status.account_currency }).format(pos.avg_price)}
                                                         </td>
                                                         <td className={`px-4 py-3 text-right tabular-nums font-medium ${pos.unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'
                                                             }`}>
-                                                            {new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', signDisplay: 'always' }).format(pos.unrealized_pnl)}
+                                                            {new Intl.NumberFormat('en-US', { style: 'currency', currency: status.account_currency, signDisplay: 'always' }).format(pos.unrealized_pnl)}
                                                         </td>
                                                     </tr>
                                                 ))
@@ -388,6 +392,7 @@ export default function Dashboard() {
                                         quantity={100}
                                         price={178.50}
                                         time="2 hours ago"
+                                        currency={status.account_currency}
                                     />
                                     <ActivityItem
                                         type="sell"
@@ -395,6 +400,7 @@ export default function Dashboard() {
                                         quantity={50}
                                         price={378.25}
                                         time="4 hours ago"
+                                        currency={status.account_currency}
                                     />
                                     <ActivityItem
                                         type="buy"
@@ -402,12 +408,14 @@ export default function Dashboard() {
                                         quantity={25}
                                         price={141.80}
                                         time="6 hours ago"
+                                        currency={status.account_currency}
                                     />
                                     <ActivityItem
                                         type="dividend"
                                         symbol="SPY"
                                         amount={45.67}
                                         time="Yesterday"
+                                        currency={status.account_currency}
                                     />
                                 </div>
                             </CardContent>
@@ -426,9 +434,10 @@ interface ActivityItemProps {
     price?: number;
     amount?: number;
     time: string;
+    currency?: string;
 }
 
-function ActivityItem({ type, symbol, quantity, price, amount, time }: ActivityItemProps) {
+function ActivityItem({ type, symbol, quantity, price, amount, time, currency }: ActivityItemProps) {
     const getTypeStyles = () => {
         switch (type) {
             case 'buy':
@@ -458,6 +467,14 @@ function ActivityItem({ type, symbol, quantity, price, amount, time }: ActivityI
     const styles = getTypeStyles();
     const IconComponent = styles.icon;
 
+    const format = (value: number) => {
+        return new Intl.NumberFormat('en-US', {
+            style: 'currency',
+            currency: currency || 'USD',
+            minimumFractionDigits: 2
+        }).format(value);
+    };
+
     return (
         <div className="flex items-center justify-between p-4 rounded-xl bg-white/5 hover:bg-white/8 transition-colors">
             <div className="flex items-center gap-4">
@@ -473,8 +490,8 @@ function ActivityItem({ type, symbol, quantity, price, amount, time }: ActivityI
                     </div>
                     <p className="text-sm text-muted-foreground">
                         {type === 'dividend'
-                            ? `Dividend received: $${amount?.toFixed(2)}`
-                            : `${quantity} shares @ $${price?.toFixed(2)}`
+                            ? `Dividend received: ${format(amount || 0)}`
+                            : `${quantity} shares @ ${format(price || 0)}`
                         }
                     </p>
                 </div>
@@ -482,10 +499,10 @@ function ActivityItem({ type, symbol, quantity, price, amount, time }: ActivityI
             <div className="text-right">
                 <p className={`font-semibold tabular-nums ${type === 'sell' ? 'text-red-400' : type === 'buy' ? 'text-emerald-400' : 'text-purple-400'}`}>
                     {type === 'dividend'
-                        ? `+$${amount?.toFixed(2)}`
+                        ? `+${format(amount || 0)}`
                         : type === 'buy'
-                            ? `-$${((quantity || 0) * (price || 0)).toLocaleString('en-US', { minimumFractionDigits: 2 })}`
-                            : `+$${((quantity || 0) * (price || 0)).toLocaleString('en-US', { minimumFractionDigits: 2 })}`
+                            ? `-${format((quantity || 0) * (price || 0))}`
+                            : `+${format((quantity || 0) * (price || 0))}`
                     }
                 </p>
                 <p className="text-xs text-muted-foreground">{time}</p>
