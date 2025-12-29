@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 
-class RedisManager:
+class RedisClient:
     def __init__(self):
         self.redis = None
 

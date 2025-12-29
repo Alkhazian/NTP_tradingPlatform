@@ -13,7 +13,8 @@ import {
     LineChart,
     BarChart3,
     Clock,
-    RefreshCw
+    RefreshCw,
+    FileText
 } from 'lucide-react';
 
 export const Icons = {
@@ -32,6 +33,7 @@ export const Icons = {
     barChart: BarChart3,
     clock: Clock,
     refresh: RefreshCw,
+    fileText: FileText,
 };
 
 export type IconName = keyof typeof Icons;

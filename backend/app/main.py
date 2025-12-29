@@ -1,13 +1,16 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import logging
 import os
-from .redis_manager import RedisManager
-from .nautilus_manager import NautilusManager
 import json
+from .engine.redis_client import RedisClient
+from .engine.system import SystemEngine
+from .strategies.manager import StrategyManager
+from .logging.service import setup_logging
 
-logging.basicConfig(level=logging.INFO)
+# Setup centralized logging
+setup_logging()
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
@@ -20,51 +23,73 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-redis_manager = RedisManager()
+# Initialize Modules
+redis_client = RedisClient()
+
 # Connect to IB Gateway using environment variables
 IB_HOST = os.getenv("IB_GATEWAY_HOST", "ib-gateway")
 IB_PORT = int(os.getenv("IB_GATEWAY_PORT", "4002"))
-nautilus_manager = NautilusManager(host=IB_HOST, port=IB_PORT)
+system_engine = SystemEngine(host=IB_HOST, port=IB_PORT)
+strategy_manager = StrategyManager(engine=system_engine, redis_client=redis_client)
+
+# Register Dummy Strategy for demo
+from .strategies.implementations.dummy_strategy import DummyStrategy, DummyStrategyConfig
+strategy_manager.register_strategy("DummyStrategy", DummyStrategy, {"param1": "test", "stop_loss": 50.0})
+
+# Register MES ORB Strategy
+from .strategies.implementations.mes_orb_strategy import MesOrbStrategy, MesOrbStrategyConfig
+strategy_manager.register_strategy("MesOrbStrategy", MesOrbStrategy, {
+    "instrument_id": "MES.FUT-202403-GLOBEX",
+    "bar_type": "MES.FUT-202403-GLOBEX-1-MINUTE-MID-EXTERNAL",
+    "stop_loss_points": 10.0,
+    "trailing_loss_points": 15.0,
+    "orb_period_minutes": 15,
+    "contract_quantity": 1
+})
 
 @app.on_event("startup")
 async def startup_event():
-    await redis_manager.connect()
-    logger.info("Starting NautilusTrader Manager...")
+    await redis_client.connect()
+    logger.info("Starting System Engine...")
     try:
-        await nautilus_manager.start()
-        logger.info("NautilusTrader started successfully")
+        await system_engine.start()
+        logger.info("System Engine started successfully")
     except Exception as e:
-        logger.error(f"Failed to start NautilusTrader: {e}")
+        logger.error(f"Failed to start System Engine: {e}")
     
+    # Restore strategies
+    await strategy_manager.restore_strategies()
+
     asyncio.create_task(broadcast_status())
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    logger.info("Shutting down NautilusTrader...")
-    await nautilus_manager.stop()
-    await redis_manager.close()
+    logger.info("Shutting down System Engine...")
+    await system_engine.stop()
+    await redis_client.close()
 
 async def broadcast_status():
     while True:
         try:
-            # Update account state from NautilusTrader
-            await nautilus_manager.update_status()
+            # Update account state from SystemEngine
+            await system_engine.update_status()
             
-            status = nautilus_manager.get_status()
+            status = system_engine.get_status()
             
             redis_status = False
             try:
-                if redis_manager.redis:
-                    redis_status = await redis_manager.redis.ping()
+                if redis_client.redis:
+                    redis_status = await redis_client.redis.ping()
             except:
                 pass
             
             status["redis_connected"] = redis_status
             status["backend_connected"] = True
+            status["strategies"] = strategy_manager.get_strategies_status()
             
             # Publish to Redis channel
-            if redis_manager.redis:
-                await redis_manager.publish("system_status", status)
+            if redis_client.redis:
+                await redis_client.publish("system_status", status)
         except Exception as e:
             logger.error(f"Error in broadcast loop: {e}")
         
@@ -76,18 +101,19 @@ async def websocket_endpoint(websocket: WebSocket):
     logger.info("WebSocket connection accepted")
     
     # Send initial status immediately
-    status = nautilus_manager.get_status()
+    status = system_engine.get_status()
+    status["strategies"] = strategy_manager.get_strategies_status()
     try:
-        if redis_manager.redis:
-            status["redis_connected"] = await redis_manager.redis.ping()
+        if redis_client.redis:
+            status["redis_connected"] = await redis_client.redis.ping()
     except:
         status["redis_connected"] = False
     
     await websocket.send_text(json.dumps(status))
     
     pubsub = None
-    if redis_manager.redis:
-        pubsub = await redis_manager.subscribe("system_status")
+    if redis_client.redis:
+        pubsub = await redis_client.subscribe("system_status")
 
     try:
         if pubsub:
@@ -97,8 +123,9 @@ async def websocket_endpoint(websocket: WebSocket):
         else:
             # Fallback if Redis fails, just loop status
             while True:
-                status = nautilus_manager.get_status()
+                status = system_engine.get_status()
                 status["redis_connected"] = False
+                status["strategies"] = strategy_manager.get_strategies_status()
                 await websocket.send_text(json.dumps(status))
                 await asyncio.sleep(1)
                 
@@ -113,4 +140,36 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+# Strategy Management Endpoints
+@app.get("/strategies")
+async def get_strategies():
+    return strategy_manager.get_strategies_status()
+
+@app.post("/strategies/{name}/start")
+async def start_strategy(name: str):
+    success = await strategy_manager.start_strategy(name)
+    if not success:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    return {"status": "started", "name": name}
+
+@app.post("/strategies/{name}/stop")
+async def stop_strategy(name: str):
+    success = await strategy_manager.stop_strategy(name)
+    if not success:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    return {"status": "stopped", "name": name}
+
+@app.post("/strategies/stop_all")
+async def stop_all_strategies():
+    await strategy_manager.stop_all_strategies()
+    return {"status": "all_stopped"}
+
+@app.post("/strategies/{name}/config")
+async def update_strategy_config(name: str, config: dict = Body(...)):
+    # In a real app, this would update configs dynamically
+    # For now, just logging it
+    logger.info(f"Updating config for {name}: {config}")
+    return {"status": "updated", "config": config}
+
 
