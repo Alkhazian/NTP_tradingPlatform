@@ -12,11 +12,14 @@ class DummyStrategy(BaseStrategy):
     def on_start(self):
         super().on_start()
         self.log.info(f"Dummy Strategy initialized with param1={self.param1}")
-        # Schedule a heartbeat log every 5 seconds to verify it's running
-        self.clock.schedule(self._log_heartbeat, interval=5.0)
 
-    def _log_heartbeat(self):
-        self.log.info("Dummy Strategy Heartbeat: Still running...")
+    def on_bar(self, bar):
+        from ..base import StrategyMode
+        if self.mode == StrategyMode.INACTIVE:
+            return
+        if self.mode == StrategyMode.REDUCE_ONLY:
+            return # Block entries
+        # Dummy logic would go here
 
     def on_stop(self):
         super().on_stop()

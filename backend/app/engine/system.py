@@ -47,7 +47,7 @@ class SystemEngine:
         self._net_exposure = "0.0"
         self._leverage = "1.0"
 
-    async def start(self):
+    async def start(self, pre_build_hook=None):
         """Initialize and start the NautilusTrader TradingNode"""
         try:
             account_id = os.getenv("TWS_ACCOUNT")
@@ -88,6 +88,12 @@ class SystemEngine:
             self.node = TradingNode(config=config)
             self.node.add_data_client_factory("InteractiveBrokers", InteractiveBrokersLiveDataClientFactory)
             self.node.add_exec_client_factory("InteractiveBrokers", InteractiveBrokersLiveExecClientFactory)
+            
+            # Execute hook to add strategies before building
+            if pre_build_hook:
+                logger.info("Executing pre-build hook for strategy registration")
+                pre_build_hook(self.node)
+
             self.node.build()
             
             asyncio.create_task(self.node.run_async())

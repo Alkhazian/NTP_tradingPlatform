@@ -44,6 +44,39 @@ export default function Dashboard() {
             label: 'IB Gateway',
             connected: status.connected,
             description: status.account_id ? `Account: ${status.account_id}` : 'Interactive Brokers connection'
+        },
+        {
+            label: 'Strategy Status',
+            connected: !!(status.strategies && status.strategies.length > 0 && status.strategies.some(s => ["RUNNING", "REDUCE_ONLY", "PAUSED", "STARTING", "STOPPING"].includes(s.status))),
+            variant: (() => {
+                if (!status.strategies || status.strategies.length === 0) return 'destructive';
+                if (status.strategies.some(s => s.status === 'RUNNING')) return 'success';
+                if (status.strategies.some(s => ["PAUSED", "REDUCE_ONLY", "STARTING", "STOPPING"].includes(s.status))) return 'warning';
+                if (status.strategies.some(s => s.status === 'ERROR')) return 'destructive';
+                return 'destructive'; // All Stopped
+            })(),
+            statusLabel: (() => {
+                if (!status.strategies || status.strategies.length === 0) return 'Stopped';
+                if (status.strategies.some(s => s.status === 'RUNNING')) return 'Active';
+                if (status.strategies.some(s => ["PAUSED", "REDUCE_ONLY", "STARTING", "STOPPING"].includes(s.status))) return 'Warning';
+                if (status.strategies.some(s => s.status === 'ERROR')) return 'Error';
+                return 'Stopped';
+            })(),
+            description: (() => {
+                if (!status.strategies || status.strategies.length === 0) return 'No strategies loaded';
+                const active = status.strategies.filter(s => s.status === 'RUNNING').length;
+                const paused = status.strategies.filter(s => s.status === 'PAUSED').length;
+                const reduce = status.strategies.filter(s => s.status === 'REDUCE_ONLY').length;
+                const error = status.strategies.filter(s => s.status === 'ERROR').length;
+
+                const parts = [];
+                if (active) parts.push(`${active} Running`);
+                if (paused) parts.push(`${paused} Paused`);
+                if (reduce) parts.push(`${reduce} Reduce-Only`);
+                if (error) parts.push(`${error} failed`);
+
+                return parts.join(', ') || 'All Stopped';
+            })()
         }
     ];
 

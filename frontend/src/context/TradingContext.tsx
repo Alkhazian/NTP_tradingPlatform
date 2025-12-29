@@ -44,14 +44,19 @@ export interface Trade {
 export interface StrategyStatus {
     name: string;
     active: boolean;
+    status: string; // "RUNNING", "REDUCE_ONLY", "STOPPED", etc.
     config: Record<string, any>;
     pnl?: number;
+    error_count?: number;
 }
 
 interface TradingContextType {
     status: SystemStatus;
     enableStrategy: (name: string) => Promise<void>;
-    disableStrategy: (name: string) => Promise<void>;
+    disableStrategy: (name: string, force?: boolean) => Promise<void>;
+    pauseStrategy: (name: string) => Promise<void>;
+    resumeStrategy: (name: string) => Promise<void>;
+    stopAllStrategies: () => Promise<void>;
     updateStrategyConfig: (name: string, config: any) => Promise<void>;
 }
 
@@ -102,13 +107,14 @@ export const TradingProvider = ({ children }: { children: ReactNode }) => {
 
                     // Transform strategies from object to array format
                     // Backend: { "DummyStrategy": { status: "RUNNING", config: {...}, pnl: 0 } }
-                    // Frontend expects: [{ name: "DummyStrategy", active: true, config: {...}, pnl: 0 }]
                     if (data.strategies && typeof data.strategies === 'object' && !Array.isArray(data.strategies)) {
                         data.strategies = Object.entries(data.strategies).map(([name, stratData]: [string, any]) => ({
                             name,
                             active: stratData.status === 'RUNNING',
+                            status: stratData.status,
                             config: stratData.config || {},
-                            pnl: stratData.pnl || 0
+                            pnl: stratData.pnl || 0,
+                            error_count: stratData.error_count || 0
                         }));
                     }
 
@@ -144,9 +150,34 @@ export const TradingProvider = ({ children }: { children: ReactNode }) => {
         }
     };
 
-    const disableStrategy = async (name: string) => {
+    const disableStrategy = async (name: string, force: boolean = false) => {
         try {
-            await fetch(`/api/strategies/${name}/stop`, { method: 'POST' });
+            const url = `/api/strategies/${name}/stop${force ? '?force=true' : ''}`;
+            await fetch(url, { method: 'POST' });
+        } catch (e) {
+            console.error(e);
+        }
+    };
+
+    const pauseStrategy = async (name: string) => {
+        try {
+            await fetch(`/api/strategies/${name}/pause`, { method: 'POST' });
+        } catch (e) {
+            console.error(e);
+        }
+    };
+
+    const resumeStrategy = async (name: string) => {
+        try {
+            await fetch(`/api/strategies/${name}/resume`, { method: 'POST' });
+        } catch (e) {
+            console.error(e);
+        }
+    };
+
+    const stopAllStrategies = async () => {
+        try {
+            await fetch('/api/strategies/stop_all', { method: 'POST' });
         } catch (e) {
             console.error(e);
         }
@@ -165,7 +196,15 @@ export const TradingProvider = ({ children }: { children: ReactNode }) => {
     };
 
     return (
-        <TradingContext.Provider value={{ status, enableStrategy, disableStrategy, updateStrategyConfig }}>
+        <TradingContext.Provider value={{
+            status,
+            enableStrategy,
+            disableStrategy,
+            pauseStrategy,
+            resumeStrategy,
+            stopAllStrategies,
+            updateStrategyConfig
+        }}>
             {children}
         </TradingContext.Provider>
     );

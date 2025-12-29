@@ -30,7 +30,8 @@ services:
       - ib-gateway
     networks:
       - ntd-network
-
+    volumes:
+      - ./backend/app:/app/app
   frontend:
     build: ./frontend
     container_name: ntd-frontend

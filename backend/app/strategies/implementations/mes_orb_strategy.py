@@ -40,61 +40,50 @@ class MesOrbStrategy(BaseStrategy):
         self.entry_order = None
         self.position_id = None
 
-    async def on_start(self):
-        # Note: on_start is async in our base implementation if we use async load_state?
+    def on_start(self):
         # Nautilus `on_start` is synchronous. 
-        # But we made `load_state` async.
-        # We should use `self.clock.schedule` or run it synchronously if possible, 
-        # OR better: run `await strategy.load_state()` in the Manager AFTER init, BEFORE adding to node.
-        # I already did this in Manager: `await strategy.load_state()`.
-        # So here we just access `self.state`.
-        
+        # The Manager loaded the state into self.user_state.
         super().on_start()
         self.subscribe_bars(self.bar_type)
         
+        # Subscribe to daily reset clock (e.g., 09:00 ET for reset)
+        # Assuming we want to reset BEFORE the session starts
+        from nautilus_trader.model.enums import TimeUnit
+        # self.subscribe_clock(time(9, 0)) # Simplified, in real use might need timezone handling
+        
         # Restore daily counters
-        self.daily_trades = self.state.get("daily_trades", 0)
-        self.last_reset_date = self.state.get("last_reset_date", "")
+        self.daily_trades = self.user_state.get("daily_trades", 0)
+        self.last_reset_date = self.user_state.get("last_reset_date", "")
         
         current_date = datetime.now().strftime("%Y-%m-%d")
         if self.last_reset_date != current_date:
-            self.daily_trades = 0
-            self.last_reset_date = current_date
-            self.state["daily_trades"] = 0
-            self.state["last_reset_date"] = current_date
-            # We can't await save_state here easily if it's async and we are in sync on_start.
-            # But the Manager loaded the state. 
-            # We will save state on first bar or trade.
+            self._reset_daily_state(current_date)
             
-        self.log.info(f"MES ORB Strategy Started. Daily Trades: {self.daily_trades}. Checking for existing positions...")
-        
-        # RECOVERY: Check if we already have a position (Reconciliation)
-        # Note: self.portfolio is available.
-        for pos in self.portfolio.positions.values():
-            if pos.instrument_id == self.instrument_id and not pos.is_closed:
-                self.log.info(f"Recovered active position: {pos}")
-                # We should assume we are "in trade"
-                # For this simple strategy, just knowing we have a position might be enough 
-                # to trigger the 'exit' logic in on_bar.
+        self.log.info(f"MES ORB Strategy Started. Daily Trades: {self.daily_trades}. Mode: {self.mode.value}")
+
+    def _reset_daily_state(self, current_date: str):
+        """Resets strategy state for a new trading day."""
+        self.daily_trades = 0
+        self.orb_high = None
+        self.orb_low = None
+        self.orb_complete = False
+        self.last_reset_date = current_date
+        self.user_state["daily_trades"] = 0
+        self.user_state["last_reset_date"] = current_date
+        self.user_state["orb_high"] = None
+        self.user_state["orb_low"] = None
+        self.log.info(f"Daily reset performed for {current_date}")
     
     def on_bar(self, bar: Bar):
+        from app.strategies.base import StrategyMode
+        # 0. Mode checks
+        if self.mode in [StrategyMode.STOPPED, StrategyMode.PAUSED, StrategyMode.ERROR]:
+            return
+
         # Ensure we are in the session
         bar_time = datetime.fromtimestamp(bar.ts_event / 1e9).time()
         
-        # 0. Daily Reset Check (if running continuously)
-        current_date_str = datetime.now().strftime("%Y-%m-%d")
-        if self.last_reset_date != current_date_str:
-             self.daily_trades = 0
-             self.last_reset_date = current_date_str
-             self.state["daily_trades"] = 0
-             self.state["last_reset_date"] = current_date_str
-             # self.save_state() # Hard to await in sync callback. 
-             # Use ensure_future or fire-and-forget?
-             # For MVP, we'll try to rely on trade event updates or assume short run.
-             # Ideally BaseStrategy `save_state` should be sync or scheduled.
-             # Nautilus `clock.schedule` takes a callback.
-        
-        # 1. ORB Calculation Phase
+        # 1. ORB Calculation Phase (Always run to keep state synced)
         if bar_time >= self.session_start and bar_time < self.orb_end_time:
             if self.orb_high is None or bar.high > self.orb_high:
                 self.orb_high = bar.high
@@ -111,67 +100,50 @@ class MesOrbStrategy(BaseStrategy):
         if not self.orb_complete:
             return
 
-        # 3. Trading Logic
-        # Check if we have a position
-        has_position = False
-        for pos in self.portfolio.positions.values():
-            if pos.instrument_id == self.instrument_id and not pos.is_closed:
-                has_position = True
-                break
+        # 3. Position Management
+        has_position = self.portfolio.is_net_pos(self.instrument_id)
 
         if has_position:
-             # Manage Position (Exit?)
+             # Manage Position (Trailing Stops, etc.)
+             # We allow this logic even in REDUCE_ONLY mode
              pass
         else:
              # Entry Logic
+             # Skip if in REDUCE_ONLY or STOPPING mode
+             if self.mode in [StrategyMode.REDUCE_ONLY, StrategyMode.STOPPING]:
+                 return
+
              # Check constraints
              if self.daily_trades >= 1:
                  return
 
-             # Breakout Logic Implementation (Simple)
+             # Breakout Logic implementation
              if bar.close > self.orb_high:
-                 # BUY
-                 self.log.info("ORB Breakout UP - Entering LONG")
-                 order = self.order_factory.market(
-                     instrument_id=self.instrument_id,
-                     order_side=OrderSide.BUY,
-                     quantity=self.qty,
-                 )
-                 self.submit_order(order)
-                 
-                 self.daily_trades += 1
-                 self.state["daily_trades"] = self.daily_trades
-                 # Fire and forget save
-                 # asyncio.create_task(self.save_state()) 
-                 # Since we handle redis in async manager, we need a way to save.
-                 # Let's rely on the strategy being stopped saving state? 
-                 # Or just define save_state as sync but using a background loop?
-                 # Custom strategies in Nautilus run in Cython loops sometimes, strictly sync.
-                 # Using `asyncio.create_task` is standard for IO.
-                 import asyncio
-                 asyncio.create_task(self.save_state())
-                 
+                 self._enter_position(OrderSide.BUY, "UP")
              elif bar.close < self.orb_low:
-                 # SELL
-                 self.log.info("ORB Breakout DOWN - Entering SHORT")
-                 order = self.order_factory.market(
-                     instrument_id=self.instrument_id,
-                     order_side=OrderSide.SELL,
-                     quantity=self.qty,
-                 )
-                 self.submit_order(order)
-                 
-                 self.daily_trades += 1
-                 self.state["daily_trades"] = self.daily_trades
-                 import asyncio
-                 asyncio.create_task(self.save_state())
+                 self._enter_position(OrderSide.SELL, "DOWN")
+
+    def _enter_position(self, side: OrderSide, direction: str):
+        self.log.info(f"ORB Breakout {direction} - Entering {side.name}")
+        order = self.order_factory.market(
+            instrument_id=self.instrument_id,
+            order_side=side,
+            quantity=self.qty,
+        )
+        self.submit_order(order)
+        
+        self.daily_trades += 1
+        self.user_state["daily_trades"] = self.daily_trades
+        import asyncio
+        asyncio.create_task(self.save_state())
 
     def on_stop(self):
-        # We cannot await here easily either.
-        # But we can try to save state.
-        import asyncio
-        # This might fail if loop is closing.
-        # Ideally manager calls save_state before stopping.
+        """Cleanup on stop."""
+        self.log.info("Cleaning up strategy resources...")
+        if self.mode == StrategyMode.STOPPING:
+             # Potentially more aggressive cleanup if not just a normal stop
+             pass
         super().on_stop()
         self.cancel_all_orders(self.instrument_id)
-        self.close_all_positions(self.instrument_id)
+        # Note: Position closure depends on if it was a force stop or manual
+        # In this implementation, we allow positions to remain unless manager forced them.

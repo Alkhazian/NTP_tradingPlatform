@@ -52,7 +52,7 @@ async def startup_event():
     await redis_client.connect()
     logger.info("Starting System Engine...")
     try:
-        await system_engine.start()
+        await system_engine.start(pre_build_hook=strategy_manager.add_all_to_node)
         logger.info("System Engine started successfully")
     except Exception as e:
         logger.error(f"Failed to start System Engine: {e}")
@@ -150,15 +150,29 @@ async def get_strategies():
 async def start_strategy(name: str):
     success = await strategy_manager.start_strategy(name)
     if not success:
-        raise HTTPException(status_code=404, detail="Strategy not found")
+        raise HTTPException(status_code=400, detail=f"Failed to start strategy {name}. Check logs/status for errors.")
     return {"status": "started", "name": name}
 
+@app.post("/strategies/{name}/pause")
+async def pause_strategy(name: str):
+    success = await strategy_manager.pause_strategy(name)
+    if not success:
+        raise HTTPException(status_code=404, detail="Strategy not found or cannot be paused")
+    return {"status": "paused", "name": name}
+
+@app.post("/strategies/{name}/resume")
+async def resume_strategy(name: str):
+    success = await strategy_manager.resume_strategy(name)
+    if not success:
+        raise HTTPException(status_code=404, detail="Strategy not found or cannot be resumed")
+    return {"status": "resumed", "name": name}
+
 @app.post("/strategies/{name}/stop")
-async def stop_strategy(name: str):
-    success = await strategy_manager.stop_strategy(name)
+async def stop_strategy(name: str, force: bool = False):
+    success = await strategy_manager.stop_strategy(name, force=force)
     if not success:
         raise HTTPException(status_code=404, detail="Strategy not found")
-    return {"status": "stopped", "name": name}
+    return {"status": "stopped", "name": name, "force": force}
 
 @app.post("/strategies/stop_all")
 async def stop_all_strategies():
