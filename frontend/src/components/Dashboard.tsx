@@ -5,6 +5,7 @@ import { StatCard } from './ui/stat-card';
 import { SystemStatusPanel } from './ui/status-indicator';
 import { Header, Sidebar, SidebarItem } from './layout';
 import { Icons } from './ui/icons';
+import { StrategyLogTerminal, StrategyStatusPanel } from './StrategyLogTerminal';
 
 interface SystemStatus {
     connected: boolean;
@@ -38,9 +39,30 @@ interface SystemStatus {
 
 interface SpxStraddleConfig {
     target_premium: number;
+    max_premium_deviation: number;
     price_offset: number;
     timeout_seconds: number;
     enabled: boolean;
+}
+
+interface StrategyLogEntry {
+    timestamp: string;
+    step: string;
+    message: string;
+    data: Record<string, any>;
+    level: 'info' | 'warning' | 'error' | 'success';
+}
+
+interface StrategyRuntime {
+    positions_opened?: boolean;
+    entry_underlying_price?: number | null;
+    call_exit_target?: number | null;
+    put_exit_target?: number | null;
+    current_spx_price?: number;
+    distance_to_call_exit?: number | null;
+    distance_to_put_exit?: number | null;
+    call_closed?: boolean;
+    put_closed?: boolean;
 }
 
 interface Position {
@@ -81,11 +103,15 @@ export default function Dashboard() {
     // Strategy configuration state
     const [spxStraddleConfig, setSpxStraddleConfig] = useState<SpxStraddleConfig>({
         target_premium: 2.0,
+        max_premium_deviation: 0.50,
         price_offset: 4.0,
         timeout_seconds: 300,
         enabled: false,
     });
     const [strategyLoading, setStrategyLoading] = useState(false);
+    const [testLoading, setTestLoading] = useState(false);
+    const [strategyLogs, setStrategyLogs] = useState<StrategyLogEntry[]>([]);
+    const [strategyRuntime, setStrategyRuntime] = useState<StrategyRuntime>({});
 
     // Update time every second
     useEffect(() => {
@@ -631,7 +657,8 @@ export default function Dashboard() {
                                                             onClick={async () => {
                                                                 setStrategyLoading(true);
                                                                 try {
-                                                                    const apiUrl = import.meta.env.VITE_API_URL || '';
+                                                                    const baseUrl = import.meta.env.VITE_API_URL || '';
+                                                                    const apiUrl = baseUrl === '/' ? '' : baseUrl;
                                                                     // First update config
                                                                     await fetch(`${apiUrl}/api/strategies/spx-straddle/config?target_premium=${spxStraddleConfig.target_premium}&price_offset=${spxStraddleConfig.price_offset}&timeout_seconds=${spxStraddleConfig.timeout_seconds}`, {
                                                                         method: 'POST',
@@ -661,7 +688,8 @@ export default function Dashboard() {
                                                             onClick={async () => {
                                                                 setStrategyLoading(true);
                                                                 try {
-                                                                    const apiUrl = import.meta.env.VITE_API_URL || '';
+                                                                    const baseUrl = import.meta.env.VITE_API_URL || '';
+                                                                    const apiUrl = baseUrl === '/' ? '' : baseUrl;
                                                                     await fetch(`${apiUrl}/api/strategies/spx-straddle/stop`, {
                                                                         method: 'POST',
                                                                     });
@@ -688,8 +716,54 @@ export default function Dashboard() {
                                                             NautilusTrader must be connected to start strategies
                                                         </p>
                                                     )}
+
+                                                    {/* Test Strategy Button */}
+                                                    <button
+                                                        onClick={async () => {
+                                                            setTestLoading(true);
+                                                            try {
+                                                                const baseUrl = import.meta.env.VITE_API_URL || '';
+                                                                const apiUrl = baseUrl === '/' ? '' : baseUrl;
+                                                                const response = await fetch(`${apiUrl}/api/strategies/spx-straddle/test`, {
+                                                                    method: 'POST',
+                                                                });
+                                                                const data = await response.json();
+                                                                if (data.logs) {
+                                                                    setStrategyLogs(data.logs);
+                                                                }
+                                                            } catch (err) {
+                                                                console.error('Failed to run test:', err);
+                                                            } finally {
+                                                                setTestLoading(false);
+                                                            }
+                                                        }}
+                                                        disabled={testLoading}
+                                                        className="w-full py-2 px-4 rounded-xl bg-white/5 border border-white/10 hover:bg-white/10 text-muted-foreground hover:text-white font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                                                    >
+                                                        {testLoading ? (
+                                                            <Icons.activity className="w-4 h-4 animate-spin" />
+                                                        ) : (
+                                                            <Icons.barChart className="w-4 h-4" />
+                                                        )}
+                                                        Test Strategy (Dry Run)
+                                                    </button>
                                                 </div>
                                             </div>
+                                        </div>
+
+                                        {/* Strategy Status Panel */}
+                                        {status.strategies?.spx_opening_straddle?.active && (
+                                            <div className="mt-6 pt-6 border-t border-white/10">
+                                                <StrategyStatusPanel runtime={strategyRuntime} />
+                                            </div>
+                                        )}
+
+                                        {/* Log Terminal */}
+                                        <div className="mt-6 pt-6 border-t border-white/10">
+                                            <StrategyLogTerminal
+                                                logs={strategyLogs}
+                                                onClear={() => setStrategyLogs([])}
+                                            />
                                         </div>
                                     </CardContent>
                                 </Card>

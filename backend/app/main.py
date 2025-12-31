@@ -151,3 +151,22 @@ async def stop_spx_straddle():
     """Stop the SpxOpeningStraddle strategy."""
     success = nautilus_manager.stop_spx_straddle_strategy()
     return {"success": success}
+
+
+@app.post("/api/strategies/spx-straddle/test")
+async def test_spx_straddle():
+    """Run strategy health test (dry run)."""
+    result = nautilus_manager.run_spx_straddle_test()
+    return result
+
+
+@app.get("/api/strategies/spx-straddle/status")
+async def get_spx_straddle_status():
+    """Get current strategy runtime status."""
+    return nautilus_manager.get_strategy_status()
+
+
+@app.get("/api/strategies/spx-straddle/logs")
+async def get_spx_straddle_logs():
+    """Get strategy logs for UI display."""
+    return {"logs": nautilus_manager.get_strategy_logs()}

@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from nautilus_trader.adapters.interactive_brokers.config import (
     InteractiveBrokersDataClientConfig,
     InteractiveBrokersExecClientConfig,
@@ -56,11 +56,14 @@ class NautilusManager:
         self._strategy_configs: Dict[str, Any] = {}
         self._spx_straddle_config = {
             "target_premium": 2.0,
+            "max_premium_deviation": 0.50,
             "price_offset": 4.0,
             "timeout_seconds": 300,
             "entry_retry_seconds": 10,
             "enabled": False,
         }
+        self._strategy_logs: List[Dict[str, Any]] = []
+        self._strategy_status: Dict[str, Any] = {}
 
     async def start(self):
         """Initialize and start the NautilusTrader TradingNode"""
@@ -455,6 +458,8 @@ class NautilusManager:
                 "spx_opening_straddle": {
                     "config": self._spx_straddle_config,
                     "active": "spx_opening_straddle" in self._strategies,
+                    "logs": self._strategy_logs[-50:],  # Last 50 logs
+                    "runtime": self.get_strategy_status() if "spx_opening_straddle" in self._strategies else {},
                 }
             },
         }
@@ -519,6 +524,7 @@ class NautilusManager:
             config = SpxOpeningConfig(
                 spx_instrument_id="SPX.CBOE",
                 target_premium=self._spx_straddle_config["target_premium"],
+                max_premium_deviation=self._spx_straddle_config.get("max_premium_deviation", 0.50),
                 price_offset=self._spx_straddle_config["price_offset"],
                 timeout_seconds=self._spx_straddle_config["timeout_seconds"],
                 entry_retry_seconds=self._spx_straddle_config.get("entry_retry_seconds", 10),
@@ -562,3 +568,77 @@ class NautilusManager:
         except Exception as e:
             logger.error(f"Failed to stop SpxOpeningStraddle strategy: {e}")
             return False
+
+    def run_spx_straddle_test(self) -> Dict[str, Any]:
+        """
+        Run a dry-run health test of the SpxOpeningStraddle strategy.
+        
+        Returns
+        -------
+        dict
+            Test results with logs.
+        """
+        if not self.node:
+            return {
+                "success": False,
+                "error": "TradingNode not initialized",
+                "logs": []
+            }
+        
+        try:
+            # Create a test-mode strategy instance
+            config = SpxOpeningConfig(
+                spx_instrument_id="SPX.CBOE",
+                target_premium=self._spx_straddle_config["target_premium"],
+                max_premium_deviation=self._spx_straddle_config.get("max_premium_deviation", 0.50),
+                price_offset=self._spx_straddle_config["price_offset"],
+                timeout_seconds=self._spx_straddle_config["timeout_seconds"],
+                entry_retry_seconds=self._spx_straddle_config.get("entry_retry_seconds", 10),
+                test_mode=True,
+            )
+            
+            # Create test strategy with access to node's cache/clock
+            test_strategy = SpxOpeningStraddle(config=config)
+            
+            # If we have a running strategy, use its cache context
+            if "spx_opening_straddle" in self._strategies:
+                running_strategy = self._strategies["spx_opening_straddle"]
+                # Run health test on the running strategy
+                logs = running_strategy.run_health_test()
+            else:
+                # Add strategy temporarily for testing
+                self.node.trader.add_strategy(test_strategy)
+                logs = test_strategy.run_health_test()
+                # We don't remove it - NautilusTrader manages strategy lifecycle
+            
+            self._strategy_logs = logs
+            
+            return {
+                "success": True,
+                "logs": logs
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to run strategy test: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "logs": []
+            }
+
+    def get_strategy_logs(self) -> List[Dict[str, Any]]:
+        """Get buffered strategy logs for UI consumption."""
+        return self._strategy_logs.copy()
+
+    def get_strategy_status(self) -> Dict[str, Any]:
+        """Get current strategy runtime status."""
+        status = {
+            "enabled": self._spx_straddle_config.get("enabled", False),
+            "config": self._spx_straddle_config.copy(),
+        }
+        
+        if "spx_opening_straddle" in self._strategies:
+            strategy = self._strategies["spx_opening_straddle"]
+            status.update(strategy.get_strategy_status())
+        
+        return status
