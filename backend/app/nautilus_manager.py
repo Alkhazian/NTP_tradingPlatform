@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from typing import Optional
+from typing import Optional, Dict, Any
 from nautilus_trader.adapters.interactive_brokers.config import (
     InteractiveBrokersDataClientConfig,
     InteractiveBrokersExecClientConfig,
@@ -14,6 +14,10 @@ from nautilus_trader.adapters.interactive_brokers.factories import (
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import AccountId, Venue
+from nautilus_trader.trading.strategy import Strategy
+
+# Strategy imports
+from .strategies.spx_opening_straddle import SpxOpeningStraddle, SpxOpeningConfig
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +50,17 @@ class NautilusManager:
         self._leverage = "1.0"
         self._margin_usage_percent = "0.0"
         self._recent_trades = []
+        
+        # Strategy management
+        self._strategies: Dict[str, Strategy] = {}
+        self._strategy_configs: Dict[str, Any] = {}
+        self._spx_straddle_config = {
+            "target_premium": 2.0,
+            "price_offset": 4.0,
+            "timeout_seconds": 300,
+            "entry_retry_seconds": 10,
+            "enabled": False,
+        }
 
     async def start(self):
         """Initialize and start the NautilusTrader TradingNode"""
@@ -435,9 +450,115 @@ class NautilusManager:
             "net_exposure": self._net_exposure,
             "leverage": self._leverage,
             "recent_trades": self._recent_trades,
+            # Strategy status
+            "strategies": {
+                "spx_opening_straddle": {
+                    "config": self._spx_straddle_config,
+                    "active": "spx_opening_straddle" in self._strategies,
+                }
+            },
         }
 
     async def update_status(self):
         """Update account state - call periodically for fresh data"""
         await self._update_account_state()
         self._recent_trades = await self._get_recent_trades(hours=24)
+
+    def update_spx_straddle_config(
+        self,
+        target_premium: Optional[float] = None,
+        price_offset: Optional[float] = None,
+        timeout_seconds: Optional[int] = None,
+    ) -> dict:
+        """
+        Update the SpxOpeningStraddle strategy configuration.
+        
+        Parameters
+        ----------
+        target_premium : float, optional
+            Target premium for option selection.
+        price_offset : float, optional
+            Price offset for exit triggers.
+        timeout_seconds : int, optional
+            Hard exit timeout in seconds.
+            
+        Returns
+        -------
+        dict
+            Updated configuration.
+        """
+        if target_premium is not None:
+            self._spx_straddle_config["target_premium"] = target_premium
+        if price_offset is not None:
+            self._spx_straddle_config["price_offset"] = price_offset
+        if timeout_seconds is not None:
+            self._spx_straddle_config["timeout_seconds"] = timeout_seconds
+            
+        logger.info(f"SpxOpeningStraddle config updated: {self._spx_straddle_config}")
+        return self._spx_straddle_config
+
+    def start_spx_straddle_strategy(self) -> bool:
+        """
+        Start the SpxOpeningStraddle strategy.
+        
+        Returns
+        -------
+        bool
+            True if strategy started successfully, False otherwise.
+        """
+        if not self.node:
+            logger.error("Cannot start strategy: TradingNode not initialized")
+            return False
+            
+        if "spx_opening_straddle" in self._strategies:
+            logger.warning("SpxOpeningStraddle strategy already running")
+            return False
+            
+        try:
+            # Create strategy config
+            config = SpxOpeningConfig(
+                spx_instrument_id="SPX.CBOE",
+                target_premium=self._spx_straddle_config["target_premium"],
+                price_offset=self._spx_straddle_config["price_offset"],
+                timeout_seconds=self._spx_straddle_config["timeout_seconds"],
+                entry_retry_seconds=self._spx_straddle_config.get("entry_retry_seconds", 10),
+            )
+            
+            # Create and add strategy
+            strategy = SpxOpeningStraddle(config=config)
+            self.node.trader.add_strategy(strategy)
+            self._strategies["spx_opening_straddle"] = strategy
+            self._spx_straddle_config["enabled"] = True
+            
+            logger.info("SpxOpeningStraddle strategy started successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to start SpxOpeningStraddle strategy: {e}")
+            return False
+
+    def stop_spx_straddle_strategy(self) -> bool:
+        """
+        Stop the SpxOpeningStraddle strategy.
+        
+        Returns
+        -------
+        bool
+            True if strategy stopped successfully, False otherwise.
+        """
+        if "spx_opening_straddle" not in self._strategies:
+            logger.warning("SpxOpeningStraddle strategy not running")
+            return False
+            
+        try:
+            strategy = self._strategies["spx_opening_straddle"]
+            strategy.stop()
+            del self._strategies["spx_opening_straddle"]
+            self._spx_straddle_config["enabled"] = False
+            
+            logger.info("SpxOpeningStraddle strategy stopped successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to stop SpxOpeningStraddle strategy: {e}")
+            return False

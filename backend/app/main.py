@@ -114,3 +114,40 @@ async def websocket_endpoint(websocket: WebSocket):
 async def health():
     return {"status": "ok"}
 
+
+# Strategy API endpoints
+
+@app.get("/api/strategies/spx-straddle/config")
+async def get_spx_straddle_config():
+    """Get the current SpxOpeningStraddle configuration."""
+    status = nautilus_manager.get_status()
+    return status.get("strategies", {}).get("spx_opening_straddle", {})
+
+
+@app.post("/api/strategies/spx-straddle/config")
+async def update_spx_straddle_config(
+    target_premium: float = None,
+    price_offset: float = None,
+    timeout_seconds: int = None,
+):
+    """Update the SpxOpeningStraddle configuration."""
+    config = nautilus_manager.update_spx_straddle_config(
+        target_premium=target_premium,
+        price_offset=price_offset,
+        timeout_seconds=timeout_seconds,
+    )
+    return {"success": True, "config": config}
+
+
+@app.post("/api/strategies/spx-straddle/start")
+async def start_spx_straddle():
+    """Start the SpxOpeningStraddle strategy."""
+    success = nautilus_manager.start_spx_straddle_strategy()
+    return {"success": success}
+
+
+@app.post("/api/strategies/spx-straddle/stop")
+async def stop_spx_straddle():
+    """Stop the SpxOpeningStraddle strategy."""
+    success = nautilus_manager.stop_spx_straddle_strategy()
+    return {"success": success}
