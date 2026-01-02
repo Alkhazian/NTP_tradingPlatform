@@ -110,6 +110,24 @@ async def websocket_endpoint(websocket: WebSocket):
         if pubsub:
             await pubsub.close()
 
+@app.post("/strategy/start")
+async def start_strategy():
+    try:
+        nautilus_manager.start_spx_strategy()
+        return {"status": "ok", "message": "Strategy start requested"}
+    except Exception as e:
+        logger.error(f"Error starting strategy: {e}")
+        return {"status": "error", "message": str(e)}
+
+@app.post("/strategy/stop")
+async def stop_strategy():
+    try:
+        nautilus_manager.stop_spx_strategy()
+        return {"status": "ok", "message": "Strategy stop requested"}
+    except Exception as e:
+        logger.error(f"Error stopping strategy: {e}")
+        return {"status": "error", "message": str(e)}
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}

@@ -27,6 +27,11 @@ interface SystemStatus {
     net_exposure?: string;
     leverage?: string;
     recent_trades?: Trade[];
+    strategy?: {
+        active: boolean;
+        price: number;
+        logs: string[];
+    };
 }
 
 interface Position {
@@ -137,6 +142,26 @@ export default function Dashboard() {
         }
     ];
 
+    const handleStartStrategy = async () => {
+        try {
+            const apiUrl = import.meta.env.VITE_API_URL || '';
+            const baseUrl = apiUrl.startsWith('http') ? apiUrl : window.location.origin;
+            await fetch(`${baseUrl}/strategy/start`, { method: 'POST' });
+        } catch (error) {
+            console.error('Failed to start strategy:', error);
+        }
+    };
+
+    const handleStopStrategy = async () => {
+        try {
+            const apiUrl = import.meta.env.VITE_API_URL || '';
+            const baseUrl = apiUrl.startsWith('http') ? apiUrl : window.location.origin;
+            await fetch(`${baseUrl}/strategy/stop`, { method: 'POST' });
+        } catch (error) {
+            console.error('Failed to stop strategy:', error);
+        }
+    };
+
     return (
         <div className="min-h-screen bg-background">
             {/* Sidebar */}
@@ -211,6 +236,68 @@ export default function Dashboard() {
                             icon="activity"
                             subtitle="Active trades"
                         />
+                    </section>
+
+                    {/* Strategies Section */}
+                    <section>
+                        <Card variant="glass">
+                            <CardHeader className="flex flex-row items-center justify-between">
+                                <div>
+                                    <CardTitle>Strategies</CardTitle>
+                                    <p className="text-sm text-muted-foreground mt-1">
+                                        Automated trading strategies
+                                    </p>
+                                </div>
+                            </CardHeader>
+                            <CardContent>
+                                <div className="p-4 rounded-xl bg-white/5 border border-white/10">
+                                    <div className="flex items-center justify-between mb-4">
+                                        <div>
+                                            <h3 className="text-lg font-bold">SPX 0DTE Opening Straddle</h3>
+                                            <p className="text-sm text-muted-foreground">Automated SPX Straddle Execution</p>
+                                        </div>
+                                        <div className="flex items-center gap-4">
+                                            <div className="text-right">
+                                                <p className="text-xs text-muted-foreground">Current Price</p>
+                                                <p className="text-xl font-mono font-bold text-cyan-400">
+                                                    {status.strategy?.price ? status.strategy.price.toFixed(2) : "0.00"}
+                                                </p>
+                                            </div>
+                                            <div className="flex gap-2">
+                                                <button
+                                                    onClick={handleStartStrategy}
+                                                    disabled={status.strategy?.active}
+                                                    className={`px-4 py-2 rounded-lg font-bold transition-all ${status.strategy?.active ? 'bg-white/10 text-white/50 cursor-not-allowed' : 'bg-emerald-500 hover:bg-emerald-600 text-white'}`}
+                                                >
+                                                    Start
+                                                </button>
+                                                <button
+                                                    onClick={handleStopStrategy}
+                                                    disabled={!status.strategy?.active}
+                                                    className={`px-4 py-2 rounded-lg font-bold transition-all ${!status.strategy?.active ? 'bg-white/10 text-white/50 cursor-not-allowed' : 'bg-red-500 hover:bg-red-600 text-white'}`}
+                                                >
+                                                    Stop
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Strategy Logs */}
+                                    <div className="mt-4">
+                                        <h4 className="text-xs font-semibold text-muted-foreground mb-2">STRATEGY LOGS</h4>
+                                        <div className="bg-black/50 rounded-lg p-3 h-48 overflow-y-auto font-mono text-xs text-white/80 space-y-1">
+                                            {status.strategy?.logs && status.strategy.logs.length > 0 ? (
+                                                [...status.strategy.logs].reverse().map((log, i) => (
+                                                    <div key={i} className="border-b border-white/5 pb-1 mb-1 last:border-0">{log}</div>
+                                                ))
+                                            ) : (
+                                                <div className="text-muted-foreground italic">No logs available...</div>
+                                            )}
+                                        </div>
+                                    </div>
+                                </div>
+                            </CardContent>
+                        </Card>
                     </section>
 
                     {/* Charts and Status */}

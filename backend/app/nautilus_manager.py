@@ -6,6 +6,7 @@ from nautilus_trader.adapters.interactive_brokers.config import (
     InteractiveBrokersDataClientConfig,
     InteractiveBrokersExecClientConfig,
     InteractiveBrokersInstrumentProviderConfig,
+    IBContract,
 )
 from nautilus_trader.adapters.interactive_brokers.factories import (
     InteractiveBrokersLiveDataClientFactory,
@@ -13,7 +14,8 @@ from nautilus_trader.adapters.interactive_brokers.factories import (
 )
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.live.node import TradingNode
-from nautilus_trader.model.identifiers import AccountId, Venue
+from nautilus_trader.model.identifiers import InstrumentId, AccountId, Venue
+from app.strategies.implementations.spx_0dte_strategy import Spx0DteStraddleStrategy, Spx0DteStraddleStrategyConfig
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,8 @@ class NautilusManager:
         self._leverage = "1.0"
         self._margin_usage_percent = "0.0"
         self._recent_trades = []
+        self._strategy: Optional[Spx0DteStraddleStrategy] = None
+        self._strategy_active = False
 
     async def start(self):
         """Initialize and start the NautilusTrader TradingNode"""
@@ -66,11 +70,20 @@ class NautilusManager:
                 f"Initializing NautilusTrader with IB Gateway at {self.host}:{self.port}"
             )
 
+            # Configure instrument provider
+            ib_instrument_config = InteractiveBrokersInstrumentProviderConfig(
+                load_contracts=(
+                     IBContract(secType="IND", symbol="SPX", exchange="CBOE", currency="USD"),
+                ),
+                load_all=False,
+            )
+
             # Configure Interactive Brokers data client
             ib_data_config = InteractiveBrokersDataClientConfig(
                 ibg_host=self.host,
                 ibg_port=self.port,
                 ibg_client_id=101,
+                instrument_provider=ib_instrument_config,
             )
 
             # Configure Interactive Brokers execution client
@@ -79,11 +92,6 @@ class NautilusManager:
                 ibg_port=self.port,
                 ibg_client_id=101,
                 account_id=account_id,
-            )
-
-            # Configure instrument provider
-            ib_instrument_config = InteractiveBrokersInstrumentProviderConfig(
-                load_all=False,
             )
 
             # Create TradingNode configuration
@@ -273,31 +281,41 @@ class NautilusManager:
                     portfolio = self.node.portfolio
                     
                     # Total unrealized P&L
-                    if hasattr(portfolio, 'unrealized_pnls'):
-                        unrealized_pnls = portfolio.unrealized_pnls(None)  # None for all venues
-                        if unrealized_pnls:
-                            pnl_list = list(unrealized_pnls.values()) if hasattr(unrealized_pnls, 'values') else list(unrealized_pnls)
-                            if pnl_list:
-                                total_unrealized = sum(p.as_double() for p in pnl_list if p is not None)
-                                self._total_unrealized_pnl = f"{total_unrealized:.2f} {self._account_currency}"
+                    # if hasattr(portfolio, 'unrealized_pnls'):
+                    #     try:
+                    #         # Fix: Iterate over venues instead of passing None
+                    #         total_unrealized = 0.0
+                    #         for venue in portfolio.venues:
+                    #             pnl = portfolio.unrealized_pnl(venue)
+                    #             if pnl:
+                    #                 total_unrealized += pnl.as_double()
+                    #         self._total_unrealized_pnl = f"{total_unrealized:.2f} {self._account_currency}"
+                    #     except Exception as e:
+                    #         pass
                     
                     # Total realized P&L (all time)
-                    if hasattr(portfolio, 'realized_pnls'):
-                        realized_pnls = portfolio.realized_pnls(None)
-                        if realized_pnls:
-                            pnl_list = list(realized_pnls.values()) if hasattr(realized_pnls, 'values') else list(realized_pnls)
-                            if pnl_list:
-                                total_realized = sum(p.as_double() for p in pnl_list if p is not None)
-                                self._total_realized_pnl = f"{total_realized:.2f} {self._account_currency}"
+                    # if hasattr(portfolio, 'realized_pnls'):
+                    #     try:
+                    #         total_realized = 0.0
+                    #         for venue in portfolio.venues:
+                    #             pnl = portfolio.realized_pnl(venue)
+                    #             if pnl:
+                    #                 total_realized += pnl.as_double()
+                    #         self._total_realized_pnl = f"{total_realized:.2f} {self._account_currency}"
+                    #     except Exception as e:
+                    #         pass
                     
                     # Net exposure
-                    if hasattr(portfolio, 'net_exposures'):
-                        net_exposures = portfolio.net_exposures(None)
-                        if net_exposures:
-                            exp_list = list(net_exposures.values()) if hasattr(net_exposures, 'values') else list(net_exposures)
-                            if exp_list:
-                                total_exposure = sum(e.as_double() for e in exp_list if e is not None)
-                                self._net_exposure = f"{abs(total_exposure):.2f} {self._account_currency}"
+                    # if hasattr(portfolio, 'net_exposures'):
+                    #     try:
+                    #         total_exposure = 0.0
+                    #         for venue in portfolio.venues:
+                    #             exp = portfolio.net_exposure(venue)
+                    #             if exp:
+                    #                 total_exposure += exp.as_double()
+                    #         self._net_exposure = f"{abs(total_exposure):.2f} {self._account_currency}"
+                    #     except Exception as e:
+                    #         pass
                     
                     # Leverage
                     if hasattr(account, 'leverages'):
@@ -401,6 +419,62 @@ class NautilusManager:
             logger.error(f"Error fetching recent trades: {e}", exc_info=True)
             return []
 
+    def start_spx_strategy(self):
+        """Start the SPX 0DTE Strategy"""
+        if not self.node or not self._connected:
+            logger.error("Cannot start strategy: Node not running")
+            return
+
+        if self._strategy_active:
+            logger.info("Strategy already active")
+            return
+
+        try:
+            # Check if instrument exists
+            instrument_id = InstrumentId.from_str("SPX.CBOE")
+            instrument = self.node.cache.instrument(instrument_id)
+            
+            # DEBUG: Log all instruments
+            all_instruments = [str(i.id) for i in self.node.cache.instruments()]
+            logger.info(f"Cache contains {len(all_instruments)} instruments: {all_instruments}")
+            
+            if not instrument:
+                # Try finding with different variant
+                logger.error(f"Instrument {instrument_id} not found")
+                # Try ^SPX
+                alt_id = InstrumentId.from_str("^SPX.CBOE")
+                if self.node.cache.instrument(alt_id):
+                    logger.info(f"Found alternative: {alt_id}")
+                    instrument_id = alt_id
+                else:
+                    return
+
+            config = Spx0DteStraddleStrategyConfig(
+                instrument_id=str(instrument_id),
+            )
+            self._strategy = Spx0DteStraddleStrategy(config=config)
+            
+            # Add and start strategy
+            self.node.trader.add_strategy(self._strategy)
+            self.node.trader.start_strategy(self._strategy.id)
+            
+            self._strategy_active = True
+            logger.info(f"SPX 0DTE Strategy started with {instrument_id}")
+        except Exception as e:
+            logger.error(f"Failed to start strategy: {e}", exc_info=True)
+
+    def stop_spx_strategy(self):
+        """Stop the SPX 0DTE Strategy"""
+        if not self._strategy or not self._strategy_active:
+            return
+
+        try:
+            self.node.trader.stop_strategy(self._strategy.id)
+            self._strategy_active = False
+            logger.info("SPX 0DTE Strategy stopped")
+        except Exception as e:
+             logger.error(f"Failed to stop strategy: {e}", exc_info=True)
+
     async def stop(self):
 
 
@@ -435,6 +509,11 @@ class NautilusManager:
             "net_exposure": self._net_exposure,
             "leverage": self._leverage,
             "recent_trades": self._recent_trades,
+            "strategy": {
+                "active": self._strategy_active,
+                "price": self._strategy.last_price if self._strategy else 0.0,
+                "logs": self._strategy.log_buffer if self._strategy else []
+            }
         }
 
     async def update_status(self):
