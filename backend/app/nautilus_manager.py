@@ -446,13 +446,20 @@ class NautilusManager:
                 if self.node.cache.instrument(alt_id):
                     logger.info(f"Found alternative: {alt_id}")
                     instrument_id = alt_id
+                    instrument = self.node.cache.instrument(alt_id)
                 else:
                     return
+
+            logger.info(f"Creating strategy with Instrument: {instrument}")
+            logger.info(f"Instrument details: symbol={instrument.id.symbol}, venue={instrument.id.venue}, id={instrument.id}")
 
             config = Spx0DteStraddleStrategyConfig(
                 instrument_id=str(instrument_id),
             )
+            logger.info(f"Strategy Config: {config}")
+            
             self._strategy = Spx0DteStraddleStrategy(config=config)
+            logger.info(f"Strategy instance created: {self._strategy}")
             
             # Add and start strategy
             self.node.trader.add_strategy(self._strategy)

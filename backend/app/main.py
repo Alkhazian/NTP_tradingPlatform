@@ -10,6 +10,10 @@ import json
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Increase verbosity for debugging
+logging.getLogger("nautilus_trader").setLevel(logging.DEBUG)
+# logging.getLogger("ibapi").setLevel(logging.DEBUG) # Very verbose, uncomment if needed
+
 app = FastAPI()
 
 app.add_middleware(
