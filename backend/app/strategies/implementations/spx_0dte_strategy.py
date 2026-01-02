@@ -19,10 +19,9 @@ class Spx0DteStraddleStrategy(Strategy):
         self.log(f"Target Instrument ID: {self.instrument_id}")
 
     def on_start(self):
-        self.log("Strategy start requested - calling subscribe_quote_ticks and subscribe_trade_ticks")
+        self.log("Strategy start requested - calling subscribe_quote_ticks")
         self.subscribe_quote_ticks(self.instrument_id)
-        self.subscribe_trade_ticks(self.instrument_id)
-        self.log(f"Subscribed to quote and trade ticks for {self.instrument_id}. Waiting for data...")
+        self.log(f"Subscribed to quote ticks for {self.instrument_id}. Waiting for data...")
 
     def on_trade_tick(self, tick: TradeTick):
         self.log(f"Received TradeTick: {tick}")
