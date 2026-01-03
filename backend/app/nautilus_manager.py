@@ -342,15 +342,14 @@ class NautilusManager:
             from datetime import datetime, timezone
             
             # Directly update strategy state
+            # Note: Indices don't have bid/ask, only Last Price
             self._spx_strategy._current_price = price
-            self._spx_strategy._last_bid = price - 0.50  # Simulated spread
-            self._spx_strategy._last_ask = price + 0.50
             self._spx_strategy._last_update_time = datetime.now(timezone.utc)
             self._spx_strategy._quote_tick_count += 1
             
             # Log the mock data
             self._spx_strategy._log_strategy(
-                f"MOCK DATA: price={price:.2f}, bid={price-0.50:.2f}, ask={price+0.50:.2f}",
+                f"MOCK DATA: Last Price={price:.2f}",
                 "DEBUG"
             )
             self._log_strategy_event(f"Injected mock price: {price:.2f}")

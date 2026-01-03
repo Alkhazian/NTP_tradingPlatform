@@ -153,9 +153,9 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
 
             <CardContent className="space-y-6">
                 {/* Price Display */}
-                <div className="grid gap-4 md:grid-cols-4">
+                <div className="grid gap-4 md:grid-cols-2">
                     {/* Current Price - Main Display */}
-                    <div className="md:col-span-2 p-5 rounded-xl bg-gradient-to-br from-cyan-500/10 to-blue-500/10 border border-cyan-500/20">
+                    <div className="p-5 rounded-xl bg-gradient-to-br from-cyan-500/10 to-blue-500/10 border border-cyan-500/20">
                         <div className="flex items-center justify-between">
                             <div>
                                 <p className="text-xs text-muted-foreground uppercase tracking-wider">SPX Index Price</p>
@@ -165,6 +165,9 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
                                 <p className="text-xs text-muted-foreground mt-1">
                                     {status.instrument_id || 'SPX.CBOE'}
                                 </p>
+                                <p className="text-xs text-muted-foreground mt-2">
+                                    Last Price (indices don't have bid/ask)
+                                </p>
                             </div>
                             <div className="p-3 rounded-xl bg-cyan-500/10">
                                 <Icons.dollarSign className="w-8 h-8 text-cyan-400" />
@@ -172,18 +175,25 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
                         </div>
                     </div>
 
-                    {/* Bid/Ask */}
-                    <div className="p-4 rounded-xl bg-white/5 border border-white/10">
-                        <p className="text-xs text-muted-foreground">Bid</p>
-                        <p className="text-lg font-semibold tabular-nums text-emerald-400">
-                            {formatPrice(status.last_bid)}
-                        </p>
-                    </div>
-                    <div className="p-4 rounded-xl bg-white/5 border border-white/10">
-                        <p className="text-xs text-muted-foreground">Ask</p>
-                        <p className="text-lg font-semibold tabular-nums text-red-400">
-                            {formatPrice(status.last_ask)}
-                        </p>
+                    {/* Last Update Time */}
+                    <div className="p-5 rounded-xl bg-white/5 border border-white/10">
+                        <div className="flex flex-col justify-center h-full">
+                            <p className="text-xs text-muted-foreground uppercase tracking-wider mb-2">Last Update</p>
+                            {status.last_update ? (
+                                <>
+                                    <p className="text-2xl font-bold tabular-nums">
+                                        {new Date(status.last_update).toLocaleTimeString()}
+                                    </p>
+                                    <p className="text-xs text-muted-foreground mt-1">
+                                        {new Date(status.last_update).toLocaleDateString()}
+                                    </p>
+                                </>
+                            ) : (
+                                <p className="text-lg text-muted-foreground">
+                                    Waiting for data...
+                                </p>
+                            )}
+                        </div>
                     </div>
                 </div>
 
@@ -326,14 +336,6 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
                         )}
                     </div>
                 </div>
-
-                {/* Last Update Time */}
-                {status.last_update && (
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                        <Icons.clock className="w-3 h-3" />
-                        <span>Last update: {new Date(status.last_update).toLocaleTimeString()}</span>
-                    </div>
-                )}
             </CardContent>
         </Card>
     );
