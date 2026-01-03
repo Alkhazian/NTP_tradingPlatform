@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.data import Bar, BarType, QuoteTick, TradeTick
-from nautilus_trader.model.instruments import Instrument, OptionInstrument, OptionType
+from nautilus_trader.model.instruments import Instrument, OptionInstrument, OptionType, InstrumentFilter
 from nautilus_trader.model.enums import AssetClass
 from nautilus_trader.trading.strategy import Strategy
 
@@ -191,6 +191,20 @@ class Spx0DteStraddleStrategy(Strategy):
                 f"⚠ Underlying Instrument {self._instrument_id} NOT found in cache! ",
                 "WARNING"
             )
+
+        # Trigger instrument recovery/discovery for options
+        # This is critical to populate self.cache with option contracts
+        try:
+            self._log_strategy(f"Requesting Option Chain for {self._instrument_id}...")
+            self.request_instruments(
+                InstrumentFilter(
+                    asset_class=AssetClass.OPTION,
+                    underlying_id=self._instrument_id,
+                )
+            )
+            self._log_strategy("✓ Instrument request sent")
+        except Exception as e:
+            self._log_strategy(f"⚠ Failed to request instruments: {e}", "WARNING")
 
         # Subscribe to data
         if self.config.use_bars:
