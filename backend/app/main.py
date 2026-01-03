@@ -114,3 +114,80 @@ async def websocket_endpoint(websocket: WebSocket):
 async def health():
     return {"status": "ok"}
 
+
+# ============ Strategy API Endpoints ============
+
+@app.post("/strategy/start")
+async def start_strategy():
+    """
+    Start the SPX 0DTE Straddle Strategy.
+    
+    This endpoint starts the strategy which will:
+    1. Subscribe to SPX.CBOE price data
+    2. Log all received data for diagnostics
+    3. Track current price for UI display
+    """
+    try:
+        result = await nautilus_manager.start_spx_strategy()
+        return result
+    except Exception as e:
+        logger.error(f"Error starting strategy: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/strategy/stop")
+async def stop_strategy():
+    """
+    Stop the SPX 0DTE Straddle Strategy.
+    
+    This endpoint stops the strategy and unsubscribes from market data.
+    """
+    try:
+        result = await nautilus_manager.stop_spx_strategy()
+        return result
+    except Exception as e:
+        logger.error(f"Error stopping strategy: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/strategy/status")
+async def get_strategy_status():
+    """
+    Get the current strategy status.
+    
+    Returns:
+        Strategy status including:
+        - is_active: Whether the strategy is running
+        - current_price: Current SPX price
+        - logs: Recent strategy log entries
+    """
+    return nautilus_manager.get_strategy_status()
+
+
+@app.get("/strategy/logs")
+async def get_strategy_logs():
+    """
+    Get strategy logs only (for lightweight polling).
+    """
+    status = nautilus_manager.get_strategy_status()
+    return {"logs": status.get("logs", [])}
+
+
+@app.post("/strategy/mock-tick")
+async def send_mock_tick(price: float = 5950.50):
+    """
+    Send a mock price tick to the strategy for testing.
+    
+    This endpoint is useful for testing while the market is closed.
+    It simulates receiving a price update from the broker.
+    
+    Args:
+        price: The mock SPX price to send (default: 5950.50)
+    """
+    try:
+        result = await nautilus_manager.inject_mock_price(price)
+        return result
+    except Exception as e:
+        logger.error(f"Error sending mock tick: {e}")
+        return {"success": False, "error": str(e)}
+

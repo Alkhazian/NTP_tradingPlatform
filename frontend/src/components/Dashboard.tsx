@@ -5,6 +5,7 @@ import { StatCard } from './ui/stat-card';
 import { SystemStatusPanel } from './ui/status-indicator';
 import { Header, Sidebar, SidebarItem } from './layout';
 import { Icons } from './ui/icons';
+import { StrategyPanel } from './StrategyPanel';
 
 interface SystemStatus {
     connected: boolean;
@@ -27,6 +28,28 @@ interface SystemStatus {
     net_exposure?: string;
     leverage?: string;
     recent_trades?: Trade[];
+    // Strategy
+    strategy?: StrategyStatus;
+}
+
+interface StrategyStatus {
+    name: string;
+    is_active: boolean;
+    current_price: number | null;
+    status: {
+        strategy_id?: string;
+        instrument_id?: string;
+        last_bid?: number | null;
+        last_ask?: number | null;
+        last_update?: string | null;
+        is_running?: boolean;
+        quote_tick_count?: number;
+        trade_tick_count?: number;
+        bar_count?: number;
+        data_count?: number;
+        has_instrument?: boolean;
+    };
+    logs: string[];
 }
 
 interface Position {
@@ -146,6 +169,12 @@ export default function Dashboard() {
                     label="Dashboard"
                     active={activeNav === 'dashboard'}
                     onClick={() => setActiveNav('dashboard')}
+                />
+                <SidebarItem
+                    icon="target"
+                    label="Strategies"
+                    active={activeNav === 'strategies'}
+                    onClick={() => setActiveNav('strategies')}
                 />
                 <SidebarItem
                     icon="barChart"
@@ -428,6 +457,22 @@ export default function Dashboard() {
                                 </div>
                             </CardContent>
                         </Card>
+                    </section>
+
+                    {/* Strategies Section */}
+                    <section>
+                        <div className="flex items-center gap-3 mb-6">
+                            <div className="p-2 rounded-lg bg-gradient-to-r from-purple-500/20 to-pink-500/20">
+                                <Icons.target className="w-6 h-6 text-purple-400" />
+                            </div>
+                            <div>
+                                <h2 className="text-xl font-bold">Strategies</h2>
+                                <p className="text-sm text-muted-foreground">
+                                    Automated trading strategies
+                                </p>
+                            </div>
+                        </div>
+                        <StrategyPanel strategy={status.strategy} />
                     </section>
 
                     {/* Recent Activity */}

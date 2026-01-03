@@ -1,19 +1,27 @@
 import asyncio
 import logging
 import os
-from typing import Optional
+from typing import Optional, List
 from nautilus_trader.adapters.interactive_brokers.config import (
     InteractiveBrokersDataClientConfig,
     InteractiveBrokersExecClientConfig,
     InteractiveBrokersInstrumentProviderConfig,
+    SymbologyMethod,
 )
+from nautilus_trader.adapters.interactive_brokers.common import IBContract
 from nautilus_trader.adapters.interactive_brokers.factories import (
     InteractiveBrokersLiveDataClientFactory,
     InteractiveBrokersLiveExecClientFactory,
 )
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.live.node import TradingNode
-from nautilus_trader.model.identifiers import AccountId, Venue
+from nautilus_trader.model.identifiers import AccountId, Venue, InstrumentId
+
+# Import our strategy
+from .strategies.implementations.spx_0dte_straddle import (
+    Spx0DteStraddleStrategy,
+    Spx0DteStraddleConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +30,11 @@ class NautilusManager:
     """
     Manages NautilusTrader TradingNode for Interactive Brokers integration.
     Replaces the legacy IBConnector with event-driven architecture.
+    
+    Now includes:
+    - SPX index instrument loading via IBContract
+    - Strategy management (start/stop)
+    - Strategy logging for UI display
     """
 
     def __init__(self, host: str = "ib-gateway", port: int = 4002):
@@ -46,6 +59,22 @@ class NautilusManager:
         self._leverage = "1.0"
         self._margin_usage_percent = "0.0"
         self._recent_trades = []
+        
+        # Strategy management
+        self._spx_strategy: Optional[Spx0DteStraddleStrategy] = None
+        self._strategy_active = False
+        self._strategy_logs: List[str] = []
+        self._max_strategy_logs = 200
+
+    def _log_strategy_event(self, message: str) -> None:
+        """Add a log entry for strategy management events."""
+        from datetime import datetime, timezone
+        timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S.%f")[:-3]
+        entry = f"[{timestamp}] [MANAGER] {message}"
+        self._strategy_logs.append(entry)
+        if len(self._strategy_logs) > self._max_strategy_logs:
+            self._strategy_logs = self._strategy_logs[-self._max_strategy_logs:]
+        logger.info(f"[StrategyManager] {message}")
 
     async def start(self):
         """Initialize and start the NautilusTrader TradingNode"""
@@ -66,11 +95,37 @@ class NautilusManager:
                 f"Initializing NautilusTrader with IB Gateway at {self.host}:{self.port}"
             )
 
+            # Configure instrument provider with SPX index
+            # Using IBContract for proper index specification
+            # Note: IB uses ^ prefix for indices in simplified symbology
+            spx_contract = IBContract(
+                secType="IND",
+                symbol="SPX",
+                exchange="CBOE",
+                currency="USD",
+            )
+            
+            ib_instrument_config = InteractiveBrokersInstrumentProviderConfig(
+                symbology_method=SymbologyMethod.IB_SIMPLIFIED,
+                load_all=False,
+                # Load SPX using simplified symbology (^ prefix for indices)
+                load_ids=frozenset([
+                    "^SPX.CBOE",  # Index with ^ prefix (IB simplified format)
+                ]),
+                # Also load via contract for reliability
+                load_contracts=frozenset([
+                    spx_contract,
+                ]),
+            )
+
             # Configure Interactive Brokers data client
             ib_data_config = InteractiveBrokersDataClientConfig(
                 ibg_host=self.host,
                 ibg_port=self.port,
                 ibg_client_id=101,
+                instrument_provider=ib_instrument_config,
+                # Handle index data quirks
+                ignore_quote_tick_size_updates=True,  # Reduce noise for indices
             )
 
             # Configure Interactive Brokers execution client
@@ -79,11 +134,7 @@ class NautilusManager:
                 ibg_port=self.port,
                 ibg_client_id=101,
                 account_id=account_id,
-            )
-
-            # Configure instrument provider
-            ib_instrument_config = InteractiveBrokersInstrumentProviderConfig(
-                load_all=False,
+                instrument_provider=ib_instrument_config,
             )
 
             # Create TradingNode configuration
@@ -110,16 +161,212 @@ class NautilusManager:
             )
             self.node.build()
             
+            # Log instrument loading
+            self._log_strategy_event("NautilusTrader node built")
+            self._log_strategy_event(f"Configured to load SPX.CBOE (^SPX.CBOE)")
+            
             # Start the node in the background
             asyncio.create_task(self.node.run_async())
 
             self._connected = True
             logger.info("NautilusTrader TradingNode started in background")
+            self._log_strategy_event("TradingNode started successfully")
 
         except Exception as e:
             logger.error(f"Failed to start NautilusTrader: {e}")
+            self._log_strategy_event(f"ERROR: Failed to start - {e}")
             self._connected = False
             raise
+
+    async def start_spx_strategy(self) -> dict:
+        """
+        Start the SPX 0DTE Straddle Strategy.
+        
+        Returns:
+            Dict with status information
+        """
+        if not self.node or not self._connected:
+            self._log_strategy_event("ERROR: Cannot start strategy - node not connected")
+            return {"success": False, "error": "TradingNode not connected"}
+        
+        if self._strategy_active and self._spx_strategy:
+            self._log_strategy_event("Strategy already running")
+            return {"success": False, "error": "Strategy already running"}
+        
+        try:
+            self._log_strategy_event("Starting SPX 0DTE Straddle Strategy...")
+            
+            # Create strategy config
+            # Try different instrument ID formats that IB might use
+            instrument_ids_to_try = [
+                "SPX.CBOE",      # Standard format
+                "^SPX.CBOE",     # Index prefix format
+                "SPX.XCBO",      # MIC code format
+            ]
+            
+            # Check which instrument ID is available in cache
+            available_instruments = list(self.node.cache.instrument_ids())
+            self._log_strategy_event(f"Available instruments in cache: {len(available_instruments)}")
+            
+            for inst_id in available_instruments[:20]:  # Log first 20
+                self._log_strategy_event(f"  - {inst_id}")
+            
+            # Find the correct SPX instrument ID
+            spx_instrument_id = None
+            for possible_id in instrument_ids_to_try:
+                if InstrumentId.from_str(possible_id) in available_instruments:
+                    spx_instrument_id = possible_id
+                    self._log_strategy_event(f"Found SPX instrument: {spx_instrument_id}")
+                    break
+            
+            # If not found, also search by symbol
+            if not spx_instrument_id:
+                for inst_id in available_instruments:
+                    if "SPX" in str(inst_id).upper():
+                        spx_instrument_id = str(inst_id)
+                        self._log_strategy_event(f"Found SPX instrument by search: {spx_instrument_id}")
+                        break
+            
+            # Default to standard format if still not found
+            if not spx_instrument_id:
+                spx_instrument_id = "SPX.CBOE"
+                self._log_strategy_event(f"Using default instrument ID: {spx_instrument_id}")
+            
+            # Generate unique strategy ID with timestamp to avoid conflicts
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            unique_order_id_tag = f"SPX0DTE_{timestamp}"
+            
+            config = Spx0DteStraddleConfig(
+                instrument_id=spx_instrument_id,
+                use_bars=True,  # Use bars for stability with index data
+                bar_interval_seconds=5,
+                order_id_tag=unique_order_id_tag,
+            )
+            
+            # Create strategy instance
+            self._spx_strategy = Spx0DteStraddleStrategy(config=config)
+            self._log_strategy_event(f"Strategy instance created with config: {config}")
+            
+            # Add strategy to trader
+            self.node.trader.add_strategy(self._spx_strategy)
+            self._log_strategy_event("Strategy added to trader")
+            
+            # Start the strategy
+            self._spx_strategy.start()
+            self._strategy_active = True
+            self._log_strategy_event("Strategy started successfully!")
+            
+            return {
+                "success": True,
+                "message": "Strategy started",
+                "instrument_id": spx_instrument_id
+            }
+            
+        except Exception as e:
+            error_msg = f"Failed to start strategy: {str(e)}"
+            self._log_strategy_event(f"ERROR: {error_msg}")
+            logger.exception("Strategy start failed")
+            return {"success": False, "error": error_msg}
+
+    async def stop_spx_strategy(self) -> dict:
+        """
+        Stop the SPX 0DTE Straddle Strategy.
+        
+        Returns:
+            Dict with status information
+        """
+        if not self._spx_strategy or not self._strategy_active:
+            self._log_strategy_event("Strategy not running")
+            return {"success": False, "error": "Strategy not running"}
+        
+        try:
+            self._log_strategy_event("Stopping SPX 0DTE Straddle Strategy...")
+            
+            # Stop the strategy
+            self._spx_strategy.stop()
+            
+            # Clear strategy reference (new instance will be created on next start)
+            self._spx_strategy = None
+            self._strategy_active = False
+            self._log_strategy_event("Strategy stopped successfully!")
+            
+            return {"success": True, "message": "Strategy stopped"}
+            
+        except Exception as e:
+            error_msg = f"Failed to stop strategy: {str(e)}"
+            self._log_strategy_event(f"ERROR: {error_msg}")
+            return {"success": False, "error": error_msg}
+
+
+
+    def get_strategy_status(self) -> dict:
+        """Get current strategy status for UI display."""
+        strategy_logs = self._strategy_logs.copy()
+        
+        # Add strategy's internal logs if available
+        if self._spx_strategy:
+            strategy_internal_logs = self._spx_strategy.get_strategy_logs()
+            strategy_logs.extend(strategy_internal_logs)
+        
+        # Sort by timestamp (logs start with [HH:MM:SS.mmm])
+        strategy_logs.sort()
+        
+        return {
+            "name": "SPX 0DTE Opening Straddle",
+            "is_active": self._strategy_active,
+            "current_price": self._spx_strategy.get_current_price() if self._spx_strategy else None,
+            "status": self._spx_strategy.get_status() if self._spx_strategy else {},
+            "logs": strategy_logs[-100:],  # Last 100 log entries
+        }
+
+    async def inject_mock_price(self, price: float) -> dict:
+        """
+        Inject a mock price update into the strategy for testing.
+        
+        This allows testing the strategy and UI while the market is closed.
+        It directly updates the strategy's internal state without going
+        through the normal data flow.
+        
+        Args:
+            price: The mock price value to inject
+            
+        Returns:
+            Dict with status information
+        """
+        if not self._spx_strategy or not self._strategy_active:
+            self._log_strategy_event("Cannot inject mock data - strategy not running")
+            return {"success": False, "error": "Strategy not running"}
+        
+        try:
+            from datetime import datetime, timezone
+            
+            # Directly update strategy state
+            self._spx_strategy._current_price = price
+            self._spx_strategy._last_bid = price - 0.50  # Simulated spread
+            self._spx_strategy._last_ask = price + 0.50
+            self._spx_strategy._last_update_time = datetime.now(timezone.utc)
+            self._spx_strategy._quote_tick_count += 1
+            
+            # Log the mock data
+            self._spx_strategy._log_strategy(
+                f"MOCK DATA: price={price:.2f}, bid={price-0.50:.2f}, ask={price+0.50:.2f}",
+                "DEBUG"
+            )
+            self._log_strategy_event(f"Injected mock price: {price:.2f}")
+            
+            return {
+                "success": True,
+                "message": f"Mock price {price:.2f} injected",
+                "current_price": price
+            }
+            
+        except Exception as e:
+            error_msg = f"Failed to inject mock price: {str(e)}"
+            self._log_strategy_event(f"ERROR: {error_msg}")
+            return {"success": False, "error": error_msg}
+
+
 
     async def _update_account_state(self):
         """Fetch and update account state from NautilusTrader"""
@@ -402,9 +649,16 @@ class NautilusManager:
             return []
 
     async def stop(self):
-
-
         """Stop the NautilusTrader TradingNode"""
+        # First stop the strategy if running
+        if self._strategy_active and self._spx_strategy:
+            try:
+                self._spx_strategy.stop()
+                self._strategy_active = False
+                self._log_strategy_event("Strategy stopped during shutdown")
+            except Exception as e:
+                logger.error(f"Error stopping strategy: {e}")
+        
         if self.node:
             logger.info("Stopping NautilusTrader TradingNode")
             await self.node.stop_async()
@@ -415,7 +669,11 @@ class NautilusManager:
         """
         Get current connection and account status.
         Maintains compatibility with legacy IBConnector interface.
+        Now includes strategy status for UI display.
         """
+        # Get strategy status
+        strategy_status = self.get_strategy_status()
+        
         return {
             "connected": self._connected,
             "nautilus_active": self.node is not None,
@@ -435,9 +693,12 @@ class NautilusManager:
             "net_exposure": self._net_exposure,
             "leverage": self._leverage,
             "recent_trades": self._recent_trades,
+            # Strategy section
+            "strategy": strategy_status,
         }
 
     async def update_status(self):
         """Update account state - call periodically for fresh data"""
         await self._update_account_state()
         self._recent_trades = await self._get_recent_trades(hours=24)
+
