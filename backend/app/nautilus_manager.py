@@ -178,7 +178,12 @@ class NautilusManager:
             self._connected = False
             raise
 
-    async def start_spx_strategy(self) -> dict:
+    async def start_spx_strategy(
+        self,
+        strike_offset: int = 0,
+        days_to_expiry: int = 0,
+        refresh_interval_seconds: int = 60
+    ) -> dict:
         """
         Start the SPX 0DTE Straddle Strategy.
         
@@ -207,9 +212,6 @@ class NautilusManager:
             # Check which instrument ID is available in cache
             available_instruments = list(self.node.cache.instrument_ids())
             self._log_strategy_event(f"Available instruments in cache: {len(available_instruments)}")
-            
-            for inst_id in available_instruments[:20]:  # Log first 20
-                self._log_strategy_event(f"  - {inst_id}")
             
             # Find the correct SPX instrument ID
             spx_instrument_id = None
@@ -242,6 +244,9 @@ class NautilusManager:
                 use_bars=True,  # Use bars for stability with index data
                 bar_interval_seconds=5,
                 order_id_tag=unique_order_id_tag,
+                strike_offset=strike_offset,
+                days_to_expiry=days_to_expiry,
+                refresh_interval_seconds=refresh_interval_seconds,
             )
             
             # Create strategy instance

@@ -21,7 +21,8 @@ import {
     FileText,
     AlertCircle,
     CheckCircle,
-    XCircle
+    XCircle,
+    Settings
 } from 'lucide-react';
 
 export const Icons = {
@@ -48,6 +49,7 @@ export const Icons = {
     alertCircle: AlertCircle,
     checkCircle: CheckCircle,
     xCircle: XCircle,
+    settings: Settings,
 };
 
 export type IconName = keyof typeof Icons;

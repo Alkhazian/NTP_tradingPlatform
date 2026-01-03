@@ -19,6 +19,12 @@ interface StrategyStatus {
         bar_count?: number;
         data_count?: number;
         has_instrument?: boolean;
+        // Selected Contracts
+        current_call_id?: string | null;
+        current_put_id?: string | null;
+        current_call_verified?: boolean;
+        current_put_verified?: boolean;
+        distance_to_strike?: number | null;
     };
     logs: string[];
 }
@@ -34,6 +40,11 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
     const [autoScroll, setAutoScroll] = useState(true);
     const [mockPrice, setMockPrice] = useState("5950.50");
 
+    // Config State
+    const [strikeOffset, setStrikeOffset] = useState(0);
+    const [daysToExpiry, setDaysToExpiry] = useState(0);
+    const [refreshInterval, setRefreshInterval] = useState(60);
+
     // Auto-scroll logs to bottom when new logs arrive
     useEffect(() => {
         if (autoScroll && logContainerRef.current) {
@@ -48,6 +59,14 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
             const apiUrl = import.meta.env.VITE_API_URL || '';
             const response = await fetch(`${apiUrl}/strategy/start`, {
                 method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    strike_offset: strikeOffset,
+                    days_to_expiry: daysToExpiry,
+                    refresh_interval_seconds: refreshInterval
+                })
             });
             const result = await response.json();
             if (!result.success) {
@@ -193,6 +212,91 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
                                     Waiting for data...
                                 </p>
                             )}
+                        </div>
+                    </div>
+                </div>
+
+                {/* Selected Contracts Section */}
+                {isActive && (
+                    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                        {/* CALL Contract */}
+                        <div className="p-4 rounded-xl bg-green-500/5 border border-green-500/10">
+                            <div className="flex justify-between items-start mb-2">
+                                <p className="text-xs font-semibold text-green-400 uppercase">Current Call</p>
+                                {status.current_call_verified ? (
+                                    <Badge variant="success" className="text-[10px] h-5">Verified</Badge>
+                                ) : (
+                                    <Badge variant="outline" className="text-[10px] h-5 text-yellow-500 border-yellow-500/50">Unverified</Badge>
+                                )}
+                            </div>
+                            <p className="text-sm font-mono truncate" title={status.current_call_id || "None"}>
+                                {status.current_call_id || "Searching..."}
+                            </p>
+                        </div>
+
+                        {/* PUT Contract */}
+                        <div className="p-4 rounded-xl bg-red-500/5 border border-red-500/10">
+                            <div className="flex justify-between items-start mb-2">
+                                <p className="text-xs font-semibold text-red-400 uppercase">Current Put</p>
+                                {status.current_put_verified ? (
+                                    <Badge variant="success" className="text-[10px] h-5">Verified</Badge>
+                                ) : (
+                                    <Badge variant="outline" className="text-[10px] h-5 text-yellow-500 border-yellow-500/50">Unverified</Badge>
+                                )}
+                            </div>
+                            <p className="text-sm font-mono truncate" title={status.current_put_id || "None"}>
+                                {status.current_put_id || "Searching..."}
+                            </p>
+                        </div>
+
+                        {/* Distance */}
+                        <div className="p-4 rounded-xl bg-blue-500/5 border border-blue-500/10">
+                            <p className="text-xs font-semibold text-blue-400 uppercase mb-2">Strike Distance</p>
+                            <p className="text-xl font-bold tabular-nums">
+                                {status.distance_to_strike !== undefined && status.distance_to_strike !== null
+                                    ? status.distance_to_strike.toFixed(2)
+                                    : "N/A"}
+                            </p>
+                        </div>
+                    </div>
+                )}
+
+                {/* Configuration Section */}
+                <div className="p-4 rounded-xl bg-white/5 border border-white/10 space-y-4">
+                    <div className="flex items-center gap-2 mb-2">
+                        <Icons.settings className="w-4 h-4 text-muted-foreground" />
+                        <span className="text-sm font-medium">Strategy Configuration</span>
+                    </div>
+                    <div className="grid gap-4 md:grid-cols-3">
+                        <div className="space-y-2">
+                            <label className="text-xs text-muted-foreground">Strike Offset</label>
+                            <input
+                                type="number"
+                                value={strikeOffset}
+                                onChange={(e) => setStrikeOffset(parseInt(e.target.value) || 0)}
+                                disabled={isActive}
+                                className="w-full px-3 py-2 rounded-lg bg-black/30 border border-white/10 text-white font-mono text-sm focus:outline-none focus:border-cyan-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            />
+                        </div>
+                        <div className="space-y-2">
+                            <label className="text-xs text-muted-foreground">Days to Expiry (0=Today)</label>
+                            <input
+                                type="number"
+                                value={daysToExpiry}
+                                onChange={(e) => setDaysToExpiry(parseInt(e.target.value) || 0)}
+                                disabled={isActive}
+                                className="w-full px-3 py-2 rounded-lg bg-black/30 border border-white/10 text-white font-mono text-sm focus:outline-none focus:border-cyan-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            />
+                        </div>
+                        <div className="space-y-2">
+                            <label className="text-xs text-muted-foreground">Refresh Interval (sec)</label>
+                            <input
+                                type="number"
+                                value={refreshInterval}
+                                onChange={(e) => setRefreshInterval(parseInt(e.target.value) || 60)}
+                                disabled={isActive}
+                                className="w-full px-3 py-2 rounded-lg bg-black/30 border border-white/10 text-white font-mono text-sm focus:outline-none focus:border-cyan-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            />
                         </div>
                     </div>
                 </div>

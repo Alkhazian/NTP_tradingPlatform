@@ -117,8 +117,15 @@ async def health():
 
 # ============ Strategy API Endpoints ============
 
+from pydantic import BaseModel
+
+class StartStrategyRequest(BaseModel):
+    strike_offset: int = 0
+    days_to_expiry: int = 0
+    refresh_interval_seconds: int = 60
+
 @app.post("/strategy/start")
-async def start_strategy():
+async def start_strategy(request: StartStrategyRequest = StartStrategyRequest()):
     """
     Start the SPX 0DTE Straddle Strategy.
     
@@ -128,7 +135,11 @@ async def start_strategy():
     3. Track current price for UI display
     """
     try:
-        result = await nautilus_manager.start_spx_strategy()
+        result = await nautilus_manager.start_spx_strategy(
+            strike_offset=request.strike_offset,
+            days_to_expiry=request.days_to_expiry,
+            refresh_interval_seconds=request.refresh_interval_seconds
+        )
         return result
     except Exception as e:
         logger.error(f"Error starting strategy: {e}")

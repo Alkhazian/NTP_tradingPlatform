@@ -9,6 +9,7 @@ Key Features:
 2. Handles IB's index data quirks (Last price instead of Bid/Ask)
 3. Provides comprehensive logging for diagnostics
 4. Manual start/stop control via API
+5. Dynamic selection of Straddle contracts (Call/Put at ATM)
 
 Note on IB Index Data:
 - IB transmits index data via reqMktData with Last Price only
@@ -19,14 +20,15 @@ Note on IB Index Data:
 
 import logging
 from decimal import Decimal
-from typing import Optional, List
-from datetime import datetime, timezone
+from typing import Optional, List, Set, Tuple
+from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
 
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.data import Bar, BarType, QuoteTick, TradeTick
-from nautilus_trader.model.instruments import Instrument
+from nautilus_trader.model.instruments import Instrument, OptionInstrument, OptionType
+from nautilus_trader.model.enums import AssetClass
 from nautilus_trader.trading.strategy import Strategy
 
 
@@ -40,12 +42,19 @@ class Spx0DteStraddleConfig(StrategyConfig, frozen=True):
     Attributes:
         instrument_id: The SPX instrument identifier (e.g., "SPX.CBOE")
         use_bars: If True, subscribe to 5-second bars instead of ticks
-        bar_type: The bar type specification for bar subscriptions
+        bar_interval_seconds: Bar interval in seconds
+        order_id_tag: Tag for orders
+        strike_offset: Offset from ATM strike (default 0)
+        days_to_expiry: Days to expiry (default 0 for 0DTE)
+        refresh_interval_seconds: How often to refresh contract search
     """
     instrument_id: str = "SPX.CBOE"
     use_bars: bool = True  # Prefer bars for index data stability
     bar_interval_seconds: int = 5
     order_id_tag: str = "SPX0DTE"
+    strike_offset: int = 0
+    days_to_expiry: int = 0
+    refresh_interval_seconds: int = 60
 
 
 class Spx0DteStraddleStrategy(Strategy):
@@ -56,7 +65,7 @@ class Spx0DteStraddleStrategy(Strategy):
     1. Subscribes to SPX index price data
     2. Logs all received data for diagnostic purposes
     3. Tracks current price for UI display
-    4. Designed for manual start/stop via API
+    4. Dynamically selects Call/Put contracts for the Straddle
     """
     
     def __init__(self, config: Spx0DteStraddleConfig) -> None:
@@ -78,6 +87,12 @@ class Spx0DteStraddleStrategy(Strategy):
         self._last_ask: Optional[float] = None
         self._last_update_time: Optional[datetime] = None
         self._bar_type: Optional[BarType] = None
+        
+        # Contract Selection State
+        self._current_call: Optional[OptionInstrument] = None
+        self._current_put: Optional[OptionInstrument] = None
+        self._last_contract_search_time: Optional[datetime] = None
+        self._distance_to_strike: Optional[float] = None
         
         # Strategy log for UI display
         self._strategy_logs: List[str] = []
@@ -140,21 +155,30 @@ class Spx0DteStraddleStrategy(Strategy):
             "bar_count": self._bar_count,
             "data_count": self._data_count,
             "has_instrument": self._instrument is not None,
+            # Selected Contracts Data
+            "current_call_id": str(self._current_call.id) if self._current_call else None,
+            "current_put_id": str(self._current_put.id) if self._current_put else None,
+            "current_call_verified": self._check_instrument_verified(self._current_call),
+            "current_put_verified": self._check_instrument_verified(self._current_put),
+            "distance_to_strike": self._distance_to_strike,
         }
-    
+
+    def _check_instrument_verified(self, instrument: Optional[Instrument]) -> bool:
+        """Check if instrument is verified in cache."""
+        if not instrument:
+            return False
+        cached = self.cache.instrument(instrument.id)
+        return cached is not None
+
     def on_start(self) -> None:
         """
         Called when the strategy is started.
-        
-        This is where we:
-        1. Load the instrument from cache
-        2. Subscribe to market data
-        3. Initialize timers if needed
         """
         self._log_strategy("="*60)
         self._log_strategy("SPX 0DTE Straddle Strategy STARTING")
         self._log_strategy(f"Instrument ID: {self._instrument_id}")
         self._log_strategy(f"Use Bars: {self.config.use_bars}")
+        self._log_strategy(f"Config: Strike Offset={self.config.strike_offset}, DTE={self.config.days_to_expiry}")
         self._log_strategy("="*60)
         
         # Try to get instrument from cache
@@ -162,41 +186,182 @@ class Spx0DteStraddleStrategy(Strategy):
         
         if self._instrument:
             self._log_strategy(f"✓ Instrument loaded from cache: {self._instrument}")
-            self._log_strategy(f"  - Asset class: {self._instrument.asset_class}")
-            self._log_strategy(f"  - Quote currency: {self._instrument.quote_currency}")
-            if hasattr(self._instrument, 'price_precision'):
-                self._log_strategy(f"  - Price precision: {self._instrument.price_precision}")
         else:
             self._log_strategy(
-                f"⚠ Instrument {self._instrument_id} NOT found in cache! "
-                "Data subscription may fail.",
+                f"⚠ Underlying Instrument {self._instrument_id} NOT found in cache! ",
                 "WARNING"
             )
-            # List available instruments for debugging
-            available = self.cache.instrument_ids()
-            self._log_strategy(f"Available instruments in cache: {len(available)}")
-            for inst_id in list(available)[:10]:  # Show first 10
-                self._log_strategy(f"  - {inst_id}")
-        
-        # Subscribe to data based on configuration
+
+        # Subscribe to data
         if self.config.use_bars:
             self._subscribe_to_bars()
         else:
             self._subscribe_to_ticks()
+            
+        # Initial search for contracts if we have a price (e.g. from existing cache/history)
+        # Note: We really need a fresh price, so we might wait for first data tick
         
         self._log_strategy("Strategy startup complete. Waiting for data...")
     
+    def _find_straddle_instruments(self) -> None:
+        """
+        Find best matching Call and Put contracts based on current SPX price.
+        """
+        if self._current_price is None:
+            return
+
+        # Check refresh interval
+        now = datetime.now(timezone.utc)
+        if self._last_contract_search_time:
+            elapsed = (now - self._last_contract_search_time).total_seconds()
+            if elapsed < self.config.refresh_interval_seconds:
+                return
+
+        self._last_contract_search_time = now
+        self._log_strategy(f"Searching for contracts at SPX={self._current_price:.2f}...")
+
+        # Calculate logic
+        # 1. Target Strike
+        # SPX strikes are usually every 5 or 10 or 25 points.
+        # Assuming we want nearest 5.
+        # Strike = round(price / 5) * 5 + offset
+        
+        base_strike = round(self._current_price / 5) * 5
+        target_strike = base_strike + self.config.strike_offset
+        
+        # 2. Target Expiry
+        # Logic for days_to_expiry (0DTE means today)
+        # Would typically check expiration dates.
+        # For simulation/IB, we might need request_instruments logic.
+        
+        # Filter instruments from Cache first
+        # We need ALL option instruments for this underlying.
+        # Note: In a real scenario, we might need to REQUEST them first if not in cache.
+        
+        obs_instruments = self.cache.instruments()
+        # Filter for Options on SPX
+        
+        best_call: Optional[OptionInstrument] = None
+        best_put: Optional[OptionInstrument] = None
+        
+        # Assuming we have instruments in cache. If not, this loop won't find them.
+        # In a real dynamic loading scenario, we would define an InstrumentFilter and call request_instruments.
+        # But here we search internal cache as requested as primary step.
+        
+        candidates = []
+        for inst in obs_instruments:
+            if isinstance(inst, OptionInstrument):
+                 # Check underlying (simplified check)
+                 # Note: inst.underlying_id might be different if using different symbology
+                 # We'll check if symbol matches or underlying matches
+                 if inst.underlying_id == self._instrument_id or (self._instrument and inst.underlying_id == self._instrument.id):
+                     candidates.append(inst)
+
+        if not candidates:
+             # If no candidates in cache, we use request_instruments provided by Nautilus
+             # But this is a blocking check here for simplicity or we log.
+             if self._instrument:
+                 self._log_strategy("No option candidates in cache, waiting for publication...", "DEBUG")
+             return
+
+        # Filter by expiry and strike
+        # For 0DTE, we look for expiry matching today (or configured days)
+        
+        matching_expiry = []
+        
+        # Calculate target date
+        today = datetime.now(timezone.utc).date()
+        if self.config.days_to_expiry == 0:
+            target_date = today
+        else:
+            target_date = today + timedelta(days=self.config.days_to_expiry)
+            
+        # Find instruments with matching or closest expiry
+        for inst in candidates:
+             if inst.expiry_date:
+                  inst_date = inst.expiry_date.date() if isinstance(inst.expiry_date, datetime) else inst.expiry_date
+                  
+                  # Exact match logic
+                  if inst_date == target_date:
+                       matching_expiry.append(inst)
+        
+        # If no exact match, try to find the absolute nearest expiry
+        if not matching_expiry and candidates:
+             self._log_strategy(f"No exact expiry match for {target_date}, finding nearest...", "DEBUG")
+             closest_expiry_diff = float('inf')
+             for inst in candidates:
+                  if inst.expiry_date:
+                       inst_date = inst.expiry_date.date() if isinstance(inst.expiry_date, datetime) else inst.expiry_date
+                       diff = abs((inst_date - target_date).days)
+                       if diff < closest_expiry_diff:
+                            closest_expiry_diff = diff
+             
+             # Collect all with this closest diff
+             for inst in candidates:
+                  if inst.expiry_date:
+                       inst_date = inst.expiry_date.date() if isinstance(inst.expiry_date, datetime) else inst.expiry_date
+                       diff = abs((inst_date - target_date).days)
+                       if diff == closest_expiry_diff:
+                            matching_expiry.append(inst)
+
+        if not matching_expiry:
+             self._log_strategy("No option candidates found matching expiry criteria.", "WARNING")
+             return
+
+        # Find closest strike to target_strike
+        closest_diff = float('inf')
+        selected_strike = None
+        
+        for inst in matching_expiry:
+             diff = abs(float(inst.strike_price) - target_strike)
+             if diff < closest_diff:
+                 closest_diff = diff
+                 selected_strike = inst.strike_price
+        
+        if selected_strike is None:
+            self._log_strategy("Could not find any suitable strike.", "WARNING")
+            return
+            
+        # Get Call and Put for this strike
+        for inst in matching_expiry:
+            if inst.strike_price == selected_strike:
+                if inst.option_type == OptionType.CALL:
+                    best_call = inst
+                elif inst.option_type == OptionType.PUT:
+                    best_put = inst
+        
+        # Update selection if changed
+        if best_call and best_put:
+             # Verify in cache (double check)
+             call_verified = self._check_instrument_verified(best_call)
+             put_verified = self._check_instrument_verified(best_put)
+             
+             if not call_verified or not put_verified:
+                 self._log_strategy(f"Selected pair not fully verified in cache: {best_call.id}/{best_put.id}", "WARNING")
+                 return
+
+             if self._current_call != best_call or self._current_put != best_put:
+                 self._current_call = best_call
+                 self._current_put = best_put
+                 self._distance_to_strike = self._current_price - float(selected_strike)
+                 
+                 # Log selection
+                 expiry_date = best_call.expiry_date.strftime("%Y-%m-%d") if best_call.expiry_date else "N/A"
+                 self._log_strategy(f"New Straddle Pair Selected: CALL/PUT SPX {selected_strike} {expiry_date}")
+                 self._log_strategy(f"  Call ID: {best_call.id}")
+                 self._log_strategy(f"  Put ID: {best_put.id}")
+                 
+                 # Log details for verification
+                 if hasattr(best_call, 'price_precision'):
+                      self._log_strategy(f"  Call Precision: {best_call.price_precision}, Min Qty: {best_call.min_quantity}", "DEBUG")
+
     def _subscribe_to_bars(self) -> None:
         """Subscribe to 5-second bars for SPX."""
         try:
             # Create bar type specification
-            # Format: INSTRUMENT-STEP-STEP_TYPE-AGGREGATION_SOURCE
-            # Note: BarType parser doesn't support ^ prefix, so we need to strip it
             instrument_str = str(self._instrument_id)
-            
-            # Remove ^ prefix for BarType if present (IB uses ^ for indices)
             if instrument_str.startswith("^"):
-                clean_instrument_str = instrument_str[1:]  # Remove ^
+                clean_instrument_str = instrument_str[1:]
                 self._log_strategy("Note: Stripping ^ prefix from instrument ID for BarType compatibility")
             else:
                 clean_instrument_str = instrument_str
@@ -210,7 +375,6 @@ class Spx0DteStraddleStrategy(Strategy):
             
         except Exception as e:
             self._log_strategy(f"✗ Failed to subscribe to bars: {e}", "ERROR")
-            # Fallback to ticks
             self._log_strategy("Falling back to quote tick subscription...", "WARNING")
             self._subscribe_to_ticks()
     
@@ -220,11 +384,8 @@ class Spx0DteStraddleStrategy(Strategy):
             self._log_strategy(f"SENDING: subscribe_quote_ticks({self._instrument_id})")
             self.subscribe_quote_ticks(self._instrument_id)
             self._log_strategy(f"✓ Subscribed to quote ticks: {self._instrument_id}")
-            
         except Exception as e:
             self._log_strategy(f"✗ Failed to subscribe to quote ticks: {e}", "ERROR")
-            
-            # Also try trade ticks as fallback (IB may send Last as TradeTick)
             try:
                 self._log_strategy(f"SENDING: subscribe_trade_ticks({self._instrument_id})")
                 self.subscribe_trade_ticks(self._instrument_id)
@@ -235,183 +396,89 @@ class Spx0DteStraddleStrategy(Strategy):
     def on_stop(self) -> None:
         """
         Called when the strategy is stopped.
-        
-        Cleanup subscriptions and log final stats.
         """
         self._log_strategy("="*60)
         self._log_strategy("SPX 0DTE Straddle Strategy STOPPING")
         self._log_strategy(f"Final price: {self._current_price}")
-        self._log_strategy(f"Total quote ticks received: {self._quote_tick_count}")
-        self._log_strategy(f"Total trade ticks received: {self._trade_tick_count}")
-        self._log_strategy(f"Total bars received: {self._bar_count}")
-        self._log_strategy(f"Total custom data received: {self._data_count}")
         self._log_strategy("="*60)
         
-        # Unsubscribe from data
+        # Unsubscribe
         try:
             if self._bar_type:
                 self.unsubscribe_bars(self._bar_type)
-                self._log_strategy(f"Unsubscribed from bars: {self._bar_type}")
-        except Exception as e:
-            self._log_strategy(f"Error unsubscribing from bars: {e}", "WARNING")
+        except Exception:
+            pass
         
         try:
             self.unsubscribe_quote_ticks(self._instrument_id)
-            self._log_strategy(f"Unsubscribed from quote ticks: {self._instrument_id}")
         except Exception:
-            pass  # May not have been subscribed
+            pass
         
         try:
             self.unsubscribe_trade_ticks(self._instrument_id)
-            self._log_strategy(f"Unsubscribed from trade ticks: {self._instrument_id}")
         except Exception:
-            pass  # May not have been subscribed
-    
+            pass
+
     def on_quote_tick(self, tick: QuoteTick) -> None:
-        """
-        Handle incoming quote tick data.
-        
-        For SPX index, IB may send synthetic ticks or the adapter
-        may have created them from Last price.
-        """
+        """Handle incoming quote tick data."""
         self._quote_tick_count += 1
         
         # Extract prices
         bid_price = float(tick.bid_price)
         ask_price = float(tick.ask_price)
-        bid_size = float(tick.bid_size)
-        ask_size = float(tick.ask_size)
         
         # Update state
         self._last_bid = bid_price
         self._last_ask = ask_price
-        self._current_price = (bid_price + ask_price) / 2  # Mid price
+        self._current_price = (bid_price + ask_price) / 2
         self._last_update_time = datetime.now(timezone.utc)
         
-        # Detailed logging for diagnostics
-        self._log_strategy(
-            f"RECEIVED QuoteTick #{self._quote_tick_count}: "
-            f"bid={bid_price:.2f} (size={bid_size}), "
-            f"ask={ask_price:.2f} (size={ask_size}), "
-            f"mid={self._current_price:.2f}",
-            "DEBUG"
-        )
-        
-        # Log object type for debugging IB adapter behavior
-        self._log_strategy(
-            f"  Object type: {type(tick).__module__}.{type(tick).__name__}",
-            "DEBUG"
-        )
+        # Search for contracts
+        self._find_straddle_instruments()
     
     def on_trade_tick(self, tick: TradeTick) -> None:
-        """
-        Handle incoming trade tick data.
-        
-        For SPX index, IB typically sends Last price as this type.
-        This is the primary data source for indices.
-        """
+        """Handle incoming trade tick data."""
         self._trade_tick_count += 1
         
-        # Extract price and size
-        price = float(tick.price)
-        size = float(tick.size)
-        
         # Update state - use trade price as current price
-        self._current_price = price
+        self._current_price = float(tick.price)
         self._last_update_time = datetime.now(timezone.utc)
         
-        # Log the tick
-        self._log_strategy(
-            f"RECEIVED TradeTick #{self._trade_tick_count}: "
-            f"price={price:.2f}, size={size}",
-            "DEBUG"
-        )
-        
-        # Log object type
-        self._log_strategy(
-            f"  Object type: {type(tick).__module__}.{type(tick).__name__}",
-            "DEBUG"
-        )
-        
-        # Check for potentially invalid size (common with IB indices)
-        if size > 1_000_000_000:
-            self._log_strategy(
-                f"  ⚠ Large size value detected ({size}) - typical for IB index data",
-                "WARNING"
-            )
+        # Search for contracts
+        self._find_straddle_instruments()
     
     def on_bar(self, bar: Bar) -> None:
-        """
-        Handle incoming bar data.
-        
-        5-second bars provide cleaner data for indices compared to ticks.
-        """
+        """Handle incoming bar data."""
         self._bar_count += 1
         
-        # Extract bar values
-        open_price = float(bar.open)
-        high_price = float(bar.high)
-        low_price = float(bar.low)
-        close_price = float(bar.close)
-        volume = float(bar.volume)
-        
         # Update state with close price
-        self._current_price = close_price
+        self._current_price = float(bar.close)
         self._last_update_time = datetime.now(timezone.utc)
         
-        # Log bar data
-        self._log_strategy(
-            f"RECEIVED Bar #{self._bar_count}: "
-            f"O={open_price:.2f} H={high_price:.2f} L={low_price:.2f} C={close_price:.2f} "
-            f"V={volume:.0f}"
-        )
-        
-        # Log object type
-        self._log_strategy(
-            f"  Bar type: {bar.bar_type}",
-            "DEBUG"
-        )
+        # Search for contracts
+        self._find_straddle_instruments()
     
     def on_data(self, data) -> None:
-        """
-        Handle any custom data.
-        
-        This catches any data that doesn't match standard types.
-        Useful for debugging what IB adapter actually sends.
-        """
+        """Handle custom data."""
         self._data_count += 1
-        
-        self._log_strategy(
-            f"RECEIVED Custom Data #{self._data_count}: "
-            f"type={type(data).__module__}.{type(data).__name__}",
-            "DEBUG"
-        )
-        
-        # Try to extract common attributes
-        if hasattr(data, 'price'):
-            self._log_strategy(f"  price attribute: {data.price}", "DEBUG")
-        if hasattr(data, 'value'):
-            self._log_strategy(f"  value attribute: {data.value}", "DEBUG")
+        self._log_strategy(f"RECEIVED Custom Data #{self._data_count}", "DEBUG")
     
     def on_instrument(self, instrument: Instrument) -> None:
-        """
-        Handle instrument updates.
-        
-        Called when instrument definition is received/updated.
-        """
-        self._instrument = instrument
-        self._log_strategy(
-            f"RECEIVED Instrument: {instrument.id} "
-            f"(type: {type(instrument).__name__})"
-        )
-    
+        """Handle instrument updates."""
+        # Check if this is a requested option
+        if isinstance(instrument, OptionInstrument):
+             self._log_strategy(f"Received Option Instrument definition: {instrument.id} (Strike: {instrument.strike_price})", "DEBUG")
+        else:
+             if instrument.id == self._instrument_id:
+                  self._instrument = instrument
+                  self._log_strategy(f"RECEIVED Underlying Instrument: {instrument.id}")
+
     def on_reset(self) -> None:
         """Reset strategy state."""
         self._log_strategy("Strategy RESET called")
         self._current_price = None
-        self._last_bid = None
-        self._last_ask = None
-        self._last_update_time = None
+        self._current_call = None
+        self._current_put = None
         self._quote_tick_count = 0
         self._trade_tick_count = 0
         self._bar_count = 0
@@ -422,22 +489,20 @@ class Spx0DteStraddleStrategy(Strategy):
 def create_spx_0dte_strategy(
     instrument_id: str = "SPX.CBOE",
     use_bars: bool = True,
-    order_id_tag: str = "SPX0DTE001"
+    order_id_tag: str = "SPX0DTE001",
+    strike_offset: int = 0,
+    days_to_expiry: int = 0,
+    refresh_interval_seconds: int = 60
 ) -> Spx0DteStraddleStrategy:
     """
     Factory function to create an SPX 0DTE Straddle Strategy.
-    
-    Args:
-        instrument_id: The SPX instrument ID
-        use_bars: Whether to use bars (True) or ticks (False)
-        order_id_tag: Unique tag for orders from this strategy
-        
-    Returns:
-        Configured strategy instance
     """
     config = Spx0DteStraddleConfig(
         instrument_id=instrument_id,
         use_bars=use_bars,
         order_id_tag=order_id_tag,
+        strike_offset=strike_offset,
+        days_to_expiry=days_to_expiry,
+        refresh_interval_seconds=refresh_interval_seconds
     )
     return Spx0DteStraddleStrategy(config=config)
