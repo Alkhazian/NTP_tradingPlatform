@@ -269,7 +269,20 @@ class Spx0DteStraddleStrategy(Strategy):
                  # Note: inst.underlying_id might be different if using different symbology
                  # We'll check if symbol matches or underlying matches
                  if inst.underlying_id == self._instrument_id or (self._instrument and inst.underlying_id == self._instrument.id):
-                     candidates.append(inst)
+                     # Filter for SPXW (Weekly/Daily options) as requested
+                     # We check both direct attribute and info dictionary (common for IB adapter)
+                     t_class = getattr(inst, "trading_class", None)
+                     
+                     # Fallback to info dict if not found as attribute
+                     if not t_class and hasattr(inst, "info"):
+                         t_class = inst.info.get("trading_class") or inst.info.get("tradingClass")
+
+                     if t_class == "SPXW":
+                         candidates.append(inst)
+                     elif not t_class:
+                         # If no trading class info, we might log it once or strictly require it. 
+                         # For now, let's be strict as per requirement, but maybe warn if we find nothing.
+                         pass
 
         if not candidates:
              # If no candidates in cache, we use request_instruments provided by Nautilus
