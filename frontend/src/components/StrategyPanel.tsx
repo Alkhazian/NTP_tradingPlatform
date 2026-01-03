@@ -199,21 +199,45 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
 
                 {/* Data Counters */}
                 <div className="grid gap-3 grid-cols-4">
-                    <div className="p-3 rounded-lg bg-white/5 text-center">
+                    <div
+                        className="p-3 rounded-lg bg-white/5 text-center cursor-help transition-colors hover:bg-white/10"
+                        title="5-second price bars aggregated from market data. More stable than individual ticks."
+                    >
                         <p className="text-2xl font-bold tabular-nums">{status.bar_count ?? 0}</p>
-                        <p className="text-xs text-muted-foreground">Bars</p>
+                        <p className="text-xs text-muted-foreground flex items-center justify-center gap-1">
+                            Bars
+                            <span className="text-[10px] opacity-50">ⓘ</span>
+                        </p>
                     </div>
-                    <div className="p-3 rounded-lg bg-white/5 text-center">
+                    <div
+                        className="p-3 rounded-lg bg-white/5 text-center cursor-help transition-colors hover:bg-white/10"
+                        title="Quote ticks with bid/ask prices. For indices, this is typically the Last Price (calculated index value)."
+                    >
                         <p className="text-2xl font-bold tabular-nums">{status.quote_tick_count ?? 0}</p>
-                        <p className="text-xs text-muted-foreground">Quotes</p>
+                        <p className="text-xs text-muted-foreground flex items-center justify-center gap-1">
+                            Quotes
+                            <span className="text-[10px] opacity-50">ⓘ</span>
+                        </p>
                     </div>
-                    <div className="p-3 rounded-lg bg-white/5 text-center">
+                    <div
+                        className="p-3 rounded-lg bg-white/5 text-center cursor-help transition-colors hover:bg-white/10"
+                        title="Individual trade executions. Indices typically send Last Price updates as trade ticks."
+                    >
                         <p className="text-2xl font-bold tabular-nums">{status.trade_tick_count ?? 0}</p>
-                        <p className="text-xs text-muted-foreground">Trades</p>
+                        <p className="text-xs text-muted-foreground flex items-center justify-center gap-1">
+                            Trades
+                            <span className="text-[10px] opacity-50">ⓘ</span>
+                        </p>
                     </div>
-                    <div className="p-3 rounded-lg bg-white/5 text-center">
+                    <div
+                        className="p-3 rounded-lg bg-white/5 text-center cursor-help transition-colors hover:bg-white/10"
+                        title="Custom data types not recognized as standard bars/ticks. Used for debugging unusual data from broker."
+                    >
                         <p className="text-2xl font-bold tabular-nums">{status.data_count ?? 0}</p>
-                        <p className="text-xs text-muted-foreground">Custom</p>
+                        <p className="text-xs text-muted-foreground flex items-center justify-center gap-1">
+                            Custom
+                            <span className="text-[10px] opacity-50">ⓘ</span>
+                        </p>
                     </div>
                 </div>
 
