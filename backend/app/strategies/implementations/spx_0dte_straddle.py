@@ -1,26 +1,30 @@
 """
-SPX 0DTE Opening Straddle Strategy
+SPX 0DTE Opening Straddle Strategy (Premium-Based Selection)
 
 This strategy implements a 0DTE (Zero Days to Expiration) straddle strategy
 for the SPX index using NautilusTrader framework.
 
 Key Features:
 1. Subscribes to SPX.CBOE index price data
-2. Handles IB's index data quirks (Last price instead of Bid/Ask)
-3. Provides comprehensive logging for diagnostics
-4. Manual start/stop control via API
-5. Dynamic selection of Straddle contracts (Call/Put at ATM)
+2. Uses Premium-Based Selection instead of ATM strike offset
+3. Implements Sliding Window for efficient market data subscriptions
+4. Dynamic selection of Call/Put contracts based on target premium
+5. Provides comprehensive logging for diagnostics
+
+Premium Selection Logic:
+- Monitors option contracts within window_range_strikes from current SPX price
+- Selects Call and Put with ask_price closest to target_premium
+- Re-centers subscription window when price moves by hysteresis_points
 
 Note on IB Index Data:
 - IB transmits index data via reqMktData with Last Price only
 - Size values may be invalid/huge for indices
 - This strategy uses Bar data (5-second) as primary source for stability
-- Falls back to QuoteTicks with synthetic Bid=Ask=Last if bars unavailable
 """
 
 import logging
 from decimal import Decimal
-from typing import Optional, List, Set, Tuple
+from typing import Optional, List, Set, Dict, Tuple
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
 
@@ -37,35 +41,43 @@ logger = logging.getLogger(__name__)
 
 class Spx0DteStraddleConfig(StrategyConfig, frozen=True):
     """
-    Configuration for SPX 0DTE Straddle Strategy.
+    Configuration for SPX 0DTE Straddle Strategy (Premium-Based).
     
     Attributes:
         instrument_id: The SPX instrument identifier (e.g., "SPX.CBOE")
         use_bars: If True, subscribe to 5-second bars instead of ticks
         bar_interval_seconds: Bar interval in seconds
         order_id_tag: Tag for orders
-        strike_offset: Offset from ATM strike (default 0)
         days_to_expiry: Days to expiry (default 0 for 0DTE)
         refresh_interval_seconds: How often to refresh contract search
+        
+        Premium-Based Selection Parameters:
+        target_premium: Target Ask price for Call and Put selection (default: 2.0)
+        window_range_strikes: Number of strikes in each direction from SPX price (default: 20)
+        hysteresis_points: SPX price change threshold to trigger window re-centering (default: 7.0)
     """
     instrument_id: str = "SPX.CBOE"
     use_bars: bool = True  # Prefer bars for index data stability
     bar_interval_seconds: int = 5
     order_id_tag: str = "SPX0DTE"
-    strike_offset: int = 0
     days_to_expiry: int = 0
     refresh_interval_seconds: int = 60
+    
+    # Premium-Based Selection Parameters
+    target_premium: float = 2.0
+    window_range_strikes: int = 20
+    hysteresis_points: float = 7.0
 
 
 class Spx0DteStraddleStrategy(Strategy):
     """
-    SPX 0DTE Opening Straddle Strategy.
+    SPX 0DTE Opening Straddle Strategy with Premium-Based Selection.
     
     This strategy:
     1. Subscribes to SPX index price data
-    2. Logs all received data for diagnostic purposes
-    3. Tracks current price for UI display
-    4. Dynamically selects Call/Put contracts for the Straddle
+    2. Maintains a sliding window of option subscriptions around current price
+    3. Selects Call/Put contracts based on target premium price
+    4. Updates selection dynamically on each quote tick
     """
     
     def __init__(self, config: Spx0DteStraddleConfig) -> None:
@@ -88,11 +100,17 @@ class Spx0DteStraddleStrategy(Strategy):
         self._last_update_time: Optional[datetime] = None
         self._bar_type: Optional[BarType] = None
         
-        # Contract Selection State
+        # Contract Selection State (Premium-Based)
         self._current_call: Optional[OptionInstrument] = None
         self._current_put: Optional[OptionInstrument] = None
+        self._current_call_ask: Optional[float] = None
+        self._current_put_ask: Optional[float] = None
         self._last_contract_search_time: Optional[datetime] = None
-        self._distance_to_strike: Optional[float] = None
+        
+        # Sliding Window State
+        self._anchor_price: Optional[float] = None  # Center of subscription window
+        self._subscribed_option_ids: Set[InstrumentId] = set()  # Currently subscribed options
+        self._option_quotes: Dict[InstrumentId, QuoteTick] = {}  # Latest quotes for options
         
         # Strategy log for UI display
         self._strategy_logs: List[str] = []
@@ -103,6 +121,7 @@ class Spx0DteStraddleStrategy(Strategy):
         self._trade_tick_count = 0
         self._bar_count = 0
         self._data_count = 0
+        self._option_quote_count = 0
     
     def _log_strategy(self, message: str, level: str = "INFO") -> None:
         """
@@ -155,12 +174,19 @@ class Spx0DteStraddleStrategy(Strategy):
             "bar_count": self._bar_count,
             "data_count": self._data_count,
             "has_instrument": self._instrument is not None,
-            # Selected Contracts Data
+            # Premium-Based Selection Data
             "current_call_id": str(self._current_call.id) if self._current_call else None,
             "current_put_id": str(self._current_put.id) if self._current_put else None,
             "current_call_verified": self._check_instrument_verified(self._current_call),
             "current_put_verified": self._check_instrument_verified(self._current_put),
-            "distance_to_strike": self._distance_to_strike,
+            "current_call_ask": self._current_call_ask,
+            "current_put_ask": self._current_put_ask,
+            "target_premium": self.config.target_premium,
+            # Sliding Window Data
+            "anchor_price": self._anchor_price,
+            "active_subscriptions": len(self._subscribed_option_ids),
+            "option_quotes_cached": len(self._option_quotes),
+            "option_quote_count": self._option_quote_count,
         }
 
     def _check_instrument_verified(self, instrument: Optional[Instrument]) -> bool:
@@ -175,10 +201,12 @@ class Spx0DteStraddleStrategy(Strategy):
         Called when the strategy is started.
         """
         self._log_strategy("="*60)
-        self._log_strategy("SPX 0DTE Straddle Strategy STARTING")
+        self._log_strategy("SPX 0DTE Straddle Strategy STARTING (Premium-Based)")
         self._log_strategy(f"Instrument ID: {self._instrument_id}")
         self._log_strategy(f"Use Bars: {self.config.use_bars}")
-        self._log_strategy(f"Config: Strike Offset={self.config.strike_offset}, DTE={self.config.days_to_expiry}")
+        self._log_strategy(f"Config: Target Premium=${self.config.target_premium:.2f}, "
+                          f"Window={self.config.window_range_strikes} strikes, "
+                          f"Hysteresis={self.config.hysteresis_points} pts")
         self._log_strategy("="*60)
         
         # Try to get instrument from cache
@@ -212,176 +240,228 @@ class Spx0DteStraddleStrategy(Strategy):
         else:
             self._subscribe_to_ticks()
             
-        # Initial search for contracts if we have a price (e.g. from existing cache/history)
-        # Note: We really need a fresh price, so we might wait for first data tick
-        
         self._log_strategy("Strategy startup complete. Waiting for data...")
     
-    def _find_straddle_instruments(self) -> None:
+    def _calculate_window_strikes(self, center_price: float) -> Set[float]:
         """
-        Find best matching Call and Put contracts based on current SPX price.
+        Calculate the set of strikes within the window range.
+        
+        SPX uses 5-point strike increments for most strikes.
+        """
+        strikes = set()
+        # Round to nearest 5
+        base_strike = round(center_price / 5) * 5
+        
+        for offset in range(-self.config.window_range_strikes, self.config.window_range_strikes + 1):
+            strike = base_strike + (offset * 5)
+            if strike > 0:  # Ensure valid strike
+                strikes.add(strike)
+        
+        return strikes
+    
+    def _find_options_for_strikes(self, target_strikes: Set[float], target_date) -> List[OptionInstrument]:
+        """
+        Find option instruments matching the target strikes and expiry.
+        Filters for SPXW (weekly/daily) options only.
+        """
+        matching_options = []
+        
+        for inst in self.cache.instruments():
+            if not isinstance(inst, OptionInstrument):
+                continue
+            
+            # Check underlying
+            if inst.underlying_id != self._instrument_id and (
+                not self._instrument or inst.underlying_id != self._instrument.id
+            ):
+                continue
+            
+            # Filter for SPXW trading class
+            t_class = getattr(inst, "trading_class", None)
+            if not t_class and hasattr(inst, "info"):
+                t_class = inst.info.get("trading_class") or inst.info.get("tradingClass")
+            
+            if t_class != "SPXW":
+                continue
+            
+            # Check expiry date
+            if inst.expiry_date:
+                inst_date = inst.expiry_date.date() if isinstance(inst.expiry_date, datetime) else inst.expiry_date
+                if inst_date != target_date:
+                    continue
+            else:
+                continue
+            
+            # Check if strike is in our window
+            strike_value = float(inst.strike_price)
+            if strike_value in target_strikes:
+                matching_options.append(inst)
+        
+        return matching_options
+    
+    def _update_subscription_window(self) -> None:
+        """
+        Update the subscription window based on current SPX price.
+        Implements differential subscription updates to minimize API calls.
         """
         if self._current_price is None:
             return
-
+        
+        # Check if we need to re-center the window
+        if self._anchor_price is not None:
+            price_change = abs(self._current_price - self._anchor_price)
+            if price_change < self.config.hysteresis_points:
+                return  # No re-centering needed
+        
+        # Re-center the window
+        old_anchor = self._anchor_price
+        self._anchor_price = self._current_price
+        self._log_strategy(f"Window re-centered. New anchor: {self._anchor_price:.2f}. Subscriptions updated.")
+        
+        # Calculate target expiry (0DTE means today)
+        today = datetime.now(timezone.utc).date()
+        if self.config.days_to_expiry == 0:
+            target_date = today
+        else:
+            target_date = today + timedelta(days=self.config.days_to_expiry)
+        
+        # Calculate new window strikes
+        target_strikes = self._calculate_window_strikes(self._current_price)
+        
+        # Find options for these strikes
+        matching_options = self._find_options_for_strikes(target_strikes, target_date)
+        
+        if not matching_options:
+            self._log_strategy(f"No options found matching criteria. Strikes: {len(target_strikes)}, Date: {target_date}", "DEBUG")
+            return
+        
+        # Determine which subscriptions to add/remove
+        new_option_ids: Set[InstrumentId] = {opt.id for opt in matching_options}
+        
+        # Calculate differential
+        to_subscribe = new_option_ids - self._subscribed_option_ids
+        to_unsubscribe = self._subscribed_option_ids - new_option_ids
+        
+        # Unsubscribe from options outside window
+        for opt_id in to_unsubscribe:
+            try:
+                self.unsubscribe_quote_ticks(opt_id)
+                # Clean up quote cache
+                if opt_id in self._option_quotes:
+                    del self._option_quotes[opt_id]
+            except Exception as e:
+                self._log_strategy(f"Failed to unsubscribe from {opt_id}: {e}", "DEBUG")
+        
+        # Subscribe to new options in window
+        for opt_id in to_subscribe:
+            try:
+                self.subscribe_quote_ticks(opt_id)
+            except Exception as e:
+                self._log_strategy(f"Failed to subscribe to {opt_id}: {e}", "DEBUG")
+        
+        # Update tracking set
+        self._subscribed_option_ids = new_option_ids
+        
+        self._log_strategy(
+            f"Subscriptions: +{len(to_subscribe)} new, -{len(to_unsubscribe)} removed, "
+            f"Total: {len(self._subscribed_option_ids)} active",
+            "DEBUG"
+        )
+    
+    def _find_straddle_instruments(self) -> None:
+        """
+        Find best matching Call and Put contracts based on target premium.
+        
+        Selection criteria:
+        - Must be subscribed (in sliding window)
+        - Must have valid ask_price > 0
+        - Must be verified in cache
+        - Choose option with ask_price closest to target_premium
+        """
+        if self._current_price is None:
+            return
+        
         # Check refresh interval
         now = datetime.now(timezone.utc)
         if self._last_contract_search_time:
             elapsed = (now - self._last_contract_search_time).total_seconds()
             if elapsed < self.config.refresh_interval_seconds:
                 return
-
+        
         self._last_contract_search_time = now
-        self._log_strategy(f"Searching for contracts at SPX={self._current_price:.2f}...")
-
-        # Calculate logic
-        # 1. Target Strike
-        # SPX strikes are usually every 5 or 10 or 25 points.
-        # Assuming we want nearest 5.
-        # Strike = round(price / 5) * 5 + offset
         
-        base_strike = round(self._current_price / 5) * 5
-        target_strike = base_strike + self.config.strike_offset
+        # Collect candidates from subscribed options with valid quotes
+        call_candidates: List[Tuple[OptionInstrument, float]] = []
+        put_candidates: List[Tuple[OptionInstrument, float]] = []
         
-        # 2. Target Expiry
-        # Logic for days_to_expiry (0DTE means today)
-        # Would typically check expiration dates.
-        # For simulation/IB, we might need request_instruments logic.
+        for opt_id in self._subscribed_option_ids:
+            # Get instrument from cache
+            inst = self.cache.instrument(opt_id)
+            if not isinstance(inst, OptionInstrument):
+                continue
+            
+            # Get latest quote
+            quote = self._option_quotes.get(opt_id)
+            if not quote:
+                continue
+            
+            ask_price = float(quote.ask_price)
+            
+            # Filter: ask_price must be positive
+            if ask_price <= 0:
+                continue
+            
+            # Categorize by option type
+            if inst.option_type == OptionType.CALL:
+                call_candidates.append((inst, ask_price))
+            elif inst.option_type == OptionType.PUT:
+                put_candidates.append((inst, ask_price))
         
-        # Filter instruments from Cache first
-        # We need ALL option instruments for this underlying.
-        # Note: In a real scenario, we might need to REQUEST them first if not in cache.
-        
-        obs_instruments = self.cache.instruments()
-        # Filter for Options on SPX
-        
+        # Select best Call (closest to target_premium)
         best_call: Optional[OptionInstrument] = None
+        best_call_ask: Optional[float] = None
+        best_call_diff = float('inf')
+        
+        for inst, ask_price in call_candidates:
+            diff = abs(ask_price - self.config.target_premium)
+            if diff < best_call_diff:
+                best_call_diff = diff
+                best_call = inst
+                best_call_ask = ask_price
+        
+        # Select best Put (closest to target_premium)
         best_put: Optional[OptionInstrument] = None
+        best_put_ask: Optional[float] = None
+        best_put_diff = float('inf')
         
-        # Assuming we have instruments in cache. If not, this loop won't find them.
-        # In a real dynamic loading scenario, we would define an InstrumentFilter and call request_instruments.
-        # But here we search internal cache as requested as primary step.
+        for inst, ask_price in put_candidates:
+            diff = abs(ask_price - self.config.target_premium)
+            if diff < best_put_diff:
+                best_put_diff = diff
+                best_put = inst
+                best_put_ask = ask_price
         
-        candidates = []
-        for inst in obs_instruments:
-            if isinstance(inst, OptionInstrument):
-                 # Check underlying (simplified check)
-                 # Note: inst.underlying_id might be different if using different symbology
-                 # We'll check if symbol matches or underlying matches
-                 if inst.underlying_id == self._instrument_id or (self._instrument and inst.underlying_id == self._instrument.id):
-                     # Filter for SPXW (Weekly/Daily options) as requested
-                     # We check both direct attribute and info dictionary (common for IB adapter)
-                     t_class = getattr(inst, "trading_class", None)
-                     
-                     # Fallback to info dict if not found as attribute
-                     if not t_class and hasattr(inst, "info"):
-                         t_class = inst.info.get("trading_class") or inst.info.get("tradingClass")
-
-                     if t_class == "SPXW":
-                         candidates.append(inst)
-                     elif not t_class:
-                         # If no trading class info, we might log it once or strictly require it. 
-                         # For now, let's be strict as per requirement, but maybe warn if we find nothing.
-                         pass
-
-        if not candidates:
-             # If no candidates in cache, we use request_instruments provided by Nautilus
-             # But this is a blocking check here for simplicity or we log.
-             if self._instrument:
-                 self._log_strategy("No option candidates in cache, waiting for publication...", "DEBUG")
-             return
-
-        # Filter by expiry and strike
-        # For 0DTE, we look for expiry matching today (or configured days)
+        # Check if selection changed
+        selection_changed = False
         
-        matching_expiry = []
+        if best_call and (self._current_call != best_call or self._current_call_ask != best_call_ask):
+            selection_changed = True
         
-        # Calculate target date
-        today = datetime.now(timezone.utc).date()
-        if self.config.days_to_expiry == 0:
-            target_date = today
-        else:
-            target_date = today + timedelta(days=self.config.days_to_expiry)
+        if best_put and (self._current_put != best_put or self._current_put_ask != best_put_ask):
+            selection_changed = True
+        
+        if selection_changed and best_call and best_put:
+            self._current_call = best_call
+            self._current_put = best_put
+            self._current_call_ask = best_call_ask
+            self._current_put_ask = best_put_ask
             
-        # Find instruments with matching or closest expiry
-        for inst in candidates:
-             if inst.expiry_date:
-                  inst_date = inst.expiry_date.date() if isinstance(inst.expiry_date, datetime) else inst.expiry_date
-                  
-                  # Exact match logic
-                  if inst_date == target_date:
-                       matching_expiry.append(inst)
-        
-        # If no exact match, try to find the absolute nearest expiry
-        if not matching_expiry and candidates:
-             self._log_strategy(f"No exact expiry match for {target_date}, finding nearest...", "DEBUG")
-             closest_expiry_diff = float('inf')
-             for inst in candidates:
-                  if inst.expiry_date:
-                       inst_date = inst.expiry_date.date() if isinstance(inst.expiry_date, datetime) else inst.expiry_date
-                       diff = abs((inst_date - target_date).days)
-                       if diff < closest_expiry_diff:
-                            closest_expiry_diff = diff
-             
-             # Collect all with this closest diff
-             for inst in candidates:
-                  if inst.expiry_date:
-                       inst_date = inst.expiry_date.date() if isinstance(inst.expiry_date, datetime) else inst.expiry_date
-                       diff = abs((inst_date - target_date).days)
-                       if diff == closest_expiry_diff:
-                            matching_expiry.append(inst)
-
-        if not matching_expiry:
-             self._log_strategy("No option candidates found matching expiry criteria.", "WARNING")
-             return
-
-        # Find closest strike to target_strike
-        closest_diff = float('inf')
-        selected_strike = None
-        
-        for inst in matching_expiry:
-             diff = abs(float(inst.strike_price) - target_strike)
-             if diff < closest_diff:
-                 closest_diff = diff
-                 selected_strike = inst.strike_price
-        
-        if selected_strike is None:
-            self._log_strategy("Could not find any suitable strike.", "WARNING")
-            return
-            
-        # Get Call and Put for this strike
-        for inst in matching_expiry:
-            if inst.strike_price == selected_strike:
-                if inst.option_type == OptionType.CALL:
-                    best_call = inst
-                elif inst.option_type == OptionType.PUT:
-                    best_put = inst
-        
-        # Update selection if changed
-        if best_call and best_put:
-             # Verify in cache (double check)
-             call_verified = self._check_instrument_verified(best_call)
-             put_verified = self._check_instrument_verified(best_put)
-             
-             if not call_verified or not put_verified:
-                 self._log_strategy(f"Selected pair not fully verified in cache: {best_call.id}/{best_put.id}", "WARNING")
-                 return
-
-             if self._current_call != best_call or self._current_put != best_put:
-                 self._current_call = best_call
-                 self._current_put = best_put
-                 self._distance_to_strike = self._current_price - float(selected_strike)
-                 
-                 # Log selection
-                 expiry_date = best_call.expiry_date.strftime("%Y-%m-%d") if best_call.expiry_date else "N/A"
-                 self._log_strategy(f"New Straddle Pair Selected: CALL/PUT SPX {selected_strike} {expiry_date}")
-                 self._log_strategy(f"  Call ID: {best_call.id}")
-                 self._log_strategy(f"  Put ID: {best_put.id}")
-                 
-                 # Log details for verification
-                 if hasattr(best_call, 'price_precision'):
-                      self._log_strategy(f"  Call Precision: {best_call.price_precision}, Min Qty: {best_call.min_quantity}", "DEBUG")
-
+            # Log the new selection
+            self._log_strategy(
+                f"Selection updated: Call {best_call.id} (Ask: ${best_call_ask:.2f}), "
+                f"Put {best_put.id} (Ask: ${best_put_ask:.2f})"
+            )
+    
     def _subscribe_to_bars(self) -> None:
         """Subscribe to 5-second bars for SPX."""
         try:
@@ -427,9 +507,20 @@ class Spx0DteStraddleStrategy(Strategy):
         self._log_strategy("="*60)
         self._log_strategy("SPX 0DTE Straddle Strategy STOPPING")
         self._log_strategy(f"Final price: {self._current_price}")
+        self._log_strategy(f"Active subscriptions at stop: {len(self._subscribed_option_ids)}")
         self._log_strategy("="*60)
         
-        # Unsubscribe
+        # Unsubscribe from all option quotes
+        for opt_id in list(self._subscribed_option_ids):
+            try:
+                self.unsubscribe_quote_ticks(opt_id)
+            except Exception:
+                pass
+        
+        self._subscribed_option_ids.clear()
+        self._option_quotes.clear()
+        
+        # Unsubscribe from index data
         try:
             if self._bar_type:
                 self.unsubscribe_bars(self._bar_type)
@@ -448,20 +539,33 @@ class Spx0DteStraddleStrategy(Strategy):
 
     def on_quote_tick(self, tick: QuoteTick) -> None:
         """Handle incoming quote tick data."""
-        self._quote_tick_count += 1
-        
-        # Extract prices
-        bid_price = float(tick.bid_price)
-        ask_price = float(tick.ask_price)
-        
-        # Update state
-        self._last_bid = bid_price
-        self._last_ask = ask_price
-        self._current_price = (bid_price + ask_price) / 2
-        self._last_update_time = datetime.now(timezone.utc)
-        
-        # Search for contracts
-        self._find_straddle_instruments()
+        # Check if this is an option quote or index quote
+        if tick.instrument_id in self._subscribed_option_ids:
+            # This is an option quote - store it
+            self._option_quotes[tick.instrument_id] = tick
+            self._option_quote_count += 1
+            
+            # Trigger premium-based selection update
+            self._find_straddle_instruments()
+        elif tick.instrument_id == self._instrument_id:
+            # This is the SPX index quote
+            self._quote_tick_count += 1
+            
+            # Extract prices
+            bid_price = float(tick.bid_price)
+            ask_price = float(tick.ask_price)
+            
+            # Update state
+            self._last_bid = bid_price
+            self._last_ask = ask_price
+            self._current_price = (bid_price + ask_price) / 2
+            self._last_update_time = datetime.now(timezone.utc)
+            
+            # Update subscription window if needed
+            self._update_subscription_window()
+            
+            # Search for contracts
+            self._find_straddle_instruments()
     
     def on_trade_tick(self, tick: TradeTick) -> None:
         """Handle incoming trade tick data."""
@@ -470,6 +574,9 @@ class Spx0DteStraddleStrategy(Strategy):
         # Update state - use trade price as current price
         self._current_price = float(tick.price)
         self._last_update_time = datetime.now(timezone.utc)
+        
+        # Update subscription window if needed
+        self._update_subscription_window()
         
         # Search for contracts
         self._find_straddle_instruments()
@@ -481,6 +588,9 @@ class Spx0DteStraddleStrategy(Strategy):
         # Update state with close price
         self._current_price = float(bar.close)
         self._last_update_time = datetime.now(timezone.utc)
+        
+        # Update subscription window if needed
+        self._update_subscription_window()
         
         # Search for contracts
         self._find_straddle_instruments()
@@ -494,11 +604,11 @@ class Spx0DteStraddleStrategy(Strategy):
         """Handle instrument updates."""
         # Check if this is a requested option
         if isinstance(instrument, OptionInstrument):
-             self._log_strategy(f"Received Option Instrument definition: {instrument.id} (Strike: {instrument.strike_price})", "DEBUG")
+            self._log_strategy(f"Received Option Instrument definition: {instrument.id} (Strike: {instrument.strike_price})", "DEBUG")
         else:
-             if instrument.id == self._instrument_id:
-                  self._instrument = instrument
-                  self._log_strategy(f"RECEIVED Underlying Instrument: {instrument.id}")
+            if instrument.id == self._instrument_id:
+                self._instrument = instrument
+                self._log_strategy(f"RECEIVED Underlying Instrument: {instrument.id}")
 
     def on_reset(self) -> None:
         """Reset strategy state."""
@@ -506,10 +616,16 @@ class Spx0DteStraddleStrategy(Strategy):
         self._current_price = None
         self._current_call = None
         self._current_put = None
+        self._current_call_ask = None
+        self._current_put_ask = None
+        self._anchor_price = None
+        self._subscribed_option_ids.clear()
+        self._option_quotes.clear()
         self._quote_tick_count = 0
         self._trade_tick_count = 0
         self._bar_count = 0
         self._data_count = 0
+        self._option_quote_count = 0
 
 
 # Factory function for creating strategy with default config
@@ -517,9 +633,11 @@ def create_spx_0dte_strategy(
     instrument_id: str = "SPX.CBOE",
     use_bars: bool = True,
     order_id_tag: str = "SPX0DTE001",
-    strike_offset: int = 0,
     days_to_expiry: int = 0,
-    refresh_interval_seconds: int = 60
+    refresh_interval_seconds: int = 60,
+    target_premium: float = 2.0,
+    window_range_strikes: int = 20,
+    hysteresis_points: float = 7.0,
 ) -> Spx0DteStraddleStrategy:
     """
     Factory function to create an SPX 0DTE Straddle Strategy.
@@ -528,8 +646,10 @@ def create_spx_0dte_strategy(
         instrument_id=instrument_id,
         use_bars=use_bars,
         order_id_tag=order_id_tag,
-        strike_offset=strike_offset,
         days_to_expiry=days_to_expiry,
-        refresh_interval_seconds=refresh_interval_seconds
+        refresh_interval_seconds=refresh_interval_seconds,
+        target_premium=target_premium,
+        window_range_strikes=window_range_strikes,
+        hysteresis_points=hysteresis_points,
     )
     return Spx0DteStraddleStrategy(config=config)

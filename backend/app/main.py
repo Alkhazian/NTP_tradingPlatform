@@ -120,25 +120,32 @@ async def health():
 from pydantic import BaseModel
 
 class StartStrategyRequest(BaseModel):
-    strike_offset: int = 0
+    """Request model for starting the SPX 0DTE strategy with premium-based selection."""
     days_to_expiry: int = 0
     refresh_interval_seconds: int = 60
+    # Premium-Based Selection Parameters
+    target_premium: float = 2.0
+    window_range_strikes: int = 20
+    hysteresis_points: float = 7.0
 
 @app.post("/strategy/start")
 async def start_strategy(request: StartStrategyRequest = StartStrategyRequest()):
     """
-    Start the SPX 0DTE Straddle Strategy.
+    Start the SPX 0DTE Straddle Strategy with Premium-Based Selection.
     
     This endpoint starts the strategy which will:
     1. Subscribe to SPX.CBOE price data
-    2. Log all received data for diagnostics
-    3. Track current price for UI display
+    2. Maintain sliding window of option subscriptions
+    3. Select Call/Put based on target premium price
+    4. Track current price for UI display
     """
     try:
         result = await nautilus_manager.start_spx_strategy(
-            strike_offset=request.strike_offset,
             days_to_expiry=request.days_to_expiry,
-            refresh_interval_seconds=request.refresh_interval_seconds
+            refresh_interval_seconds=request.refresh_interval_seconds,
+            target_premium=request.target_premium,
+            window_range_strikes=request.window_range_strikes,
+            hysteresis_points=request.hysteresis_points,
         )
         return result
     except Exception as e:

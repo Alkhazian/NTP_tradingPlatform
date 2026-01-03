@@ -180,12 +180,21 @@ class NautilusManager:
 
     async def start_spx_strategy(
         self,
-        strike_offset: int = 0,
         days_to_expiry: int = 0,
-        refresh_interval_seconds: int = 60
+        refresh_interval_seconds: int = 60,
+        target_premium: float = 2.0,
+        window_range_strikes: int = 20,
+        hysteresis_points: float = 7.0,
     ) -> dict:
         """
-        Start the SPX 0DTE Straddle Strategy.
+        Start the SPX 0DTE Straddle Strategy with Premium-Based Selection.
+        
+        Args:
+            days_to_expiry: Days to expiry (0 for 0DTE)
+            refresh_interval_seconds: How often to refresh contract selection
+            target_premium: Target Ask price for option selection
+            window_range_strikes: Number of strikes in each direction for subscription window
+            hysteresis_points: SPX price change threshold for window re-centering
         
         Returns:
             Dict with status information
@@ -199,7 +208,10 @@ class NautilusManager:
             return {"success": False, "error": "Strategy already running"}
         
         try:
-            self._log_strategy_event("Starting SPX 0DTE Straddle Strategy...")
+            self._log_strategy_event("Starting SPX 0DTE Straddle Strategy (Premium-Based)...")
+            self._log_strategy_event(f"Config: Target Premium=${target_premium:.2f}, "
+                                    f"Window={window_range_strikes} strikes, "
+                                    f"Hysteresis={hysteresis_points} pts")
             
             # Create strategy config
             # Try different instrument ID formats that IB might use
@@ -244,9 +256,11 @@ class NautilusManager:
                 use_bars=True,  # Use bars for stability with index data
                 bar_interval_seconds=5,
                 order_id_tag=unique_order_id_tag,
-                strike_offset=strike_offset,
                 days_to_expiry=days_to_expiry,
                 refresh_interval_seconds=refresh_interval_seconds,
+                target_premium=target_premium,
+                window_range_strikes=window_range_strikes,
+                hysteresis_points=hysteresis_points,
             )
             
             # Create strategy instance

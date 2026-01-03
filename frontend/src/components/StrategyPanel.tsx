@@ -19,12 +19,19 @@ interface StrategyStatus {
         bar_count?: number;
         data_count?: number;
         has_instrument?: boolean;
-        // Selected Contracts
+        // Premium-Based Selection
         current_call_id?: string | null;
         current_put_id?: string | null;
         current_call_verified?: boolean;
         current_put_verified?: boolean;
-        distance_to_strike?: number | null;
+        current_call_ask?: number | null;
+        current_put_ask?: number | null;
+        target_premium?: number;
+        // Sliding Window Data
+        anchor_price?: number | null;
+        active_subscriptions?: number;
+        option_quotes_cached?: number;
+        option_quote_count?: number;
     };
     logs: string[];
 }
@@ -40,8 +47,10 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
     const [autoScroll, setAutoScroll] = useState(true);
     const [mockPrice, setMockPrice] = useState("5950.50");
 
-    // Config State
-    const [strikeOffset, setStrikeOffset] = useState(0);
+    // Premium-Based Config State
+    const [targetPremium, setTargetPremium] = useState(2.0);
+    const [windowRangeStrikes, setWindowRangeStrikes] = useState(20);
+    const [hysteresisPoints, setHysteresisPoints] = useState(7.0);
     const [daysToExpiry, setDaysToExpiry] = useState(0);
     const [refreshInterval, setRefreshInterval] = useState(60);
 
@@ -63,9 +72,11 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    strike_offset: strikeOffset,
                     days_to_expiry: daysToExpiry,
-                    refresh_interval_seconds: refreshInterval
+                    refresh_interval_seconds: refreshInterval,
+                    target_premium: targetPremium,
+                    window_range_strikes: windowRangeStrikes,
+                    hysteresis_points: hysteresisPoints
                 })
             });
             const result = await response.json();
@@ -142,6 +153,8 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
         if (log.includes('RECEIVED')) return 'text-emerald-400';
         if (log.includes('SENDING')) return 'text-blue-400';
         if (log.includes('MOCK DATA')) return 'text-purple-400';
+        if (log.includes('Selection updated')) return 'text-green-400 font-semibold';
+        if (log.includes('Window re-centered')) return 'text-orange-400 font-semibold';
         return 'text-gray-300';
     };
 
@@ -156,7 +169,7 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
                         <span>{strategy?.name || 'SPX 0DTE Opening Straddle'}</span>
                     </CardTitle>
                     <p className="text-sm text-muted-foreground mt-2 ml-12">
-                        0DTE Opening Straddle strategy for SPX index
+                        0DTE Straddle with Premium-Based Selection
                     </p>
                 </div>
                 <div className="flex items-center gap-3">
@@ -184,9 +197,11 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
                                 <p className="text-xs text-muted-foreground mt-1">
                                     {status.instrument_id || 'SPX.CBOE'}
                                 </p>
-                                <p className="text-xs text-muted-foreground mt-2">
-                                    Last Price (indices don't have bid/ask)
-                                </p>
+                                {status.anchor_price && (
+                                    <p className="text-xs text-orange-400 mt-2">
+                                        Window Anchor: ${formatPrice(status.anchor_price)}
+                                    </p>
+                                )}
                             </div>
                             <div className="p-3 rounded-xl bg-cyan-500/10">
                                 <Icons.dollarSign className="w-8 h-8 text-cyan-400" />
@@ -194,7 +209,7 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
                         </div>
                     </div>
 
-                    {/* Last Update Time */}
+                    {/* Last Update Time & Data Lines */}
                     <div className="p-5 rounded-xl bg-white/5 border border-white/10">
                         <div className="flex flex-col justify-center h-full">
                             <p className="text-xs text-muted-foreground uppercase tracking-wider mb-2">Last Update</p>
@@ -212,13 +227,20 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
                                     Waiting for data...
                                 </p>
                             )}
+                            {isActive && (
+                                <div className="mt-3 pt-3 border-t border-white/10">
+                                    <p className="text-xs text-purple-400">
+                                        Data Lines: {status.active_subscriptions ?? 0} subscriptions
+                                    </p>
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>
 
-                {/* Selected Contracts Section */}
+                {/* Selected Contracts Section - Premium Based */}
                 {isActive && (
-                    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
                         {/* CALL Contract */}
                         <div className="p-4 rounded-xl bg-green-500/5 border border-green-500/10">
                             <div className="flex justify-between items-start mb-2">
@@ -232,6 +254,11 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
                             <p className="text-sm font-mono truncate" title={status.current_call_id || "None"}>
                                 {status.current_call_id || "Searching..."}
                             </p>
+                            {status.current_call_ask !== null && status.current_call_ask !== undefined && (
+                                <p className="text-lg font-bold text-green-400 mt-2">
+                                    Ask: ${formatPrice(status.current_call_ask)}
+                                </p>
+                            )}
                         </div>
 
                         {/* PUT Contract */}
@@ -247,36 +274,78 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
                             <p className="text-sm font-mono truncate" title={status.current_put_id || "None"}>
                                 {status.current_put_id || "Searching..."}
                             </p>
+                            {status.current_put_ask !== null && status.current_put_ask !== undefined && (
+                                <p className="text-lg font-bold text-red-400 mt-2">
+                                    Ask: ${formatPrice(status.current_put_ask)}
+                                </p>
+                            )}
                         </div>
 
-                        {/* Distance */}
+                        {/* Target Premium */}
+                        <div className="p-4 rounded-xl bg-purple-500/5 border border-purple-500/10">
+                            <p className="text-xs font-semibold text-purple-400 uppercase mb-2">Target Premium</p>
+                            <p className="text-xl font-bold tabular-nums text-purple-400">
+                                ${formatPrice(status.target_premium)}
+                            </p>
+                            <p className="text-xs text-muted-foreground mt-1">
+                                Selection criteria
+                            </p>
+                        </div>
+
+                        {/* Option Quotes Stats */}
                         <div className="p-4 rounded-xl bg-blue-500/5 border border-blue-500/10">
-                            <p className="text-xs font-semibold text-blue-400 uppercase mb-2">Strike Distance</p>
+                            <p className="text-xs font-semibold text-blue-400 uppercase mb-2">Option Quotes</p>
                             <p className="text-xl font-bold tabular-nums">
-                                {status.distance_to_strike !== undefined && status.distance_to_strike !== null
-                                    ? status.distance_to_strike.toFixed(2)
-                                    : "N/A"}
+                                {status.option_quote_count ?? 0}
+                            </p>
+                            <p className="text-xs text-muted-foreground mt-1">
+                                {status.option_quotes_cached ?? 0} cached
                             </p>
                         </div>
                     </div>
                 )}
 
-                {/* Configuration Section */}
+                {/* Premium-Based Configuration Section */}
                 <div className="p-4 rounded-xl bg-white/5 border border-white/10 space-y-4">
                     <div className="flex items-center gap-2 mb-2">
                         <Icons.settings className="w-4 h-4 text-muted-foreground" />
-                        <span className="text-sm font-medium">Strategy Configuration</span>
+                        <span className="text-sm font-medium">Premium-Based Configuration</span>
                     </div>
-                    <div className="grid gap-4 md:grid-cols-3">
+                    <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-5">
                         <div className="space-y-2">
-                            <label className="text-xs text-muted-foreground">Strike Offset</label>
+                            <label className="text-xs text-muted-foreground">Target Premium ($)</label>
                             <input
                                 type="number"
-                                value={strikeOffset}
-                                onChange={(e) => setStrikeOffset(parseInt(e.target.value) || 0)}
+                                value={targetPremium}
+                                onChange={(e) => setTargetPremium(parseFloat(e.target.value) || 2.0)}
+                                step="0.1"
+                                disabled={isActive}
+                                className="w-full px-3 py-2 rounded-lg bg-black/30 border border-white/10 text-white font-mono text-sm focus:outline-none focus:border-purple-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            />
+                            <p className="text-[10px] text-muted-foreground">Target Ask price</p>
+                        </div>
+                        <div className="space-y-2">
+                            <label className="text-xs text-muted-foreground">Window Range (strikes)</label>
+                            <input
+                                type="number"
+                                value={windowRangeStrikes}
+                                onChange={(e) => setWindowRangeStrikes(parseInt(e.target.value) || 20)}
                                 disabled={isActive}
                                 className="w-full px-3 py-2 rounded-lg bg-black/30 border border-white/10 text-white font-mono text-sm focus:outline-none focus:border-cyan-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
                             />
+                            <p className="text-[10px] text-muted-foreground">~{windowRangeStrikes * 2} total monitored</p>
+                        </div>
+                        <div className="space-y-2">
+                            <label className="text-xs text-muted-foreground">Hysteresis (pts)</label>
+                            <input
+                                type="number"
+                                value={hysteresisPoints}
+                                onChange={(e) => setHysteresisPoints(parseFloat(e.target.value) || 7.0)}
+                                step="0.5"
+                                disabled={isActive}
+                                className="w-full px-3 py-2 rounded-lg bg-black/30 border border-white/10 text-white font-mono text-sm focus:outline-none focus:border-orange-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                            />
+                            <p className="text-[10px] text-muted-foreground">Re-center threshold</p>
                         </div>
                         <div className="space-y-2">
                             <label className="text-xs text-muted-foreground">Days to Expiry (0=Today)</label>
@@ -334,12 +403,12 @@ export function StrategyPanel({ strategy }: StrategyPanelProps) {
                         </p>
                     </div>
                     <div
-                        className="p-3 rounded-lg bg-white/5 text-center cursor-help transition-colors hover:bg-white/10"
-                        title="Custom data types not recognized as standard bars/ticks. Used for debugging unusual data from broker."
+                        className="p-3 rounded-lg bg-purple-500/10 text-center cursor-help transition-colors hover:bg-purple-500/20"
+                        title="Option quote ticks received for contracts in the sliding window."
                     >
-                        <p className="text-2xl font-bold tabular-nums">{status.data_count ?? 0}</p>
-                        <p className="text-xs text-muted-foreground flex items-center justify-center gap-1">
-                            Custom
+                        <p className="text-2xl font-bold tabular-nums text-purple-400">{status.option_quote_count ?? 0}</p>
+                        <p className="text-xs text-purple-400 flex items-center justify-center gap-1">
+                            Opt Quotes
                             <span className="text-[10px] opacity-50">ⓘ</span>
                         </p>
                     </div>
