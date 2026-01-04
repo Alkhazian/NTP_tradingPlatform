@@ -220,9 +220,20 @@ class StrategyManager:
         except Exception as e:
             logger.error(f"Error calculating metrics for {strategy_id}: {e}")
 
+        # Determine display status
+        display_running = strategy.is_running
+        if display_running and hasattr(strategy, "_functional_ready") and not strategy._functional_ready:
+            # Technically running as an actor, but functional logic is still waiting (e.g. for instruments)
+            status_text = "INITIALIZING"
+        elif display_running:
+            status_text = "RUNNING"
+        else:
+            status_text = "STOPPED"
+
         return {
             "id": strategy_id,
-            "running": strategy.is_running,
+            "running": display_running,
+            "status": status_text, # Added detailed status
             "config": strategy.strategy_config.dict(),
             "state": strategy.get_state() if hasattr(strategy, "get_state") else {},
             "metrics": metrics

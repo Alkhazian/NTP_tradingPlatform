@@ -122,7 +122,7 @@ class NautilusManager:
             # In a real app we might listen for a "started" event or use a loop
             # But here we just schedule initialization
             async def init_strategies():
-                await asyncio.sleep(2) # Allow node loops to spin up
+                await asyncio.sleep(10) # Allow node loops to spin up and sync instruments
                 await self.strategy_manager.initialize()
             
             asyncio.create_task(init_strategies())

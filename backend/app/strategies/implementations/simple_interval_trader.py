@@ -26,22 +26,39 @@ class SimpleIntervalTrader(BaseStrategy):
         self.is_position_open = False
         self.last_buy_time: Optional[float] = None # Unix timestamp
         self.open_position_id: Optional[str] = None
-        self._close_timer_handle = None
+        self._close_timer_name: Optional[str] = None
+        self._start_retry_count = 0
 
-    def on_start_safe(self):
+    def on_start_safe(self, time=None):
         """
         Start lifecycle: Subscribe to data and schedule first buy.
         """
         # Request instrument
         self.instrument = self.cache.instrument(self.instrument_id)
         if self.instrument is None:
-            self.logger.error(f"Instrument {self.instrument_id} not found in cache. Cannot start.")
+            self._start_retry_count += 1
+            if self._start_retry_count <= 12: # Retry for 1 minute (5s * 12)
+                self.logger.warning(
+                    f"Instrument {self.instrument_id} not found in cache (retry {self._start_retry_count}/12). "
+                    "Waiting 5 seconds..."
+                )
+                self.clock.set_time_alert(
+                    name=f"{self.id}.start_retry",
+                    alert_time=self.clock.utc_now() + timedelta(seconds=5),
+                    callback=self.on_start_safe,
+                    override=True
+                )
+            else:
+                self.logger.error(f"Instrument {self.instrument_id} not found in cache after 1 minute. Giving up.")
             return
+
+        self.logger.info(f"Instrument {self.instrument_id} resolved. Subscribing to data...")
 
         # Subscribe to 1-minute bars using BarType + BarSpecification
         bar_spec = BarSpecification.from_str("1-MINUTE-LAST")
         bar_type = BarType(self.instrument_id, bar_spec)
         self.subscribe_bars(bar_type)
+        self._functional_ready = True
 
         # Schedule the first buy loop check
         # We check every minute if we should buy

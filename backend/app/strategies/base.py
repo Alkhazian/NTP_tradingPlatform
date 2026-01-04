@@ -26,6 +26,7 @@ class BaseStrategy(Strategy):
         self.strategy_id = config.id
         self._integration_manager = integration_manager # Reference back to manager for persistence calls
         self.logger = logging.getLogger(f"strategy.{self.strategy_id}")
+        self._functional_ready = False # Functional initialization state
 
     def on_start(self):
         """
@@ -85,7 +86,7 @@ class BaseStrategy(Strategy):
         """
         pass
 
-    def on_start_safe(self):
+    def on_start_safe(self, *args, **kwargs):
         """
         Safe hook for subclasses to implement start logic.
         """
