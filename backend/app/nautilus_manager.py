@@ -33,7 +33,7 @@ class NautilusManager:
         self._open_positions = 0
         self._positions = []
         self._account_id: Optional[str] = None
-        self._account_currency = "USD"
+        self._account_currency = "EUR"
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._buying_power = "0.0"
         self._day_realized_pnl = "0.0"
@@ -109,9 +109,23 @@ class NautilusManager:
                 "InteractiveBrokers", InteractiveBrokersLiveExecClientFactory
             )
             self.node.build()
-            
+
+            # Initialize Strategy Manager
+            from .strategies.manager import StrategyManager
+            self.strategy_manager = StrategyManager(self.node)
+
             # Start the node in the background
             asyncio.create_task(self.node.run_async())
+
+            # Initialize strategies (restore state)
+            # We wait a brief moment for the node to fully start engines
+            # In a real app we might listen for a "started" event or use a loop
+            # But here we just schedule initialization
+            async def init_strategies():
+                await asyncio.sleep(2) # Allow node loops to spin up
+                await self.strategy_manager.initialize()
+            
+            asyncio.create_task(init_strategies())
 
             self._connected = True
             logger.info("NautilusTrader TradingNode started in background")
@@ -168,9 +182,9 @@ class NautilusManager:
                                 # Fallback if free not directly available (unlikely for Balance object)
                                 self._buying_power = f"{balance.total.as_double():.2f} {balance.total.currency.code}"
                         except Exception:
-                            self._buying_power = "0.00 USD"
+                            self._buying_power = "0.00 EUR"
                             
-                        logger.info(f"Account updated - Net Liquidation: {self._net_liquidation}, Buying Power: {self._buying_power}")
+                        logger.debug(f"Account updated - Net Liquidation: {self._net_liquidation}, Buying Power: {self._buying_power}")
                     else:
                         logger.info(f"No individual balances found in account {target_account_id}")
                 else:
@@ -237,7 +251,7 @@ class NautilusManager:
                                             pass
                     
                     self._day_realized_pnl = f"{daily_realized:.2f} {self._account_currency}"
-                    logger.info(f"Daily realized P&L: {self._day_realized_pnl}")
+                    logger.debug(f"Daily realized P&L: {self._day_realized_pnl}")
                     
                 except Exception as e:
                     logger.error(f"Error calculating daily realized P&L: {e}", exc_info=True)
@@ -273,42 +287,58 @@ class NautilusManager:
                     portfolio = self.node.portfolio
                     
                     # Total unrealized P&L
-                    if hasattr(portfolio, 'unrealized_pnls'):
-                        unrealized_pnls = portfolio.unrealized_pnls(None)  # None for all venues
-                        if unrealized_pnls:
-                            pnl_list = list(unrealized_pnls.values()) if hasattr(unrealized_pnls, 'values') else list(unrealized_pnls)
-                            if pnl_list:
-                                total_unrealized = sum(p.as_double() for p in pnl_list if p is not None)
-                                self._total_unrealized_pnl = f"{total_unrealized:.2f} {self._account_currency}"
-                    
-                    # Total realized P&L (all time)
-                    if hasattr(portfolio, 'realized_pnls'):
-                        realized_pnls = portfolio.realized_pnls(None)
-                        if realized_pnls:
-                            pnl_list = list(realized_pnls.values()) if hasattr(realized_pnls, 'values') else list(realized_pnls)
-                            if pnl_list:
-                                total_realized = sum(p.as_double() for p in pnl_list if p is not None)
-                                self._total_realized_pnl = f"{total_realized:.2f} {self._account_currency}"
+                    # Total Unrealized P&L (from node cache positions)
+                    self._total_unrealized_pnl = f"0.00 {self._account_currency}"
+                    try:
+                        positions = list(self.node.cache.positions())
+                        if positions:
+                            unrealized = sum(p.unrealized_pnl.as_double() for p in positions if hasattr(p, 'unrealized_pnl') and p.unrealized_pnl)
+                            self._total_unrealized_pnl = f"{unrealized:.2f} {self._account_currency}"
+                    except Exception:
+                        pass
+
+                    # Total realized PnL (from node cache positions)
+                    self._total_realized_pnl = f"0.00 {self._account_currency}"
+                    try:
+                        pnl_list = [p.realized_pnl for p in self.node.cache.positions()]
+                        if pnl_list:
+                            total_realized = sum(p.as_double() for p in pnl_list if p is not None)
+                            self._total_realized_pnl = f"{total_realized:.2f} {self._account_currency}"
+                    except Exception:
+                        pass
                     
                     # Net exposure
-                    if hasattr(portfolio, 'net_exposures'):
-                        net_exposures = portfolio.net_exposures(None)
-                        if net_exposures:
-                            exp_list = list(net_exposures.values()) if hasattr(net_exposures, 'values') else list(net_exposures)
-                            if exp_list:
-                                total_exposure = sum(e.as_double() for e in exp_list if e is not None)
-                                self._net_exposure = f"{abs(total_exposure):.2f} {self._account_currency}"
+                    try:
+                        if hasattr(portfolio, 'net_exposures'):
+                            from nautilus_trader.core.enums import Venue
+                            venue = Venue("InteractiveBrokers")
+                            # Check if account is actually registered with portfolio before calling net_exposures
+                            # to avoid "[ERROR] TRADER-001.Portfolio: Cannot calculate net exposures"
+                            if hasattr(portfolio, "_account_data") and venue in portfolio._account_data:
+                                net_exposures = portfolio.net_exposures(venue)
+                                if net_exposures:
+                                    if hasattr(net_exposures, 'as_double'):
+                                        self._net_exposure = f"{abs(net_exposures.as_double()):.2f} {self._account_currency}"
+                                    elif isinstance(net_exposures, dict) or hasattr(net_exposures, 'values'):
+                                        exp_list = list(net_exposures.values()) if hasattr(net_exposures, 'values') else list(net_exposures)
+                                        if exp_list:
+                                            total_exposure = sum(e.as_double() for e in exp_list if e is not None)
+                                            self._net_exposure = f"{abs(total_exposure):.2f} {self._account_currency}"
+                    except Exception:
+                        pass
                     
                     # Leverage
-                    if hasattr(account, 'leverages'):
-                        leverages = account.leverages()
-                        if leverages:
-                            lev_list = list(leverages.values()) if hasattr(leverages, 'values') else list(leverages)
-                            if lev_list:
-                                # Get the first leverage value
-                                self._leverage = f"{lev_list[0]:.2f}"
+                    try:
+                        if hasattr(account, 'leverages'):
+                            leverages = account.leverages()
+                            if leverages:
+                                lev_list = list(leverages.values()) if hasattr(leverages, 'values') else list(leverages)
+                                if lev_list:
+                                    self._leverage = f"{lev_list[0]:.2f}"
+                    except Exception:
+                        pass
                     
-                    logger.info(f"Portfolio metrics - Margin Used: {self._margin_used}, Unrealized P&L: {self._total_unrealized_pnl}, Net Exposure: {self._net_exposure}")
+                    logger.debug(f"Portfolio metrics - Margin Used: {self._margin_used}, Unrealized P&L: {self._total_unrealized_pnl}, Net Exposure: {self._net_exposure}")
                     
                 except Exception as e:
                     logger.error(f"Error extracting portfolio metrics: {e}", exc_info=True)
@@ -394,7 +424,7 @@ class NautilusManager:
             # for trade in trades:
             #     trade.pop('timestamp', None)
             
-            logger.info(f"Found {len(trades)} recent trades in the last {hours} hours")
+            logger.debug(f"Found {len(trades)} recent trades in the last {hours} hours")
             return trades  # Return all trades for frontend filtering
             
         except Exception as e:

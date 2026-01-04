@@ -30,6 +30,8 @@ services:
       - ib-gateway
     networks:
       - ntd-network
+    volumes:
+      - ./data:/app/data
 
   frontend:
     build: ./frontend

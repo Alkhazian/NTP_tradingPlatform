@@ -1,10 +1,11 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import logging
 import os
 from .redis_manager import RedisManager
 from .nautilus_manager import NautilusManager
+from .strategies.config import StrategyConfig
 import json
 
 logging.basicConfig(level=logging.INFO)
@@ -113,4 +114,70 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+# Strategy Management Endpoints
+
+@app.get("/strategies")
+async def list_strategies():
+    if not nautilus_manager.strategy_manager:
+        return []
+    return nautilus_manager.strategy_manager.get_all_strategies_status()
+
+@app.post("/strategies")
+async def create_strategy(config: dict):
+    """
+    Generic endpoint to create any supported strategy.
+    The config dictionary must contain a 'parameters' dict with a 'strategy_type' field
+    if it's not a standard strategy, or we infer it.
+    For this implementation, we expect the client to align with the StrategyConfig structure.
+    """
+    if not nautilus_manager.strategy_manager:
+        raise HTTPException(status_code=503, detail="System not ready")
+    
+    # We manually parse the dict into the appropriate Pydantic model
+    # in the manager, or we let the manager handle the dictionary directly.
+    # To keep the manager clean (which expects Pydantic objects), 
+    # we can try to guess here or pass the dict to a new manager method.
+    
+    # Let's do a quick check for type here to cast it safely
+    try:
+        validated_config = StrategyConfig(**config)
+            
+        await nautilus_manager.strategy_manager.create_strategy(validated_config, auto_start=validated_config.enabled)
+        return {"status": "created", "id": validated_config.id}
+        
+    except Exception as e:
+        logger.error(f"Error creating strategy: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/strategies/{strategy_id}/start")
+async def start_strategy(strategy_id: str):
+    if not nautilus_manager.strategy_manager:
+        raise HTTPException(status_code=503, detail="System not ready")
+    
+    await nautilus_manager.strategy_manager.start_strategy(strategy_id)
+    return {"status": "started", "id": strategy_id}
+
+@app.post("/strategies/{strategy_id}/stop")
+async def stop_strategy(strategy_id: str):
+    if not nautilus_manager.strategy_manager:
+        raise HTTPException(status_code=503, detail="System not ready")
+    
+    await nautilus_manager.strategy_manager.stop_strategy(strategy_id)
+    return {"status": "stopped", "id": strategy_id}
+
+@app.put("/strategies/{strategy_id}")
+async def update_strategy(strategy_id: str, config: dict):
+    if not nautilus_manager.strategy_manager:
+        raise HTTPException(status_code=503, detail="System not ready")
+        
+    try:
+        updated_strategy = await nautilus_manager.strategy_manager.update_strategy_config(strategy_id, config)
+        if not updated_strategy:
+             raise HTTPException(status_code=404, detail="Strategy not found")
+        return {"status": "updated", "id": strategy_id}
+    except Exception as e:
+        logger.error(f"Error updating strategy: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
 

@@ -1,0 +1,13 @@
+{
+    "id": "MES-Interval-Default",
+    "name": "DeepMind Interval MES",
+    "enabled": false,
+    "instrument_id": "MESH6.CME",
+    "strategy_type": "SimpleIntervalTrader",
+    "order_size": 1.0,
+    "parameters": {
+        "buy_interval_minutes": 10,
+        "hold_duration_minutes": 2
+    },
+    "venue": "InteractiveBrokers"
+}

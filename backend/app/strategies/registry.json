@@ -1,0 +1,7 @@
+[
+    {
+        "strategy_type": "SimpleIntervalTrader",
+        "module": "app.strategies.implementations.simple_interval_trader",
+        "class_name": "SimpleIntervalTrader"
+    }
+]
