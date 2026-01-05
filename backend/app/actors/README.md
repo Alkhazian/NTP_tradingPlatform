@@ -78,8 +78,16 @@ class MyDataActor(BaseStrategy):
         asyncio.create_task(self._broadcast_data(price))
 
     def on_stop_safe(self):
+        # ВАЖЛИВО: Відписатися від ринкових даних для звільнення IB слота
+        try:
+            self.unsubscribe_quote_ticks(self.instrument_id)
+            asyncio.create_task(self._log_to_ui(f"Unsubscribed from {self.instrument_id}"))
+        except Exception as e:
+            logger.error(f"[Actor] Failed to unsubscribe: {e}")
+        
         # Очищення ресурсів
         if self.redis_client:
+            asyncio.create_task(self._log_to_ui("Stopped Actor"))
             asyncio.create_task(self.redis_client.close())
 
     async def _broadcast_data(self, data):
@@ -219,6 +227,21 @@ strategies
     ))
 ```
 
+## Реєстрація в Strategy Registry
+
+**ВАЖЛИВО**: Навіть якщо це Data Actor, він повинен бути зареєстрований в `backend/app/strategies/registry.json` для динамічного імпорту:
+
+```json
+{
+    "strategy_type": "MyDataActor",
+    "module": "app.actors.my_actor",
+    "class_name": "MyDataActor",
+    "comment": "Data Actor (uses Strategy infrastructure for plumbing)"
+}
+```
+
+Це необхідно, бо `StrategyManager` використовує registry для завантаження класів.
+
 ## Існуючі Data Actors
 
 ### SPX Streamer (`spx_streamer.py`)
@@ -235,7 +258,9 @@ strategies
 3. **Robust Error Handling**: Всі Redis операції в try/except
 4. **Logging**: Детальне логування для діагностики
 5. **Polling Fallback**: Якщо `on_instrument_added` не спрацьовує, використовувати polling
-6. **Clean Shutdown**: Закривати Redis з'єднання в `on_stop_safe()`
+6. **⚠️ ОБОВ'ЯЗКОВО Unsubscribe**: У `on_stop_safe()` завжди викликати `unsubscribe_quote_ticks()` для звільнення IB слотів
+7. **Clean Shutdown**: Закривати Redis з'єднання в `on_stop_safe()`
+8. **Registry Entry**: Додати actor в `backend/app/strategies/registry.json` з коментарем "Data Actor"
 
 ## Переваги Підходу
 
