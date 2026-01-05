@@ -131,6 +131,14 @@ class SpxStreamer(BaseStrategy):
             asyncio.create_task(self._log_to_ui(f"QuoteTick: {price:.2f}"))
 
     def on_stop_safe(self):
+        # Unsubscribe from market data to free up IB slot
+        try:
+            self.unsubscribe_quote_ticks(self.instrument_id)
+            asyncio.create_task(self._log_to_ui(f"Unsubscribed from {self.instrument_id}"))
+        except Exception as e:
+            logger.error(f"[SPX Streamer] Failed to unsubscribe: {e}")
+        
+        # Close Redis connection
         if self.redis_client:
             asyncio.create_task(self._log_to_ui("Stopped SPX Streamer"))
             asyncio.create_task(self.redis_client.close())
