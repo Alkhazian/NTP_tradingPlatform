@@ -37,3 +37,5 @@ Thumbs.db
 # Misc
 *.bak
 *.tmp
+data/strategies/config/spx-streamer-01.json
+data/strategies/state/spx-streamer-01.json
