@@ -6,6 +6,7 @@ import { SystemStatusPanel } from './ui/status-indicator';
 import { Header, Sidebar, SidebarItem } from './layout';
 import { Icons } from './ui/icons';
 import Strategies from './Strategies';
+import Analytics from './Analytics';
 
 interface SystemStatus {
     connected: boolean;
@@ -28,6 +29,7 @@ interface SystemStatus {
     net_exposure?: string;
     leverage?: string;
     recent_trades?: Trade[];
+    strategies?: Array<{ id: string; running: boolean }>;
 }
 
 interface Position {
@@ -62,6 +64,9 @@ export default function Dashboard() {
         day_realized_pnl: "0.0 USD",
         recent_trades: []
     });
+    const [spxPrice, setSpxPrice] = useState(0);
+    const [spxLogs, setSpxLogs] = useState<any[]>([]);
+
     const [activeNav, setActiveNav] = useState('dashboard');
     const [, setCurrentTime] = useState(new Date());
 
@@ -87,7 +92,14 @@ export default function Dashboard() {
         ws.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
-                setStatus(prev => ({ ...prev, ...data }));
+                if (data.type === 'system_status' || !data.type) {
+                    // Default assumption for now if type missing, or explicit system_status
+                    setStatus(prev => ({ ...prev, ...data }));
+                } else if (data.type === 'spx_price') {
+                    setSpxPrice(data.price);
+                } else if (data.type === 'spx_log') {
+                    setSpxLogs(prev => [data, ...prev].slice(0, 100));
+                }
             } catch (e) {
                 console.error("Parse error", e);
             }
@@ -138,6 +150,8 @@ export default function Dashboard() {
         }
     ];
 
+    const isSpxStreaming = status.strategies?.some(s => s.id === 'spx-streamer-01' && s.running) || false;
+
     return (
         <div className="min-h-screen bg-background">
             {/* Sidebar */}
@@ -185,6 +199,8 @@ export default function Dashboard() {
 
                     {activeNav === 'strategies' ? (
                         <Strategies />
+                    ) : activeNav === 'analytics' ? (
+                        <Analytics spxPrice={spxPrice} spxLogs={spxLogs} isStreaming={isSpxStreaming} />
                     ) : (
                         <>
                             {/* Stats Grid */}

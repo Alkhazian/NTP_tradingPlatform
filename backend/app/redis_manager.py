@@ -25,10 +25,10 @@ class RedisManager:
         if self.redis:
             await self.redis.publish(channel, json.dumps(message))
 
-    async def subscribe(self, channel: str):
+    async def subscribe(self, *channels: str):
         if self.redis:
             pubsub = self.redis.pubsub()
-            await pubsub.subscribe(channel)
+            await pubsub.subscribe(*channels)
             return pubsub
         return None
 

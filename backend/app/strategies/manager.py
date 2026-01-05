@@ -149,8 +149,16 @@ class StrategyManager:
             logger.info(f"Starting strategy {strategy_id}")
             strategy.start() # Nautilus Strategy start method
             
-            # Update config enabled state
-            strategy.strategy_config.enabled = True
+            # Update config enabled state (handle immutable msgspec structs)
+            try:
+                strategy.strategy_config.enabled = True
+            except (TypeError, AttributeError):
+                try:
+                    import msgspec
+                    strategy.strategy_config = msgspec.structs.replace(strategy.strategy_config, enabled=True)
+                except Exception as e:
+                    logger.warning(f"Failed to update config enabled state (immutable): {e}")
+
             self.persistence.save_config(strategy_id, strategy.strategy_config.dict())
 
     async def stop_strategy(self, strategy_id: str):
@@ -166,7 +174,15 @@ class StrategyManager:
             strategy.stop() # Nautilus Strategy stop method
             
             # Update config enabled state
-            strategy.strategy_config.enabled = False
+            try:
+                strategy.strategy_config.enabled = False
+            except (TypeError, AttributeError):
+                try:
+                    import msgspec
+                    strategy.strategy_config = msgspec.structs.replace(strategy.strategy_config, enabled=False)
+                except Exception as e:
+                    logger.warning(f"Failed to update config enabled state (immutable): {e}")
+
             self.persistence.save_config(strategy_id, strategy.strategy_config.dict())
 
     def get_strategy_status(self, strategy_id: str) -> Dict[str, Any]:

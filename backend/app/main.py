@@ -88,7 +88,7 @@ async def websocket_endpoint(websocket: WebSocket):
     
     pubsub = None
     if redis_manager.redis:
-        pubsub = await redis_manager.subscribe("system_status")
+        pubsub = await redis_manager.subscribe("system_status", "spx_stream_price", "spx_stream_log")
 
     try:
         if pubsub:
@@ -180,4 +180,24 @@ async def update_strategy(strategy_id: str, config: dict):
         logger.error(f"Error updating strategy: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
+    except Exception as e:
+        logger.error(f"Error updating strategy: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
 
+@app.post("/analytics/spx/start")
+async def start_spx_stream():
+    try:
+        id = await nautilus_manager.start_spx_stream()
+        return {"status": "started", "id": id}
+    except Exception as e:
+        logger.error(f"Error starting SPX stream: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/analytics/spx/stop")
+async def stop_spx_stream():
+    try:
+        id = await nautilus_manager.stop_spx_stream()
+        return {"status": "stopped", "id": id}
+    except Exception as e:
+        logger.error(f"Error stopping SPX stream: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

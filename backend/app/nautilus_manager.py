@@ -7,10 +7,12 @@ from nautilus_trader.adapters.interactive_brokers.config import (
     InteractiveBrokersExecClientConfig,
     InteractiveBrokersInstrumentProviderConfig,
 )
+from nautilus_trader.adapters.interactive_brokers.common import IBContract
 from nautilus_trader.adapters.interactive_brokers.factories import (
-    InteractiveBrokersLiveDataClientFactory,
     InteractiveBrokersLiveExecClientFactory,
 )
+from .adapters.custom_ib import CustomInteractiveBrokersLiveDataClientFactory
+from .strategies.spx_streamer import SpxStreamer, SpxStreamerConfig
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import AccountId, Venue
@@ -84,6 +86,9 @@ class NautilusManager:
             # Configure instrument provider
             ib_instrument_config = InteractiveBrokersInstrumentProviderConfig(
                 load_all=False,
+                load_contracts=[
+                    IBContract(secType="IND", symbol="SPX", exchange="CBOE", currency="USD")
+                ],
             )
 
             # Create TradingNode configuration
@@ -103,7 +108,7 @@ class NautilusManager:
             # Create and build the trading node
             self.node = TradingNode(config=config)
             self.node.add_data_client_factory(
-                "InteractiveBrokers", InteractiveBrokersLiveDataClientFactory
+                "InteractiveBrokers", CustomInteractiveBrokersLiveDataClientFactory
             )
             self.node.add_exec_client_factory(
                 "InteractiveBrokers", InteractiveBrokersLiveExecClientFactory
@@ -441,12 +446,56 @@ class NautilusManager:
             self._connected = False
             logger.info("NautilusTrader TradingNode stopped")
 
+    async def start_spx_stream(self):
+        """Start the SPX Streaming Data Actor"""
+        if not self.strategy_manager:
+            raise RuntimeError("Strategy Manager not initialized")
+        
+        # Ensure SPX is loaded in cache
+        # Note: We configured the InstrumentProvider to load SPX.CBOE on startup.
+        # Direct access to load it here is difficult without exposing internal clients.
+        # We assume it is loaded or will be loaded.
+            # We continue, maybe it's already there or will fail in strategy
+        
+        # Check if already exists
+        strategies = self.strategy_manager.get_all_strategies_status()
+        spx_strat_exists = any(s['id'] == 'spx-streamer-01' for s in strategies)
+        
+        # If not, create it
+        if not spx_strat_exists:
+            config = SpxStreamerConfig(
+                id="spx-streamer-01",
+                name="SPX Streamer",
+                strategy_type="SpxStreamer",
+                instrument_id="^SPX.CBOE", 
+                redis_url="redis://redis:6379/0"
+            )
+
+            # Ensure the class is registered (hot-fix if registry wasn't reloaded)
+            if "SpxStreamer" not in self.strategy_manager._strategy_classes:
+                self.strategy_manager._load_registry()
+
+            # StrategyManager.create_strategy takes StrategyConfig
+            await self.strategy_manager.create_strategy(config)
+            
+        await self.strategy_manager.start_strategy('spx-streamer-01')
+        return 'spx-streamer-01'
+
+    async def stop_spx_stream(self):
+        """Stop the SPX Streaming Data Actor"""
+        if not self.strategy_manager:
+             raise RuntimeError("Strategy Manager not initialized")
+        
+        await self.strategy_manager.stop_strategy('spx-streamer-01')
+        return 'spx-streamer-01'
+
     def get_status(self) -> dict:
         """
         Get current connection and account status.
         Maintains compatibility with legacy IBConnector interface.
         """
         return {
+            "type": "system_status",
             "connected": self._connected,
             "nautilus_active": self.node is not None,
             "net_liquidation": self._net_liquidation,
@@ -465,6 +514,7 @@ class NautilusManager:
             "net_exposure": self._net_exposure,
             "leverage": self._leverage,
             "recent_trades": self._recent_trades,
+            "strategies": self.strategy_manager.get_all_strategies_status() if self.strategy_manager else [],
         }
 
     async def update_status(self):
