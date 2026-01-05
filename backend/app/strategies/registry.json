@@ -3,10 +3,5 @@
         "strategy_type": "SimpleIntervalTrader",
         "module": "app.strategies.implementations.simple_interval_trader",
         "class_name": "SimpleIntervalTrader"
-    },
-    {
-        "strategy_type": "SpxStreamer",
-        "module": "app.strategies.spx_streamer",
-        "class_name": "SpxStreamer"
     }
 ]

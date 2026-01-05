@@ -1,4 +1,5 @@
-# Data Actors Package
+"""
+Data Actors Package
 
 This package contains **Data Actors** - specialized components that provide market data feeds to trading strategies.
 
@@ -19,13 +20,14 @@ Data Actors are **non-trading components** that:
 
 ## Technical Implementation
 
-Data Actors inherit from `BaseStrategy` to leverage NautilusTrader's infrastructure (data subscriptions, lifecycle management), but are architecturally separated:
-- Located in `backend/app/actors/` (not `strategies/`)
+Data Actors inherit from BaseStrategy to leverage NautilusTrader infrastructure (data subscriptions, lifecycle management), but are architecturally separated:
+- Located in backend/app/actors/ (not strategies/)
 - Hidden from UI strategy list
 - No trading logic (orders, positions, PnL)
 
-See [README.md](./README.md) for detailed documentation and examples.
+See README.md for detailed documentation and examples.
 
 ## Current Actors
 
-- **SPX Streamer** (`spx_streamer.py`) - Real-time S&P 500 Index price feed
+- **SPX Streamer** (spx_streamer.py) - Real-time S&P 500 Index price feed
+"""

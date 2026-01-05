@@ -17,7 +17,9 @@ class SpxStreamerConfig(StrategyConfig):
     id: str = "spx-streamer-01"
     redis_url: str = "redis://redis:6379/0"
 
-from .base import BaseStrategy
+# Import BaseStrategy from the strategies package to reuse the wrapper logic
+# This allows us to use standard Nautilus plumbing while architecturally treating it as an Actor
+from app.strategies.base import BaseStrategy
 
 class SpxStreamer(BaseStrategy):
     """

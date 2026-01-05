@@ -12,7 +12,7 @@ from nautilus_trader.adapters.interactive_brokers.factories import (
     InteractiveBrokersLiveExecClientFactory,
 )
 from .adapters.custom_ib import CustomInteractiveBrokersLiveDataClientFactory
-from .strategies.spx_streamer import SpxStreamer, SpxStreamerConfig
+from .actors.spx_streamer import SpxStreamer, SpxStreamerConfig
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import AccountId, Venue
