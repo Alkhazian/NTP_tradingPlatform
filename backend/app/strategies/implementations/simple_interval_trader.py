@@ -74,6 +74,7 @@ class SimpleIntervalTrader(BaseStrategy):
         """
         Periodically checks if it's time to buy.
         """
+        self.logger.info(f"DEBUG: _check_buy_signal called at {datetime.utcfromtimestamp(self.clock.timestamp())}")
         try:
             # Reschedule check
             self.clock.set_time_alert(
@@ -115,7 +116,7 @@ class SimpleIntervalTrader(BaseStrategy):
         order = self.order_factory.market(
             instrument_id=self.instrument_id,
             order_side=OrderSide.BUY,
-            quantity=Quantity.from_str(str(self.trader_config.order_size)),
+            quantity=Quantity(self.trader_config.order_size),
         )
         self.submit_order(order)
         self.logger.info(f"Submitted BUY order for {self.trader_config.order_size} {self.instrument_id}")
