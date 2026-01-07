@@ -66,11 +66,11 @@ async def broadcast_status():
             # Publish to Redis channel
             if redis_manager.redis:
                 await redis_manager.publish("system_status", status)
-                logger.info("Broadcasted system status to Redis")
+                #logger.info("Broadcasted system status to Redis")
         except Exception as e:
             logger.error(f"Error in broadcast loop: {e}")
         
-        await asyncio.sleep(1)
+        await asyncio.sleep(10)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):

@@ -118,7 +118,7 @@ class NautilusManager:
                 ibg_port=self.port,
                 ibg_client_id=101,
                 use_regular_trading_hours=False,
-                #market_data_type=IBMarketDataTypeEnum.DELAYED_FROZEN, 
+                market_data_type=IBMarketDataTypeEnum.DELAYED_FROZEN, 
                 instrument_provider=ib_instrument_config,
             )
 
@@ -404,7 +404,7 @@ class NautilusManager:
                     except Exception:
                         pass
                     
-                    logger.info(f"Portfolio metrics - Margin Used: {self._margin_used}, Unrealized P&L: {self._total_unrealized_pnl}, Net Exposure: {self._net_exposure}")
+                    #logger.info(f"Portfolio metrics - Margin Used: {self._margin_used}, Unrealized P&L: {self._total_unrealized_pnl}, Net Exposure: {self._net_exposure}")
                     
                 except Exception as e:
                     logger.error(f"Error extracting portfolio metrics: {e}", exc_info=True)

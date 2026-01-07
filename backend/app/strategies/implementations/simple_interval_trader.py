@@ -116,7 +116,7 @@ class SimpleIntervalTrader(BaseStrategy):
         order = self.order_factory.market(
             instrument_id=self.instrument_id,
             order_side=OrderSide.BUY,
-            quantity=Quantity(self.trader_config.order_size),
+            quantity=Quantity.from_int(int(self.trader_config.order_size)),
         )
         self.submit_order(order)
         self.logger.info(f"Submitted BUY order for {self.trader_config.order_size} {self.instrument_id}")
