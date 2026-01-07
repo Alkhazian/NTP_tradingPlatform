@@ -6,6 +6,7 @@ from nautilus_trader.model.enums import OrderSide, OrderType, TimeInForce
 from nautilus_trader.model.identifiers import Venue, InstrumentId
 from nautilus_trader.model.data import Bar, BarType, BarSpecification, BarAggregation
 from nautilus_trader.model.enums import PriceType
+from nautilus_trader.model.objects import Quantity
 
 from ..base import BaseStrategy
 from ..config import StrategyConfig
@@ -114,7 +115,7 @@ class SimpleIntervalTrader(BaseStrategy):
         order = self.order_factory.market(
             instrument_id=self.instrument_id,
             order_side=OrderSide.BUY,
-            quantity=self.trader_config.order_size,
+            quantity=Quantity.from_str(str(self.trader_config.order_size)),
         )
         self.submit_order(order)
         self.logger.info(f"Submitted BUY order for {self.trader_config.order_size} {self.instrument_id}")

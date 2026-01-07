@@ -6,8 +6,8 @@
     "strategy_type": "SimpleIntervalTrader",
     "order_size": 1.0,
     "parameters": {
-        "buy_interval_minutes": 10,
-        "hold_duration_minutes": 2
+        "buy_interval_minutes": 2,
+        "hold_duration_minutes": 1
     },
-    "venue": "InteractiveBrokers"
+    "venue": "CME"
 }
