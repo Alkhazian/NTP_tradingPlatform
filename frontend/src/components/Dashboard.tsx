@@ -7,6 +7,7 @@ import { Header, Sidebar, SidebarItem } from './layout';
 import { Icons } from './ui/icons';
 import Strategies from './Strategies';
 import Analytics from './Analytics';
+import LogViewer from './LogViewer';
 
 interface SystemStatus {
     connected: boolean;
@@ -67,7 +68,9 @@ export default function Dashboard() {
     const [spxPrice, setSpxPrice] = useState(0);
     const [spxLogs, setSpxLogs] = useState<any[]>([]);
 
+    //const [activeNav, setActiveNav] = useState('logs');
     const [activeNav, setActiveNav] = useState('dashboard');
+
     const [, setCurrentTime] = useState(new Date());
 
     // Update time every second
@@ -181,10 +184,10 @@ export default function Dashboard() {
                     onClick={() => setActiveNav('positions')}
                 />
                 <SidebarItem
-                    icon="clock"
-                    label="History"
-                    active={activeNav === 'history'}
-                    onClick={() => setActiveNav('history')}
+                    icon="server"
+                    label="Logs"
+                    active={activeNav === 'logs'}
+                    onClick={() => setActiveNav('logs')}
                 />
             </Sidebar>
 
@@ -201,6 +204,8 @@ export default function Dashboard() {
                         <Strategies />
                     ) : activeNav === 'analytics' ? (
                         <Analytics spxPrice={spxPrice} spxLogs={spxLogs} isStreaming={isSpxStreaming} />
+                    ) : activeNav === 'logs' ? (
+                        <LogViewer />
                     ) : (
                         <>
                             {/* Stats Grid */}

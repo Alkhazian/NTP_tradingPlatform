@@ -19,7 +19,8 @@ import {
     Square,
     Settings,
     Plus,
-    Trash2
+    Trash2,
+    Search
 } from 'lucide-react';
 
 export const Icons = {
@@ -44,6 +45,7 @@ export const Icons = {
     settings: Settings,
     plus: Plus,
     trash: Trash2,
+    search: Search,
 };
 
 export type IconName = keyof typeof Icons;

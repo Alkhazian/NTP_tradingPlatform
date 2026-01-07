@@ -8,8 +8,36 @@ from .nautilus_manager import NautilusManager
 from .strategies.config import StrategyConfig
 import json
 
-logging.basicConfig(level=logging.INFO)
+import aiofiles
+from logging.handlers import RotatingFileHandler
+
+# Configure logging
+LOG_FILE = "logs/app.log"
+os.makedirs("logs", exist_ok=True)
+
+# Rotating file handler: 10MB per file, 5 backups
+file_handler = RotatingFileHandler(
+    LOG_FILE,
+    maxBytes=10 * 1024 * 1024, # 10MB
+    backupCount=5
+)
+file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(), # Keep stdout
+        file_handler
+    ]
+)
 logger = logging.getLogger(__name__)
+
+# Ensure library loggers also use our file handler
+for logger_name in ["uvicorn", "uvicorn.error", "nautilus_trader"]:
+    l = logging.getLogger(logger_name)
+    l.addHandler(file_handler)
+    l.propagate = True
+logger.info("--- Log Stream Initialized ---")
 
 app = FastAPI()
 
@@ -30,13 +58,16 @@ nautilus_manager = NautilusManager(host=IB_HOST, port=IB_PORT)
 @app.on_event("startup")
 async def startup_event():
     await redis_manager.connect()
-    logger.info("Starting NautilusTrader Manager...")
-    try:
-        await nautilus_manager.start()
-        logger.info("NautilusTrader started successfully")
-    except Exception as e:
-        logger.error(f"Failed to start NautilusTrader: {e}")
     
+    async def start_nautilus():
+        logger.info("Starting NautilusTrader Manager...")
+        try:
+            await nautilus_manager.start()
+            logger.info("NautilusTrader started successfully")
+        except Exception as e:
+            logger.error(f"Failed to start NautilusTrader: {e}")
+            
+    asyncio.create_task(start_nautilus())
     asyncio.create_task(broadcast_status())
 
 @app.on_event("shutdown")
@@ -111,6 +142,39 @@ async def websocket_endpoint(websocket: WebSocket):
     finally:
         if pubsub:
             await pubsub.close()
+@app.websocket("/ws/logs")
+async def websocket_logs(websocket: WebSocket):
+    await websocket.accept()
+    logger.info("Log stream connection accepted")
+    
+    try:
+        if os.path.exists(LOG_FILE):
+            async with aiofiles.open(LOG_FILE, mode='r') as f:
+                # Read all current lines for history
+                await f.seek(0, os.SEEK_SET)
+                all_lines = await f.readlines()
+                history = all_lines[-500:] if len(all_lines) > 500 else all_lines
+                
+                logger.info(f"Sending {len(history)} lines of log history")
+                for line in history:
+                    await websocket.send_text(line)
+
+                # Pointer is at EOF, continue tailing
+                while True:
+                    line = await f.readline()
+                    if line:
+                        await websocket.send_text(line)
+                    else:
+                        await asyncio.sleep(0.1)
+        else:
+            logger.warning(f"Log file {LOG_FILE} not found for streaming")
+            while True:
+                await asyncio.sleep(1)
+                    
+    except WebSocketDisconnect:
+        logger.info("Log stream disconnected")
+    except Exception as e:
+        logger.error(f"Error in log stream: {e}", exc_info=True)
 
 @app.get("/health")
 async def health():
