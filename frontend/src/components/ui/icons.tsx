@@ -13,7 +13,14 @@ import {
     LineChart,
     BarChart3,
     Clock,
-    RefreshCw
+    RefreshCw,
+    Cpu,
+    Play,
+    Square,
+    Settings,
+    Plus,
+    Trash2,
+    Search
 } from 'lucide-react';
 
 export const Icons = {
@@ -32,6 +39,13 @@ export const Icons = {
     barChart: BarChart3,
     clock: Clock,
     refresh: RefreshCw,
+    cpu: Cpu,
+    play: Play,
+    square: Square,
+    settings: Settings,
+    plus: Plus,
+    trash: Trash2,
+    search: Search,
 };
 
 export type IconName = keyof typeof Icons;

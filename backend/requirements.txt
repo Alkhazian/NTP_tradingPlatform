@@ -3,3 +3,4 @@ uvicorn[standard]==0.31.0
 redis==5.0.0
 websockets==12.0
 nautilus_trader[ib]
+aiofiles==23.2.1
