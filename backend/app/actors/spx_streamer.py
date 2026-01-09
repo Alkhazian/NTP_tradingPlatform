@@ -26,8 +26,8 @@ class SpxStreamer(BaseStrategy):
     DataActor (implemented as Strategy) to stream SPX prices.
     Connects to SPX and broadcasts ticks to Redis for UI.
     """
-    def __init__(self, config: SpxStreamerConfig, integration_manager=None, **kwargs):
-        super().__init__(config, integration_manager)
+    def __init__(self, config: SpxStreamerConfig, integration_manager=None, persistence_manager=None, **kwargs):
+        super().__init__(config, integration_manager, persistence_manager)
         self.instrument_id = InstrumentId.from_str(config.instrument_id)
         self.redis_client = None
         self._last_price = 0.0

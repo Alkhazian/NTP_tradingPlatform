@@ -17,8 +17,8 @@ class SimpleIntervalTrader(BaseStrategy):
     holds for M minutes, then closes the position.
     """
     
-    def __init__(self, config: StrategyConfig, integration_manager=None):
-        super().__init__(config, integration_manager)
+    def __init__(self, config: StrategyConfig, integration_manager=None, persistence_manager=None):
+        super().__init__(config, integration_manager, persistence_manager)
         self.trader_config: StrategyConfig = config # Type hinting
         self.instrument_id = InstrumentId.from_str(config.instrument_id)
         self.instrument: Optional[Instrument] = None
@@ -131,6 +131,24 @@ class SimpleIntervalTrader(BaseStrategy):
         if event.order_side == OrderSide.BUY:
             self.logger.info(f"BUY Filled: {event}")
             self.is_position_open = True
+            
+            # Record entry price for PnL calculation later
+            self.last_entry_price = float(event.last_px) 
+
+            # Start persistent trade record
+            # We use asyncio.create_task because we can't await easily in this sync callback 
+            # (unless on_order_filled is async in base? No, it's usually sync in Nautilus)
+            # Actually, Nautilus 1.18+ callbacks are sync.
+            # BaseStrategy methods we just added are async. We need to schedule them.
+            import asyncio
+            asyncio.create_task(self.start_trade_record(
+                str(self.instrument_id),
+                self.clock.timestamp(),
+                self.last_entry_price,
+                float(event.last_qty),
+                "LONG"
+            ))
+
             self.save_state() # Persist "Open Position" state
             
             # Schedule release/sell
@@ -150,6 +168,25 @@ class SimpleIntervalTrader(BaseStrategy):
             self.is_position_open = False
             self.open_position_id = None
             self._close_timer_name = None
+            
+            # Close persistent trade record
+            multiplier = 1.0
+            if self.instrument and self.instrument.multiplier:
+                multiplier = float(self.instrument.multiplier)
+            
+            import asyncio
+            # We assume exit reason was set before close, or we default
+            reason = getattr(self, "last_exit_reason", "UNKNOWN")
+
+            asyncio.create_task(self.close_trade_record(
+                self.clock.timestamp(),
+                float(event.last_px),
+                reason,
+                float(event.last_qty),
+                self.last_entry_price if hasattr(self, 'last_entry_price') else 0.0,
+                multiplier
+            ))
+
             self.save_state() # Persist "Closed Position" state
 
     def _execute_close(self, time):
@@ -160,6 +197,7 @@ class SimpleIntervalTrader(BaseStrategy):
             return
 
         self.logger.info("Hold duration expried. Executing SELL order.")
+        self.last_exit_reason = "HOLD_DURATION_EXPIRED"
         # Close all positions for this instrument (simple approach)
         self.close_all_positions(self.instrument_id)
 
@@ -170,7 +208,9 @@ class SimpleIntervalTrader(BaseStrategy):
         return {
             "is_position_open": self.is_position_open,
             "last_buy_time": self.last_buy_time,
-            "open_position_id": self.open_position_id
+            "open_position_id": self.open_position_id,
+            "last_entry_price": getattr(self, "last_entry_price", 0.0),
+            "last_exit_reason": getattr(self, "last_exit_reason", None)
         }
 
     def set_state(self, state: Dict[str, Any]):
@@ -180,6 +220,8 @@ class SimpleIntervalTrader(BaseStrategy):
         self.is_position_open = state.get("is_position_open", False)
         self.last_buy_time = state.get("last_buy_time")
         self.open_position_id = state.get("open_position_id")
+        self.last_entry_price = state.get("last_entry_price", 0.0)
+        self.last_exit_reason = state.get("last_exit_reason")
         
         # If we restored an open position state, we need to consider if we should close it
         # If the system crashed and restarted, the hold timer is lost.

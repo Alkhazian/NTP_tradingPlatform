@@ -1,6 +1,8 @@
 {
     "is_position_open": false,
-    "last_buy_time": 1767819608.5748658,
+    "last_buy_time": 1767991813.620724,
     "open_position_id": null,
-    "_last_updated": "2026-01-07T21:01:36.310848"
+    "last_entry_price": 7012.0,
+    "last_exit_reason": "HOLD_DURATION_EXPIRED",
+    "_last_updated": "2026-01-09T20:51:56.090919"
 }

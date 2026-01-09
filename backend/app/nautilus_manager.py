@@ -20,9 +20,9 @@ from nautilus_trader.config import (
 )
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import AccountId, Venue
+from .services.trade_recorder import TradeRecorder
 
 logger = logging.getLogger(__name__)
-
 
 class NautilusManager:
     """
@@ -53,10 +53,14 @@ class NautilusManager:
         self._margin_usage_percent = "0.0"
         self._recent_trades = []
         self.strategy_manager = None
+        self.trade_recorder = None # Initialize lazily or here
 
     async def start(self):
         """Initialize and start the NautilusTrader TradingNode"""
         try:
+            # Initialize TradeRecorder
+            self.trade_recorder = TradeRecorder() # Sync init for now, lightweight
+            
             # Get account ID from environment
             account_id = os.getenv("TWS_ACCOUNT")
             if not account_id:
@@ -170,7 +174,7 @@ class NautilusManager:
 
             # Initialize Strategy Manager
             from .strategies.manager import StrategyManager
-            self.strategy_manager = StrategyManager(self.node)
+            self.strategy_manager = StrategyManager(self.node, integration_manager=self)
 
             # Start the node in the background
             asyncio.create_task(self.node.run_async())
@@ -550,11 +554,15 @@ class NautilusManager:
         await self.strategy_manager.stop_strategy('spx-streamer-01')
         return 'spx-streamer-01'
 
-    def get_status(self) -> dict:
+    async def get_status(self) -> dict:
         """
         Get current connection and account status.
         Maintains compatibility with legacy IBConnector interface.
         """
+        strategies = []
+        if self.strategy_manager:
+            strategies = await self.strategy_manager.get_all_strategies_status()
+
         return {
             "type": "system_status",
             "connected": self._connected,
@@ -575,7 +583,7 @@ class NautilusManager:
             "net_exposure": self._net_exposure,
             "leverage": self._leverage,
             "recent_trades": self._recent_trades,
-            "strategies": self.strategy_manager.get_all_strategies_status() if self.strategy_manager else [],
+            "strategies": strategies,
         }
 
     async def update_status(self):

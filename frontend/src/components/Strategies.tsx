@@ -21,7 +21,7 @@ interface StrategyStatus {
     metrics?: {
         total_trades: number;
         win_rate: number;
-        realized_pnl: number;
+        total_pnl: number;
         unrealized_pnl: number;
     };
 }
@@ -114,12 +114,6 @@ export default function Strategies() {
 
     return (
         <div className="space-y-6">
-            <div className="flex items-center justify-between">
-                <div>
-                    <h2 className="text-2xl font-bold tracking-tight">Strategy Management</h2>
-                    <p className="text-muted-foreground">Configure and control automated trading strategies</p>
-                </div>
-            </div>
 
             {/* Strategy List */}
             <div className="grid gap-6">
@@ -221,15 +215,15 @@ export default function Strategies() {
                                                 </p>
                                             </div>
                                             <div className="space-y-1">
-                                                <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest">Realized PnL</p>
-                                                <p className={`text-xl font-bold ${(strategy.metrics?.realized_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                                    ${strategy.metrics?.realized_pnl?.toFixed(2) || '0.00'}
+                                                <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest">Total PnL</p>
+                                                <p className={`text-xl font-bold ${(strategy.metrics?.total_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                                    {(strategy.metrics?.total_pnl || 0) < 0 ? '-' : ''}${Math.abs(strategy.metrics?.total_pnl || 0).toFixed(2)}
                                                 </p>
                                             </div>
                                             <div className="space-y-1">
                                                 <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest">Unrealized PnL</p>
                                                 <p className={`text-xl font-bold ${(strategy.metrics?.unrealized_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                                    ${strategy.metrics?.unrealized_pnl?.toFixed(2) || '0.00'}
+                                                    {(strategy.metrics?.unrealized_pnl || 0) < 0 ? '-' : ''}${Math.abs(strategy.metrics?.unrealized_pnl || 0).toFixed(2)}
                                                 </p>
                                             </div>
                                         </div>
