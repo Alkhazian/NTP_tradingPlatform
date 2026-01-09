@@ -25,7 +25,7 @@ class SimpleIntervalTrader(BaseStrategy):
         
         # Runtime State
         self.is_position_open = False
-        self.last_buy_time: Optional[float] = None # Unix timestamp
+        self.last_buy_time: Optional[str] = None # ISO 8601 string
         self.open_position_id: Optional[str] = None
         self._close_timer_name: Optional[str] = None
         self._start_retry_count = 0
@@ -102,7 +102,7 @@ class SimpleIntervalTrader(BaseStrategy):
             if current_dt.minute % buy_interval == 0:
                 # To prevent double buying in the same minute, we check last_buy_time
                 if self.last_buy_time:
-                    last_buy_dt = datetime.utcfromtimestamp(self.last_buy_time)
+                    last_buy_dt = datetime.fromisoformat(self.last_buy_time)
                     if last_buy_dt.minute == current_dt.minute and last_buy_dt.hour == current_dt.hour:
                         return
                         
@@ -122,7 +122,7 @@ class SimpleIntervalTrader(BaseStrategy):
         self.logger.info(f"Submitted BUY order for {self.trader_config.order_size} {self.instrument_id}")
         
         # Optimistic state update (will be confirmed by fill)
-        self.last_buy_time = self.clock.timestamp()
+        self.last_buy_time = self.clock.utc_now().isoformat()
         
     def on_order_filled(self, event):
         """
@@ -134,6 +134,7 @@ class SimpleIntervalTrader(BaseStrategy):
             
             # Record entry price for PnL calculation later
             self.last_entry_price = float(event.last_px) 
+            self.open_position_id = str(event.order_id)
 
             # Start persistent trade record
             # We use asyncio.create_task because we can't await easily in this sync callback 
@@ -143,10 +144,12 @@ class SimpleIntervalTrader(BaseStrategy):
             import asyncio
             asyncio.create_task(self.start_trade_record(
                 str(self.instrument_id),
-                self.clock.timestamp(),
+                self.clock.utc_now().isoformat(),
                 self.last_entry_price,
                 float(event.last_qty),
-                "LONG"
+                "LONG",
+                float(event.commission) if hasattr(event, 'commission') else 0.0,
+                raw_data=str(event)
             ))
 
             self.save_state() # Persist "Open Position" state
@@ -179,12 +182,14 @@ class SimpleIntervalTrader(BaseStrategy):
             reason = getattr(self, "last_exit_reason", "UNKNOWN")
 
             asyncio.create_task(self.close_trade_record(
-                self.clock.timestamp(),
+                self.clock.utc_now().isoformat(),
                 float(event.last_px),
                 reason,
                 float(event.last_qty),
                 self.last_entry_price if hasattr(self, 'last_entry_price') else 0.0,
-                multiplier
+                float(event.commission) if hasattr(event, 'commission') else 0.0,
+                raw_data=str(event),
+                multiplier=multiplier
             ))
 
             self.save_state() # Persist "Closed Position" state
@@ -228,8 +233,9 @@ class SimpleIntervalTrader(BaseStrategy):
         # We should check if we are past the hold duration.
         
         if self.is_position_open and self.last_buy_time:
-            now_ts = datetime.utcnow().timestamp()
-            elapsed_min = (now_ts - self.last_buy_time) / 60
+            now_dt = datetime.utcnow()
+            last_buy_dt = datetime.fromisoformat(self.last_buy_time)
+            elapsed_min = (now_dt - last_buy_dt).total_seconds() / 60
             
             hold_duration = int(self.trader_config.parameters.get("hold_duration_minutes", 2))
             

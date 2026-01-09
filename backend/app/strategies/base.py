@@ -77,7 +77,7 @@ class BaseStrategy(Strategy):
                 self.active_trade_id = state.get('active_trade_id')
                 self.set_state(state)
 
-    async def start_trade_record(self, instrument_id: str, entry_time: float, entry_price: float, quantity: float, direction: str, trade_type: str = "DAYTRADE"):
+    async def start_trade_record(self, instrument_id: str, entry_time: str, entry_price: float, quantity: float, direction: str, commission: float = 0.0, raw_data: str = None, trade_type: str = "DAYTRADE"):
         """
         Persist the start of a trade.
         """
@@ -90,14 +90,14 @@ class BaseStrategy(Strategy):
             recorder = getattr(self._integration_manager, 'trade_recorder', None)
             if recorder:
                 self.active_trade_id = await recorder.start_trade(
-                    self.strategy_id, instrument_id, entry_time, entry_price, quantity, direction, trade_type
+                    self.strategy_id, instrument_id, entry_time, entry_price, quantity, direction, commission, raw_data, trade_type
                 )
                 self.save_state() # Immediately save the ID
                 self.logger.info(f"Started trade record {self.active_trade_id}")
         except Exception as e:
             self.logger.error(f"Failed to record trade start: {e}")
 
-    async def close_trade_record(self, exit_time: float, exit_price: float, exit_reason: str, quantity: float, entry_price: float, multiplier: float = 1.0):
+    async def close_trade_record(self, exit_time: str, exit_price: float, exit_reason: str, quantity: float, entry_price: float, commission: float = 0.0, raw_data: str = None, multiplier: float = 1.0):
         """
         Persist the closure of a trade and calculate PnL.
         """
@@ -145,7 +145,7 @@ class BaseStrategy(Strategy):
                 # So (Exit - Entry) is correct.
                 
                 await recorder.close_trade(
-                    self.active_trade_id, exit_time, exit_price, exit_reason, pnl
+                    self.active_trade_id, exit_time, exit_price, exit_reason, pnl, commission, raw_data
                 )
                 self.logger.info(f"Closed trade record {self.active_trade_id} with PnL {pnl}")
                 self.active_trade_id = None

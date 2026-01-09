@@ -22,6 +22,8 @@ interface StrategyStatus {
         total_trades: number;
         win_rate: number;
         total_pnl: number;
+        total_commission: number;
+        net_pnl: number;
         unrealized_pnl: number;
     };
 }
@@ -203,7 +205,7 @@ export default function Strategies() {
                                         </div>
 
                                         {/* Metrics Grid */}
-                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 p-4 bg-white/5 rounded-xl border border-white/5">
+                                        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 p-4 bg-white/5 rounded-xl border border-white/5">
                                             <div className="space-y-1">
                                                 <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest">Total Trades</p>
                                                 <p className="text-xl font-bold">{strategy.metrics?.total_trades || 0}</p>
@@ -215,15 +217,21 @@ export default function Strategies() {
                                                 </p>
                                             </div>
                                             <div className="space-y-1">
-                                                <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest">Total PnL</p>
+                                                <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest">Gross PnL</p>
                                                 <p className={`text-xl font-bold ${(strategy.metrics?.total_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                                                     {(strategy.metrics?.total_pnl || 0) < 0 ? '-' : ''}${Math.abs(strategy.metrics?.total_pnl || 0).toFixed(2)}
                                                 </p>
                                             </div>
                                             <div className="space-y-1">
-                                                <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest">Unrealized PnL</p>
-                                                <p className={`text-xl font-bold ${(strategy.metrics?.unrealized_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                                    {(strategy.metrics?.unrealized_pnl || 0) < 0 ? '-' : ''}${Math.abs(strategy.metrics?.unrealized_pnl || 0).toFixed(2)}
+                                                <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest">Comms</p>
+                                                <p className="text-xl font-bold text-amber-400">
+                                                    ${(strategy.metrics?.total_commission || 0).toFixed(2)}
+                                                </p>
+                                            </div>
+                                            <div className="space-y-1">
+                                                <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest">Net PnL</p>
+                                                <p className={`text-xl font-bold ${(strategy.metrics?.net_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                                    {(strategy.metrics?.net_pnl || 0) < 0 ? '-' : ''}${Math.abs(strategy.metrics?.net_pnl || 0).toFixed(2)}
                                                 </p>
                                             </div>
                                         </div>
