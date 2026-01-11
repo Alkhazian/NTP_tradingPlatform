@@ -6,10 +6,10 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 
-from nautilus_trader.model.identifiers import InstrumentId, Venue
+from nautilus_trader.model.identifiers import InstrumentId, Venue, Symbol
 from nautilus_trader.model.instruments import Instrument, FuturesContract, Equity
 from nautilus_trader.model.objects import Price, Quantity, Money, Currency
-from nautilus_trader.model.enums import BarAggregation, PriceType
+from nautilus_trader.model.enums import BarAggregation, PriceType, AssetClass
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from nautilus_trader.model.data import Bar, BarType, BarSpecification
 from nautilus_trader.core.datetime import dt_to_unix_nanos
@@ -410,39 +410,43 @@ class ParquetImporter:
         instrument_id = InstrumentId.from_str(f"{symbol}.{venue}")
         
         if instrument_type == "futures":
+            # Map asset class string to Enum
+            ac_str = str(kwargs.get("asset_class", "INDEX")).upper()
+            try:
+                ac = AssetClass[ac_str]
+            except KeyError:
+                logger.warning(f"Unknown asset class {ac_str}, defaulting to INDEX")
+                ac = AssetClass.INDEX
+
             # Create futures contract
             instrument = FuturesContract(
                 instrument_id=instrument_id,
-                raw_symbol=symbol,
-                asset_class=kwargs.get("asset_class", "INDEX"),
-                exchange=venue,
+                raw_symbol=Symbol(symbol),
+                asset_class=ac,
+                currency=Currency.from_str(str(kwargs.get("currency", "USD"))),
+                price_precision=int(kwargs.get("price_precision", 2)),
+                price_increment=Price.from_str(str(kwargs.get("price_increment", "0.01"))),
+                multiplier=Quantity.from_str(str(kwargs.get("multiplier", "1"))),
+                lot_size=Quantity.from_str(str(kwargs.get("lot_size", "1"))),
                 underlying=symbol,
                 activation_ns=0,
-                expiration_ns=kwargs.get("expiration_ns", 0),
-                currency=Currency.from_str(kwargs.get("currency", "USD")),
-                price_precision=kwargs.get("price_precision", 2),
-                price_increment=Price.from_str(kwargs.get("price_increment", "0.01")),
-                size_precision=kwargs.get("size_precision", 0),
-                size_increment=Quantity.from_str(kwargs.get("size_increment", "1")),
-                multiplier=Quantity.from_str(kwargs.get("multiplier", "1")),
-                lot_size=Quantity.from_str(kwargs.get("lot_size", "1")),
+                expiration_ns=int(kwargs.get("expiration_ns", 0)),
                 ts_event=0,
                 ts_init=0,
+                exchange=venue
             )
         elif instrument_type == "equity":
             # Create equity
             instrument = Equity(
                 instrument_id=instrument_id,
-                raw_symbol=symbol,
-                currency=Currency.from_str(kwargs.get("currency", "USD")),
-                price_precision=kwargs.get("price_precision", 2),
-                price_increment=Price.from_str(kwargs.get("price_increment", "0.01")),
-                size_precision=kwargs.get("size_precision", 0),
-                size_increment=Quantity.from_str(kwargs.get("size_increment", "1")),
-                multiplier=Quantity.from_str(kwargs.get("multiplier", "1")),
-                lot_size=Quantity.from_str(kwargs.get("lot_size", "1")),
+                raw_symbol=Symbol(symbol),
+                currency=Currency.from_str(str(kwargs.get("currency", "USD"))),
+                price_precision=int(kwargs.get("price_precision", 2)),
+                price_increment=Price.from_str(str(kwargs.get("price_increment", "0.01"))),
+                lot_size=Quantity.from_str(str(kwargs.get("lot_size", "1"))),
                 ts_event=0,
                 ts_init=0,
+                exchange=venue
             )
         else:
             raise ValueError(f"Unsupported instrument type: {instrument_type}")

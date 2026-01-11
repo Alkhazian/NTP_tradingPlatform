@@ -429,6 +429,12 @@ def run_ingestion_task(config: dict):
         ingestion_status["is_ingesting"] = False
         ingestion_status["current_file"] = None
 
+@app.post("/backtest/ingest")
+async def ingest_data(config: dict, background_tasks: BackgroundTasks):
+    """Ingest data into the catalog."""
+    background_tasks.add_task(run_ingestion_task, config)
+    return {"status": "started", "message": "Ingestion task started in background"}
+
 @app.post("/backtest/create-instrument")
 async def create_instrument(config: dict):
     """
