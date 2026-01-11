@@ -310,3 +310,175 @@ async def stop_spx_stream():
     except Exception as e:
         logger.error(f"Error stopping SPX stream: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# Backtesting Endpoints
+
+from .backtest_manager import BacktestManager, BacktestConfig
+from .services.data_ingestion import ParquetImporter
+from fastapi.responses import FileResponse
+
+# Initialize backtest manager and data importer
+backtest_manager = BacktestManager()
+data_importer = ParquetImporter()
+
+@app.post("/backtest/run")
+async def run_backtest(config_dict: dict):
+    """Run a new backtest."""
+    try:
+        config = BacktestConfig(
+            strategy_id=config_dict["strategy_id"],
+            strategy_config=config_dict["strategy_config"],
+            instruments=config_dict["instruments"],
+            start_date=config_dict["start_date"],
+            end_date=config_dict["end_date"],
+            venue=config_dict.get("venue", "SIM"),
+            initial_balance=config_dict.get("initial_balance", 100000.0),
+            currency=config_dict.get("currency", "USD"),
+        )
+        # Commission and slippage are passed inside strategy_config or as direct fields
+        # In this implementation, we added them to BacktestConfig's constructor by extracting from strategy_config
+        
+        result = await backtest_manager.run_backtest(config)
+        return result
+    except Exception as e:
+        logger.error(f"Error running backtest: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/backtest/results/{run_id}")
+async def get_backtest_results(run_id: str):
+    """Get results for a specific backtest run."""
+    results = backtest_manager.get_results(run_id)
+    if not results:
+        raise HTTPException(status_code=404, detail=f"Backtest run {run_id} not found")
+    return results
+
+@app.get("/backtest/results")
+async def list_backtest_results():
+    """List all backtest results."""
+    return backtest_manager.list_results()
+
+@app.get("/backtest/tearsheet/{run_id}")
+async def get_tearsheet(run_id: str):
+    """Download the HTML tearsheet for a backtest run."""
+    results = backtest_manager.get_results(run_id)
+    if not results:
+        raise HTTPException(status_code=404, detail=f"Backtest run {run_id} not found")
+    
+    tearsheet_path = results.get("tearsheet_path")
+    if not tearsheet_path or not os.path.exists(tearsheet_path):
+        raise HTTPException(status_code=404, detail="Tearsheet not found")
+    
+    return FileResponse(
+        tearsheet_path,
+        media_type="text/html",
+        filename=f"tearsheet_{run_id}.html"
+    )
+
+@app.get("/backtest/available-data")
+async def get_available_data():
+    """List all available data in the catalog."""
+    return data_importer.list_available_data()
+
+from fastapi import BackgroundTasks
+
+# In-memory status tracking for ingestion (simplified for now)
+ingestion_status = {
+    "is_ingesting": False,
+    "last_result": None,
+    "current_file": None,
+    "error": None
+}
+
+@app.get("/backtest/ingest-status")
+async def get_ingest_status():
+    """Get the status of the current or last ingestion task."""
+    return ingestion_status
+
+def run_ingestion_task(config: dict):
+    """Background task for data ingestion."""
+    global ingestion_status
+    ingestion_status["is_ingesting"] = True
+    ingestion_status["error"] = None
+    ingestion_status["last_result"] = None
+    
+    try:
+        if "file_path" in config:
+            ingestion_status["current_file"] = config["file_path"]
+            bars_count = data_importer.ingest_parquet_file(
+                file_path=config["file_path"],
+                instrument_id=config["instrument_id"],
+                venue=config.get("venue", "SIM"),
+                bar_type=config.get("bar_type", "1-MINUTE-LAST"),
+                timezone=config.get("timezone", "UTC")
+            )
+            ingestion_status["last_result"] = {"status": "success", "bars_ingested": bars_count}
+        elif "directory" in config:
+            ingestion_status["current_file"] = config["directory"]
+            results = data_importer.ingest_directory(
+                directory=config["directory"],
+                instrument_mapping=config["instrument_mapping"],
+                venue=config.get("venue", "SIM"),
+                timezone=config.get("timezone", "UTC"),
+                bar_type=config.get("bar_type", "1-MINUTE-LAST")
+            )
+            ingestion_status["last_result"] = {"status": "success", "results": results}
+    except Exception as e:
+        logger.error(f"Background ingestion error: {e}", exc_info=True)
+        ingestion_status["error"] = str(e)
+    finally:
+        ingestion_status["is_ingesting"] = False
+        ingestion_status["current_file"] = None
+
+@app.post("/backtest/create-instrument")
+async def create_instrument(config: dict):
+    """
+    Create an instrument definition in the catalog.
+    
+    Expected config format:
+    {
+        "symbol": "MES",
+        "instrument_type": "futures",
+        "venue": "SIM",
+        "multiplier": "5",
+        "price_increment": "0.25"
+    }
+    """
+    try:
+        # Create a copy and remove explicit arguments to avoid "multiple values for keyword argument" error
+        instrument_config = config.copy()
+        symbol = instrument_config.pop("symbol")
+        instrument_type = instrument_config.pop("instrument_type", "futures")
+        venue = instrument_config.pop("venue", "SIM")
+        
+        instrument = data_importer.create_instrument_definition(
+            symbol=symbol,
+            instrument_type=instrument_type,
+            venue=venue,
+            **instrument_config
+        )
+        return {"status": "success", "instrument_id": str(instrument.id)}
+    except Exception as e:
+        logger.error(f"Error creating instrument: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/backtest/trades-csv/{run_id}")
+async def export_trades_csv(run_id: str):
+    """Export backtest trades to CSV file."""
+    try:
+        csv_path = backtest_manager.export_trades_to_csv(run_id)
+        
+        if not os.path.exists(csv_path):
+            raise HTTPException(status_code=404, detail="CSV file not found")
+        
+        return FileResponse(
+            csv_path,
+            media_type="text/csv",
+            filename=f"trades_{run_id}.csv"
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error exporting trades CSV: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+

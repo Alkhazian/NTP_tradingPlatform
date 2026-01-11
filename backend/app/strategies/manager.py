@@ -300,3 +300,38 @@ class StrategyManager:
         except Exception as e:
             logger.error(f"Failed to update config for {strategy_id}: {e}")
             raise
+
+    def create_strategy_for_backtest(self, config: StrategyConfig) -> BaseStrategy:
+        """
+        Create a strategy instance for backtesting (without node integration).
+        This allows strategies to be instantiated for BacktestNode.
+        
+        Args:
+            config: Strategy configuration
+            
+        Returns:
+            Strategy instance compatible with backtesting
+        """
+        try:
+            strategy_type = config.strategy_type
+            strategy_class = self._strategy_classes.get(strategy_type)
+            
+            if not strategy_class:
+                raise ValueError(f"Unknown strategy type: {strategy_type}")
+            
+            logger.info(f"Creating strategy {config.id} ({strategy_type}) for backtesting")
+            
+            # Instantiate strategy without integration_manager for backtest
+            # BacktestNode will handle the strategy lifecycle
+            strategy = strategy_class(
+                config=config,
+                integration_manager=None,  # No integration manager in backtest
+                persistence_manager=None,  # No persistence in backtest
+            )
+            
+            return strategy
+            
+        except Exception as e:
+            logger.error(f"Failed to create strategy {config.id} for backtest: {e}", exc_info=True)
+            raise
+

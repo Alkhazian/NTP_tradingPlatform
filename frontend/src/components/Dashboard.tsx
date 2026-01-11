@@ -8,6 +8,7 @@ import { Icons } from './ui/icons';
 import Strategies from './Strategies';
 import Analytics from './Analytics';
 import LogViewer from './LogViewer';
+import Backtesting from './Backtesting';
 
 interface SystemStatus {
     connected: boolean;
@@ -172,6 +173,12 @@ export default function Dashboard() {
                     onClick={() => setActiveNav('strategies')}
                 />
                 <SidebarItem
+                    icon="trendingUp"
+                    label="Backtesting"
+                    active={activeNav === 'backtesting'}
+                    onClick={() => setActiveNav('backtesting')}
+                />
+                <SidebarItem
                     icon="barChart"
                     label="Analytics"
                     active={activeNav === 'analytics'}
@@ -196,12 +203,22 @@ export default function Dashboard() {
                 <div className="p-8 space-y-8">
                     {/* Header */}
                     <Header
-                        title={activeNav === 'strategies' ? "Strategy Management" : "Trader Dashboard"}
-                        subtitle={activeNav === 'strategies' ? "Configure and control automated trading strategies" : "Real-time portfolio monitoring & trading analytics"}
+                        title={
+                            activeNav === 'strategies' ? "Strategy Management" :
+                                activeNav === 'backtesting' ? "Backtesting" :
+                                    "Trader Dashboard"
+                        }
+                        subtitle={
+                            activeNav === 'strategies' ? "Configure and control automated trading strategies" :
+                                activeNav === 'backtesting' ? "Test strategies on historical data" :
+                                    "Real-time portfolio monitoring & trading analytics"
+                        }
                     />
 
                     {activeNav === 'strategies' ? (
                         <Strategies />
+                    ) : activeNav === 'backtesting' ? (
+                        <Backtesting />
                     ) : activeNav === 'analytics' ? (
                         <Analytics spxPrice={spxPrice} spxLogs={spxLogs} isStreaming={isSpxStreaming} />
                     ) : activeNav === 'logs' ? (
