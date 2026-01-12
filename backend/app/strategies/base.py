@@ -56,6 +56,29 @@ class BaseStrategy(Strategy):
             self.logger.error(f"Error stopping strategy {self.strategy_id}: {e}")
             self.logger.error(traceback.format_exc())
 
+    def on_reset(self):
+        """
+        Lifecycle hook: Called when the strategy is reset.
+        """
+        self.logger.info(f"Strategy {self.strategy_id} resetting...")
+        try:
+            self._functional_ready = False
+            self.on_reset_safe()
+        except Exception as e:
+            self.logger.error(f"Error resetting strategy {self.strategy_id}: {e}")
+            self.logger.error(traceback.format_exc())
+
+    def on_resume(self):
+        """
+        Lifecycle hook: Called when the strategy is resumed.
+        """
+        self.logger.info(f"Strategy {self.strategy_id} resuming...")
+        try:
+            self.on_resume_safe()
+        except Exception as e:
+            self.logger.error(f"Error resuming strategy {self.strategy_id}: {e}")
+            self.logger.error(traceback.format_exc())
+
     def save_state(self):
         """
         Persist current state using the manager.
@@ -178,6 +201,18 @@ class BaseStrategy(Strategy):
     def on_stop_safe(self):
         """
         Safe hook for subclasses to implement stop logic.
+        """
+        pass
+
+    def on_reset_safe(self):
+        """
+        Safe hook for subclasses to implement reset logic.
+        """
+        pass
+
+    def on_resume_safe(self):
+        """
+        Safe hook for subclasses to implement resume logic.
         """
         pass
 

@@ -74,6 +74,9 @@ class SimpleIntervalTrader(BaseStrategy):
         """
         Periodically checks if it's time to buy.
         """
+        if not self.trader_config.enabled:
+            return
+
         self.logger.info(f"DEBUG: _check_buy_signal called at {datetime.utcfromtimestamp(self.clock.timestamp())}")
         try:
             # Reschedule check
@@ -113,6 +116,8 @@ class SimpleIntervalTrader(BaseStrategy):
             self.on_unexpected_error(e)
 
     def _execute_buy(self):
+        if not self.trader_config.enabled:
+            return
         order = self.order_factory.market(
             instrument_id=self.instrument_id,
             order_side=OrderSide.BUY,
@@ -128,6 +133,11 @@ class SimpleIntervalTrader(BaseStrategy):
         """
         Handle order fills.
         """
+        if not self.trader_config.enabled:
+             # Even if disabled, we might want to handle fills for pending orders?
+             # Usually yes, to maintain state consistency.
+             pass
+
         if event.order_side == OrderSide.BUY:
             self.logger.info(f"BUY Filled: {event}")
             self.is_position_open = True
@@ -247,4 +257,25 @@ class SimpleIntervalTrader(BaseStrategy):
                 # We can set a flag to check in on_start or just let the user handle it?
                 # Best effort:
                 # We will handle this in on_start_safe or via a separate check.
-                pass
+    def on_stop_safe(self):
+        """
+        Cleanup when stopping.
+        """
+        self.logger.info(f"SimpleIntervalTrader {self.id} cleaning up timers.")
+        try:
+            self.clock.cancel_timer(f"{self.id}.check_buy_signal")
+            if self._close_timer_name:
+                self.clock.cancel_timer(self._close_timer_name)
+        except Exception as e:
+            self.logger.warning(f"Error canceling timers on stop: {e}")
+
+    def on_reset_safe(self):
+        """
+        Cleanup state for fresh start.
+        """
+        self.logger.info(f"SimpleIntervalTrader {self.id} resetting internal state.")
+        self.is_position_open = False
+        self.last_buy_time = None
+        self.open_position_id = None
+        self._close_timer_name = None
+        self._start_retry_count = 0

@@ -174,20 +174,14 @@ class NautilusManager:
 
             # Initialize Strategy Manager
             from .strategies.manager import StrategyManager
-            self.strategy_manager = StrategyManager(self.node, integration_manager=self)
+            self.strategy_manager = StrategyManager(self.node)
+
+            # Initialize strategies (restore state)
+            # This must happen BEFORE node.run_async() to avoid "Cannot add a strategy to a running trader"
+            await self.strategy_manager.initialize()
 
             # Start the node in the background
             asyncio.create_task(self.node.run_async())
-
-            # Initialize strategies (restore state)
-            # We wait a brief moment for the node to fully start engines
-            # In a real app we might listen for a "started" event or use a loop
-            # But here we just schedule initialization
-            async def init_strategies():
-                await asyncio.sleep(20) # Allow node loops to spin up and sync instruments
-                await self.strategy_manager.initialize()
-            
-            asyncio.create_task(init_strategies())
 
             self._connected = True
             logger.info("NautilusTrader TradingNode started in background")

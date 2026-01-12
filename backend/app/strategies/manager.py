@@ -145,17 +145,25 @@ class StrategyManager:
             else:
                 state_name = str(strategy.state)
         
-        logger.info(f"Checking strategy {strategy_id} state for restart: {state_name}")
-        
         if state_name in ("STOPPED", "FINISHED") or "5" in state_name:
-            logger.info(f"Strategy {strategy_id} is in terminal state ({state_name}). Recreating instance to restart.")
-            config = strategy.strategy_config
-            # Recreate the strategy (this replaces the old one in self.strategies and registers with node)
-            strategy = await self.create_strategy(config, auto_start=False)
+            logger.info(f"Strategy {strategy_id} is in terminal state ({state_name}). Resetting to READY.")
+            try:
+                strategy.reset()
+                state_name = "READY" # Update local state name after reset
+            except Exception as e:
+                logger.error(f"Failed to reset strategy {strategy_id}: {e}")
+                # Fallback to recreation ONLY if reset fails
+                logger.warning(f"Reset failed for {strategy_id}, falling back to recreation.")
+                config = strategy.strategy_config
+                strategy = await self.create_strategy(config, auto_start=False)
+                state_name = "READY"
 
         if not strategy.is_running:
-            logger.info(f"Starting strategy {strategy_id}")
-            strategy.start() # Nautilus Strategy start method
+            if self.node.trader.is_running:
+                logger.info(f"Starting strategy {strategy_id} (State: {state_name})")
+                strategy.start() # Nautilus Strategy start method
+            else:
+                logger.info(f"Trader not running. Strategy {strategy_id} will start when trader starts.")
             
             # Update config enabled state (handle immutable msgspec structs)
             try:

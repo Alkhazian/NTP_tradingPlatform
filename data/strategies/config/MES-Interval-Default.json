@@ -1,7 +1,7 @@
 {
     "id": "MES-Interval-Default",
     "name": "DeepMind Interval MES",
-    "enabled": false,
+    "enabled": true,
     "instrument_id": "MESH6.CME",
     "strategy_type": "SimpleIntervalTrader",
     "order_size": 1.0,
