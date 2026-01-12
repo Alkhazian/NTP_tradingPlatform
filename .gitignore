@@ -42,3 +42,5 @@ trades.db
 #data/strategies/state/spx-streamer-01.json
 #data/strategies/config/MES-Interval-Default.json
 #data/strategies/state/MES-Interval-Default.json
+data/historical_data
+data/catalog
