@@ -174,17 +174,58 @@ class NautilusManager:
 
             # Initialize Strategy Manager
             from .strategies.manager import StrategyManager
-            self.strategy_manager = StrategyManager(self.node)
+            self.strategy_manager = StrategyManager(self.node, integration_manager=self)
 
-            # Initialize strategies (restore state)
+            # Initialize strategies (restore state and register with trader)
             # This must happen BEFORE node.run_async() to avoid "Cannot add a strategy to a running trader"
             await self.strategy_manager.initialize()
 
-            # Start the node in the background
-            asyncio.create_task(self.node.run_async())
+            # Launch the node startup sequence in the background
+            asyncio.create_task(self._run_node_and_start_strategies())
 
             self._connected = True
-            logger.info("NautilusTrader TradingNode started in background")
+            logger.info("NautilusTrader initialization complete, node starting in background")
+
+        except Exception as e:
+            logger.error(f"Failed to start NautilusTrader: {e}")
+            self._connected = False
+            raise
+
+    async def _run_node_and_start_strategies(self):
+        """Run the trading node and start enabled strategies once ready"""
+        try:
+            # Start the node (runs indefinitely in background)
+            asyncio.create_task(self.node.run_async())
+            
+            # Wait for node to be running with timeout
+            # TradingNode has 90s timeout for engine connections + 60s for portfolio init
+            # So we wait up to 120s total
+            logger.info("Waiting for node to be running...")
+            max_wait = 120  # seconds
+            check_interval = 2.0  # check every 2 seconds
+            elapsed = 0
+            
+            while not self.node.is_running() and elapsed < max_wait:
+                await asyncio.sleep(check_interval)
+                elapsed += check_interval
+                if elapsed % 10 == 0:  # Log every 10 seconds
+                    logger.info(f"Still waiting for node... ({elapsed}s elapsed, node.is_running={self.node.is_running()}, trader.is_running={self.node.trader.is_running})")
+            
+            logger.info(f"Node state after wait: node.is_running={self.node.is_running()}, trader.is_running={self.node.trader.is_running}, elapsed={elapsed:.1f}s")
+            
+            if self.node.is_running():
+                logger.info(f"Node is running (waited {elapsed:.1f}s), checking strategies...")
+                
+                # Now that node is running, start any strategies that were configured to auto-start
+                for strategy_id, strategy in self.strategy_manager.strategies.items():
+                    if strategy.strategy_config.enabled and not strategy.is_running:
+                        logger.info(f"Auto-starting enabled strategy: {strategy_id}")
+                        await self.strategy_manager.start_strategy(strategy_id)
+            else:
+                logger.warning(f"Node not running after {max_wait}s timeout (node.is_running={self.node.is_running}, trader.is_running={self.node.trader.is_running}), strategies will need manual start")
+            
+        except Exception as e:
+            logger.error(f"Error in background node startup task: {e}", exc_info=True)
 
         except Exception as e:
             logger.error(f"Failed to start NautilusTrader: {e}")

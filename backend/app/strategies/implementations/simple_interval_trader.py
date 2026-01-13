@@ -129,7 +129,7 @@ class SimpleIntervalTrader(BaseStrategy):
         # Optimistic state update (will be confirmed by fill)
         self.last_buy_time = self.clock.utc_now().isoformat()
         
-    def on_order_filled(self, event):
+    def on_order_filled_safe(self, event):
         """
         Handle order fills.
         """
@@ -144,7 +144,7 @@ class SimpleIntervalTrader(BaseStrategy):
             
             # Record entry price for PnL calculation later
             self.last_entry_price = float(event.last_px) 
-            self.open_position_id = str(event.order_id)
+            self.open_position_id = str(event.client_order_id)
 
             # Start persistent trade record
             # We use asyncio.create_task because we can't await easily in this sync callback 

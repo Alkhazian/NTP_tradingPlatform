@@ -76,7 +76,7 @@ class StrategyManager:
                 
                 config = StrategyConfig(**config_dict)
                 
-                await self.create_strategy(config, auto_start=config.enabled)
+                await self.create_strategy(config, auto_start=False)
                 logger.info(f"Successfully restored strategy: {strategy_id}")
                 
             except Exception as e:
@@ -159,11 +159,11 @@ class StrategyManager:
                 state_name = "READY"
 
         if not strategy.is_running:
-            if self.node.trader.is_running:
+            if self.node.is_running():
                 logger.info(f"Starting strategy {strategy_id} (State: {state_name})")
                 strategy.start() # Nautilus Strategy start method
             else:
-                logger.info(f"Trader not running. Strategy {strategy_id} will start when trader starts.")
+                logger.info(f"Node not running. Strategy {strategy_id} will start when node starts.")
             
             # Update config enabled state (handle immutable msgspec structs)
             try:
