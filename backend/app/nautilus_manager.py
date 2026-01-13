@@ -558,7 +558,7 @@ class NautilusManager:
             # We continue, maybe it's already there or will fail in strategy
         
         # Check if already exists
-        strategies = self.strategy_manager.get_all_strategies_status()
+        strategies = await self.strategy_manager.get_all_strategies_status()
         spx_strat_exists = any(s['id'] == 'spx-streamer-01' for s in strategies)
         
         # If not, create it
