@@ -90,7 +90,7 @@ class NautilusManager:
                     await asyncio.sleep(2)
             
             if gateway_ready:
-                await asyncio.sleep(3) # Give IBC time to handle dialogs/login
+                await asyncio.sleep(20) # Give IBC time to handle dialogs/login
                 logger.info("Gateway ready and settled.")
             else:
                 logger.warning("Gateway port not reachable, proceeding anyway...")
@@ -112,6 +112,12 @@ class NautilusManager:
                         currency="USD",
                         localSymbol="MESH6",
                         lastTradeDateOrContractMonth="202603",
+                    ),
+                    IBContract(
+                        secType="STK",
+                        symbol="TSLA",
+                        exchange="SMART",
+                        currency="USD",
                     ),
                 ),
             )

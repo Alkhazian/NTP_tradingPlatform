@@ -71,8 +71,10 @@ class TslaOptionsIntervalStrategy(BaseStrategy):
         )
 
     def _initialize_strategy_logic(self):
-        self.subscribe_trade_ticks(self.tsla_id)
-        self.log.info(f"Subscribed to trade ticks for {self.tsla_id}. Waiting for incoming data...")
+        # Subscribe to trade ticks with explicit client routing to InteractiveBrokers
+        from nautilus_trader.model.identifiers import ClientId
+        self.subscribe_trade_ticks(self.tsla_id, client_id=ClientId("InteractiveBrokers"))
+        self.log.info(f"Subscribed to trade ticks for {self.tsla_id} via InteractiveBrokers. Waiting for incoming data...")
 
     def _check_instrument_availability(self, event):
         if self.is_active_today: return 
@@ -88,6 +90,10 @@ class TslaOptionsIntervalStrategy(BaseStrategy):
         
         # Schedule next check if not active
         if not self.is_active_today:
+            try:
+                self.clock.cancel_timer("check_instrument")
+            except:
+                pass  # Timer might not exist yet
             self.clock.set_timer(
                 name="check_instrument",
                 interval=timedelta(seconds=10),
@@ -115,13 +121,7 @@ class TslaOptionsIntervalStrategy(BaseStrategy):
                 self.subscribe_quotes(instrument.id)
                 self.candidate_options.add(instrument.id)
 
-    def on_stop_safe(self):
-        self._unsubscribe_all_candidates()
-        try:
-            self.cancel_all_orders(self.tsla_id) # Try executing with ID if possible
-        except:
-             # Fallback or ignore if it fails (e.g. no open orders)
-             pass
+
 
     def on_trade_tick(self, tick: TradeTick):
         if tick.instrument_id != self.tsla_id: return
@@ -130,91 +130,128 @@ class TslaOptionsIntervalStrategy(BaseStrategy):
 
     def _handle_entry_logic(self, tick: TradeTick):
         current_date = self.clock.utc_now().date()
-        if not self.is_active_today and (self.last_trade_date is None or self.last_trade_date != current_date):
-            self.log.info(f"Initiating entry logic for date: {current_date}")
-            self.last_trade_date = current_date
-            self.save_state() # Persist immediately
-            self.is_active_today = True
-            self._initiate_discovery(tick.price)
-        else:
-            self.log.info(f"Skipping entry. Active today: {self.is_active_today}, Last trade: {self.last_trade_date}, Current: {current_date}")
+        
+        # Reset daily flag if it's a new day
+        if self.last_trade_date and self.last_trade_date != current_date:
+            self.log.info(f"New trading day detected. Resetting daily state.")
+            self.is_active_today = False
+            self.entry_orders_submitted = False
+            self._call_filled = False
+            self._put_filled = False
+            self.call_option_id = None
+            self.put_option_id = None
+            self.last_trade_date = None  # Reset so we can trade today
+        
+        # Check if we've already initiated trading today
+        if self.is_active_today:
+            return
+        
+        # Initiate trading for today
+        self.log.info(f"Initiating entry logic for date: {current_date}")
+        self.last_trade_date = current_date
+        self.is_active_today = True
+        self.save_state() # Persist immediately
+        self._initiate_discovery(tick.price)
 
     def _initiate_discovery(self, current_price: Price):
-        """Запит опціонів без жорсткої дати — запитуємо поточний місяць."""
+        """Запит конкретних опціонів зі страйками навколо поточної ціни."""
         self.opening_price = current_price
         self._discovery_in_progress = True
         self.candidate_options.clear()
         
-        # Отримуємо поточний місяць у форматі YYYYMM
-        current_month = self.clock.utc_now().strftime("%Y%m")
+        # Calculate expiry date (next Friday or specific date logic)
+        now_dt = self.clock.utc_now()
+        days_ahead = (4 - now_dt.weekday()) % 7  # Days until Friday (0=Mon, 4=Fri)
+        if days_ahead == 0:  # If today is Friday
+            days_ahead = 7  # Use next Friday
         
-        self.log.info(f"Запит опціонів на місяць {current_month} для пошуку найближчої експірації...")
-
+        expiry_date = now_dt.date() + timedelta(days=days_ahead)
+        expiry_str = expiry_date.strftime("%Y%m%d")
+        
+        # Calculate strikes around current price
+        current_price_float = float(current_price)
+        strike_interval = 5.0  # TSLA options usually have $5 strike intervals
+        
+        # Round to nearest strike interval
+        base_strike = round(current_price_float / strike_interval) * strike_interval
+        
+        # Generate strikes: ATM, +/- 1, +/- 2 intervals
+        strikes = [
+            base_strike - 2 * strike_interval,
+            base_strike - strike_interval,
+            base_strike,
+            base_strike + strike_interval,
+            base_strike + 2 * strike_interval,
+        ]
+        
+        self.log.info(f"Requesting TSLA options: expiry={expiry_date}, strikes={strikes}")
+        
+        # Request all combinations of strikes and rights (Call/Put)
+        contracts = []
+        for strike in strikes:
+            for right in ["C", "P"]:
+                contracts.append({
+                    "secType": "OPT",
+                    "symbol": "TSLA",
+                    "exchange": "SMART",
+                    "currency": "USD",
+                    "lastTradeDateOrContractMonth": expiry_str,
+                    "strike": strike,
+                    "right": right
+                })
+        
         self.request_instruments(
             venue=Venue("InteractiveBrokers"),
-            params={
-                "ib_contracts": [
-                    {
-                        "secType": "OPT", 
-                        "symbol": "TSLA", 
-                        "exchange": "SMART", 
-                        "currency": "USD", 
-                        "lastTradeDateOrContractMonth": current_month, # Тільки місяць!
-                        # Ми не вказуємо страйк тут, щоб отримати список доступних дат
-                    }
-                ]
-            }
+            params={"ib_contracts": contracts}
         )
 
-        # Чекаємо трохи довше (15с), бо запит місяця повертає багато даних
+        # Wait for instruments to be discovered and quotes to arrive
+        # Cancel any existing timer first to avoid duplicate timer error
+        try:
+            self.clock.cancel_timer("execute_entry")
+        except:
+            pass  # Timer might not exist yet
+        
         self.clock.set_timer(
             name="execute_entry",
-            interval=timedelta(seconds=15),
+            interval=timedelta(seconds=10),
             callback=self._execute_entry_from_quotes
         )
 
     def _execute_entry_from_quotes(self, event: Event):
-        """Вибір найближчої дати експірації серед отриманих кандидатів."""
+        """Вибір найкращих Call/Put опціонів за премією."""
         if self.entry_orders_submitted: return
         self._discovery_in_progress = False
 
-        now_dt = self.clock.utc_now()
-        
-        # 1. Знаходимо всі доступні дати експірації серед кандидатів
-        available_expiries = []
-        for opt_id in self.candidate_options:
-            instr = self.cache.instrument(opt_id)
-            if instr and instr.expiration_date:
-                days_to_expiry = (instr.expiration_date - now_dt.date()).days
-                if days_to_expiry >= self.min_days_to_expiry:
-                    available_expiries.append(instr.expiration_date)
-        
-        if not available_expiries:
-            self.log.error("Не знайдено жодної доступної дати експірації.")
-            self._unsubscribe_all_candidates()
+        if not self.candidate_options:
+            self.log.error("Не знайдено жодного опціону серед кандидатів.")
+            self.is_active_today = False  # Reset so we can try again
             return
 
-        # 2. Вибираємо найближчу дату
-        nearest_expiry = min(available_expiries)
-        self.log.info(f"Найближча знайдена експірація: {nearest_expiry}")
-
-        # 3. Тепер шукаємо найкращі Call/Put саме для цієї дати
+        # Find best Call and Put based on premium proximity to target
         best_call, best_put = None, None
         min_call_diff, min_put_diff = Decimal('inf'), Decimal('inf')
 
+        from nautilus_trader.model.enums import OptionKind
+        
         for opt_id in self.candidate_options:
             instr = self.cache.instrument(opt_id)
-            if instr.expiration_date != nearest_expiry:
+            if not instr or not hasattr(instr, 'option_kind'):
                 continue
             
             quote = self.cache.last_quote(opt_id)
-            if not quote or not quote.ask_price: continue
+            if not quote or not quote.ask_price: 
+                continue
             
             diff = abs(quote.ask_price.as_decimal() - self.target_premium)
-            if instr.is_call and diff < min_call_diff:
+            
+            # Check option type using option_kind attribute
+            if instr.option_kind == OptionKind.CALL and diff < min_call_diff:
                 min_call_diff, best_call = diff, opt_id
-            elif instr.is_put and diff < min_put_diff:
+                self.log.info(f"Found Call candidate: {opt_id}, premium={quote.ask_price}, diff={diff}")
+            elif instr.option_kind == OptionKind.PUT and diff < min_put_diff:
                 min_put_diff, best_put = diff, opt_id
+                self.log.info(f"Found Put candidate: {opt_id}, premium={quote.ask_price}, diff={diff}")
 
         if best_call and best_put:
             self.call_option_id, self.put_option_id = best_call, best_put
@@ -222,7 +259,7 @@ class TslaOptionsIntervalStrategy(BaseStrategy):
             self._submit_entry_limit_order(best_put)
             self.entry_orders_submitted = True
             
-            # Відписуємось від усього, що не підійшло за датою або ціною
+            # Unsubscribe from options we didn't select
             for opt_id in list(self.candidate_options):
                 if opt_id not in [best_call, best_put]:
                     self.unsubscribe_quotes(opt_id)
@@ -230,8 +267,9 @@ class TslaOptionsIntervalStrategy(BaseStrategy):
             
             self.clock.set_timer("timeout_exit", timedelta(seconds=self.timeout_seconds), self._handle_timeout_exit)
         else:
-            self.log.warn(f"Не знайдено Call/Put для дати {nearest_expiry} з премією ~{self.target_premium}")
+            self.log.warn(f"Не знайдено Call/Put з премією ~{self.target_premium}")
             self._unsubscribe_all_candidates()
+            self.is_active_today = False  # Reset so we can try again
 
     def _submit_entry_limit_order(self, instrument_id: InstrumentId):
         quote = self.cache.last_quote(instrument_id)
@@ -288,8 +326,19 @@ class TslaOptionsIntervalStrategy(BaseStrategy):
         self.candidate_options.clear()
 
     def on_stop_safe(self):
+        """Cleanup when stopping the strategy."""
         self._unsubscribe_all_candidates()
-        self.cancel_all_orders()
+        # Cancel any pending orders for our option instruments
+        if self.call_option_id:
+            try:
+                self.cancel_all_orders(self.call_option_id)
+            except Exception as e:
+                self.log.warning(f"Failed to cancel orders for {self.call_option_id}: {e}")
+        if self.put_option_id:
+            try:
+                self.cancel_all_orders(self.put_option_id)
+            except Exception as e:
+                self.log.warning(f"Failed to cancel orders for {self.put_option_id}: {e}")
 
     def get_state(self) -> Dict[str, Any]:
         return {
