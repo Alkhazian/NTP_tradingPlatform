@@ -90,7 +90,7 @@ class NautilusManager:
                     await asyncio.sleep(2)
             
             if gateway_ready:
-                await asyncio.sleep(60) # Give IBC time to handle dialogs/login
+                await asyncio.sleep(3) # Give IBC time to handle dialogs/login
                 logger.info("Gateway ready and settled.")
             else:
                 logger.warning("Gateway port not reachable, proceeding anyway...")

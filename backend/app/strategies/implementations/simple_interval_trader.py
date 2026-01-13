@@ -243,8 +243,13 @@ class SimpleIntervalTrader(BaseStrategy):
         # We should check if we are past the hold duration.
         
         if self.is_position_open and self.last_buy_time:
-            now_dt = datetime.utcnow()
+            from datetime import timezone
+            now_dt = datetime.now(timezone.utc)
+            # Ensure last_buy_dt is offset-aware
             last_buy_dt = datetime.fromisoformat(self.last_buy_time)
+            if last_buy_dt.tzinfo is None:
+                last_buy_dt = last_buy_dt.replace(tzinfo=timezone.utc)
+            
             elapsed_min = (now_dt - last_buy_dt).total_seconds() / 60
             
             hold_duration = int(self.trader_config.parameters.get("hold_duration_minutes", 2))

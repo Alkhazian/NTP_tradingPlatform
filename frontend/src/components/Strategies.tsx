@@ -1,4 +1,3 @@
-
 import { useState, useEffect } from 'react';
 import { Card, CardContent } from './ui/card';
 import { Badge } from './ui/badge';
@@ -34,6 +33,10 @@ export default function Strategies() {
     const [jsonEdit, setJsonEdit] = useState("");
     const [editError, setEditError] = useState<string | null>(null);
 
+    // Logs State
+    const [allLogs, setAllLogs] = useState<string[]>([]);
+    const [expandedLogs, setExpandedLogs] = useState<Set<string>>(new Set());
+
     const rawApiUrl = import.meta.env.VITE_API_URL || '';
     const apiUrl = rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl;
 
@@ -53,6 +56,40 @@ export default function Strategies() {
         fetchStrategies();
         const interval = setInterval(fetchStrategies, 5000);
         return () => clearInterval(interval);
+    }, []);
+
+    // WebSocket for Logs
+    useEffect(() => {
+        let wsUrl: string;
+        const apiEnv = import.meta.env.VITE_API_URL;
+
+        if (apiEnv && apiEnv.startsWith('http')) {
+            wsUrl = apiEnv.replace('http', 'ws');
+            if (!wsUrl.endsWith('/')) wsUrl += '/';
+            wsUrl += 'ws/logs';
+        } else {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            let host = window.location.host;
+            if (host.includes(':5173')) {
+                host = window.location.hostname;
+            }
+            wsUrl = `${protocol}//${host}/ws/logs`;
+        }
+
+        const ws = new WebSocket(wsUrl);
+
+        ws.onmessage = (event) => {
+            setAllLogs(prev => {
+                const newLogs = [...prev, event.data];
+                // Keep only last 1000 lines
+                if (newLogs.length > 1000) {
+                    return newLogs.slice(-1000);
+                }
+                return newLogs;
+            });
+        };
+
+        return () => ws.close();
     }, []);
 
     const handleStart = async (id: string) => {
@@ -86,7 +123,6 @@ export default function Strategies() {
 
     const saveConfig = async (id: string) => {
         try {
-            // Validate JSON
             let parsed;
             try {
                 parsed = JSON.parse(jsonEdit);
@@ -114,10 +150,17 @@ export default function Strategies() {
         }
     };
 
+    const toggleLogs = (id: string) => {
+        setExpandedLogs(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    };
+
     return (
         <div className="space-y-6">
-
-            {/* Strategy List */}
             <div className="grid gap-6">
                 {strategies.length === 0 ? (
                     <Card variant="glass">
@@ -129,7 +172,7 @@ export default function Strategies() {
                     </Card>
                 ) : (
                     strategies
-                        .filter(s => s.id !== 'spx-streamer-01') // Hide system actors
+                        .filter(s => s.id !== 'spx-streamer-01')
                         .map((strategy) => (
                             <Card key={strategy.id} variant="glass" className="overflow-hidden border-t-2 border-t-cyan-500/20">
                                 {editingId === strategy.id ? (
@@ -234,6 +277,48 @@ export default function Strategies() {
                                                     {(strategy.metrics?.net_pnl || 0) < 0 ? '-' : ''}${Math.abs(strategy.metrics?.net_pnl || 0).toFixed(2)}
                                                 </p>
                                             </div>
+                                        </div>
+
+                                        {/* Logs Section */}
+                                        <div className="pt-4 border-t border-white/5">
+                                            <button
+                                                onClick={() => toggleLogs(strategy.id)}
+                                                className="flex items-center gap-2 text-xs font-bold text-muted-foreground hover:text-white uppercase tracking-wider transition-colors w-full group"
+                                            >
+                                                <div className="p-1.5 rounded bg-white/5 group-hover:bg-cyan-500/20 group-hover:text-cyan-400 transition-colors">
+                                                    <Icons.activity className="w-3 h-3" />
+                                                </div>
+                                                <span>Live Logs</span>
+                                                <div className="ml-auto">
+                                                    {expandedLogs.has(strategy.id) ?
+                                                        <Icons.chevronUp className="w-4 h-4 text-muted-foreground group-hover:text-white" /> :
+                                                        <Icons.chevronDown className="w-4 h-4 text-muted-foreground group-hover:text-white" />
+                                                    }
+                                                </div>
+                                            </button>
+
+                                            {expandedLogs.has(strategy.id) && (
+                                                <div className="mt-3">
+                                                    <div className="p-3 bg-black/40 rounded-lg border border-white/10 h-64 overflow-auto font-mono text-[10px] shadow-inner">
+                                                        {(() => {
+                                                            const stratLogs = allLogs.filter(l =>
+                                                                l.includes(strategy.id) ||
+                                                                l.includes(strategy.config.strategy_type)
+                                                            ).slice().reverse();
+
+                                                            if (stratLogs.length === 0) {
+                                                                return <div className="text-white/30 italic text-center py-8">Waiting for logs...</div>;
+                                                            }
+
+                                                            return stratLogs.map((log, i) => (
+                                                                <div key={i} className="mb-1 pb-1 border-b border-white/5 last:border-0 text-white/70 break-all whitespace-pre-wrap">
+                                                                    {log}
+                                                                </div>
+                                                            ));
+                                                        })()}
+                                                    </div>
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
                                 )}

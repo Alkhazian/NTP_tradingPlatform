@@ -9,5 +9,10 @@
         "module": "app.actors.spx_streamer",
         "class_name": "SpxStreamer",
         "comment": "Data Actor (uses Strategy infrastructure for plumbing)"
+    },
+    {
+        "strategy_type": "TslaOptionsIntervalStrategy",
+        "module": "app.strategies.implementations.Tesla_Options_Interval_Strategy",
+        "class_name": "TslaOptionsIntervalStrategy"
     }
 ]
