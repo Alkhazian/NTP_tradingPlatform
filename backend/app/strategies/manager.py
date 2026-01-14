@@ -256,19 +256,43 @@ class StrategyManager:
         else:
             status_text = "STOPPED"
 
+        try:
+            state = strategy.get_state() if hasattr(strategy, "get_state") else {}
+        except Exception as e:
+            logger.error(f"Failed to get state for strategy {strategy_id}: {e}")
+            state = {"error": str(e)}
+
         return {
             "id": strategy_id,
             "running": display_running,
             "status": status_text, 
             "config": strategy.strategy_config.dict(),
-            "state": strategy.get_state() if hasattr(strategy, "get_state") else {},
+            "state": state,
             "metrics": metrics
         }
 
     async def get_all_strategies_status(self) -> list:
         # Fetch all statuses concurrently
         tasks = [self.get_strategy_status(sid) for sid in self.strategies]
-        return await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        final_results = []
+        for i, res in enumerate(results):
+            if isinstance(res, Exception):
+                logger.error(f"Failed to get status for strategy {list(self.strategies.keys())[i]}: {res}", exc_info=True)
+                # Return partial info if possible
+                sid = list(self.strategies.keys())[i]
+                final_results.append({
+                    "id": sid,
+                    "status": "ERROR",
+                    "error": str(res),
+                    "running": False,
+                    "config": self.strategies[sid].strategy_config.dict() if sid in self.strategies else {}
+                })
+            else:
+                final_results.append(res)
+                
+        return final_results
 
     async def stop_all_strategies(self):
         """

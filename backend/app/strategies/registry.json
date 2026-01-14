@@ -24,5 +24,10 @@
         "strategy_type": "Spxw0DteIntervalStrategy",
         "module": "app.strategies.implementations.SPXW_0DTE_interval_strategy",
         "class_name": "Spxw0DteIntervalStrategy"
+    },
+    {
+        "strategy_type": "MesOrbStrategy",
+        "module": "app.strategies.implementations.MES_ORB_strategy",
+        "class_name": "MesOrbStrategy"
     }
 ]

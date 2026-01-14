@@ -241,10 +241,13 @@ class NautilusManager:
                 
                 # Start strategies that are marked as enabled
                 for strategy_id, strategy in self.strategy_manager.strategies.items():
-                    logger.info(f"Checking strategy {strategy_id}: enabled={strategy.strategy_config.enabled}, is_running={strategy.is_running}")
-                    if strategy.strategy_config.enabled and not strategy.is_running:
-                            logger.info(f"Auto-starting enabled strategy: {strategy_id}")
-                            await self.strategy_manager.start_strategy(strategy_id)
+                    try:
+                        logger.info(f"Checking strategy {strategy_id}: enabled={strategy.strategy_config.enabled}, is_running={strategy.is_running}")
+                        if strategy.strategy_config.enabled and not strategy.is_running:
+                                logger.info(f"Auto-starting enabled strategy: {strategy_id}")
+                                await self.strategy_manager.start_strategy(strategy_id)
+                    except Exception as e:
+                        logger.error(f"Failed to auto-start strategy {strategy_id}: {e}", exc_info=True)
             else:
                 logger.warning(f"Node not running after {max_wait}s timeout (node.is_running={self.node.is_running}, trader.is_running={self.node.trader.is_running}), strategies will need manual start")
             
