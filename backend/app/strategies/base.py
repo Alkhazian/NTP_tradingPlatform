@@ -98,6 +98,14 @@ class BaseStrategy(Strategy):
         Nautilus state: INITIALIZED -> STARTING -> RUNNING
         """
         self.logger.info(f"Strategy {self.strategy_id} starting...")
+        
+        # Check if strategy is enabled in configuration
+        # If disabled, stop immediately to prevent execution
+        if not self.strategy_config.enabled:
+            self.logger.info(f"Strategy {self.strategy_id} is disabled (enabled=False), stopping...")
+            self.stop()
+            return
+        
         try:
             self.load_state()
             self._request_instrument()

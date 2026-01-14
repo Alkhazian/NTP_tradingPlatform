@@ -1,7 +1,7 @@
 {
     "id": "spx-streamer-01",
     "name": "SPX Streamer",
-    "enabled": false,
+    "enabled": true,
     "instrument_id": "^SPX.CBOE",
     "strategy_type": "SpxStreamer",
     "order_size": 1.0,

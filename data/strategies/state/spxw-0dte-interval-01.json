@@ -2,11 +2,11 @@
     "active_option_id": null,
     "entry_time_ns": null,
     "is_waiting_for_exit": false,
-    "current_spx_price": 6914.5,
+    "current_spx_price": 6926.6,
     "active_trade_id": null,
     "_last_entry_price": null,
     "_last_entry_qty": null,
     "_pending_entry_orders": [],
     "_pending_exit_orders": [],
-    "_last_updated": "2026-01-14T20:29:35.768312"
+    "_last_updated": "2026-01-14T23:02:25.124614"
 }

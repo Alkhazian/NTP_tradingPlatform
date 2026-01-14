@@ -106,10 +106,9 @@ class StrategyManager:
                 persistence_manager=self.persistence
             )
             
-            # Register with Nautilus Node
-            # Note: add_strategy usually takes the strategy instance and an execution engine
-            # In live mode, the node handles this.
-            
+            # Register with Nautilus Trader
+            # Strategies must be added before node.run_async() to avoid "Cannot add strategy" error
+            # The enabled check in BaseStrategy.on_start() will prevent disabled strategies from running
             self.node.trader.add_strategy(strategy)
             self.strategies[config.id] = strategy
             
@@ -172,13 +171,8 @@ class StrategyManager:
             can_start = not strategy.is_running and state_name not in ("STOPPING", "STOPPED", "RESETTING")
 
         if can_start:
-            if self.node.is_running():
-                logger.info(f"Starting strategy {strategy_id} (State: {state_name})")
-                strategy.start() # Nautilus Strategy start method
-            else:
-                logger.info(f"Node not running. Strategy {strategy_id} will start when node starts.")
-            
-            # Update config enabled state (handle immutable msgspec structs)
+            # Update config enabled state BEFORE starting (handle immutable msgspec structs)
+            # This ensures on_start() sees enabled=True and doesn't immediately stop
             try:
                 strategy.strategy_config.enabled = True
             except (TypeError, AttributeError):
@@ -187,6 +181,18 @@ class StrategyManager:
                     strategy.strategy_config = msgspec.structs.replace(strategy.strategy_config, enabled=True)
                 except Exception as e:
                     logger.warning(f"Failed to update config enabled state (immutable): {e}")
+            
+            if self.node.is_running():
+                # If strategy was stopped (e.g., because it was disabled at startup),
+                # we need to reset it before starting
+                if state_name == "STOPPED":
+                    logger.info(f"Strategy {strategy_id} is STOPPED, resetting before start...")
+                    strategy.reset()
+                
+                logger.info(f"Starting strategy {strategy_id} (State: {state_name})")
+                strategy.start() # Nautilus Strategy start method
+            else:
+                logger.info(f"Node not running. Strategy {strategy_id} will start when node starts.")
 
             self.persistence.save_config(strategy_id, strategy.strategy_config.dict())
 
