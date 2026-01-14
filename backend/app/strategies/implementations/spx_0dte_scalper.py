@@ -227,7 +227,7 @@ class SPXZeroDTEScalper(BaseStrategy):
                 "ib_contracts": [
                     {
                         "secType": "OPT",
-                        "symbol": "SPXW",  # SPXW for daily options!
+                        "symbol": "SPX",  # SPXW for daily options!
                         "exchange": "CBOE",  # CBOE is the primary exchange for SPX/SPXW options
                         "currency": "USD",
                         "lastTradeDateOrContractMonth": expiry_date_ib,
@@ -236,7 +236,7 @@ class SPXZeroDTEScalper(BaseStrategy):
                     },
                     {
                         "secType": "OPT",
-                        "symbol": "SPXW",  # SPXW for daily options!
+                        "symbol": "SPX",  # SPXW for daily options!
                         "exchange": "CBOE",  # CBOE is the primary exchange for SPX/SPXW options
                         "currency": "USD",
                         "lastTradeDateOrContractMonth": expiry_date_ib,

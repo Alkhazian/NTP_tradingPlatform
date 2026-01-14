@@ -110,7 +110,7 @@ class StrategyManager:
             # Note: add_strategy usually takes the strategy instance and an execution engine
             # In live mode, the node handles this.
             
-            self.node.trader.add_strategy(strategy, auto_start=False)
+            self.node.trader.add_strategy(strategy)
             self.strategies[config.id] = strategy
             
             # Persist the config

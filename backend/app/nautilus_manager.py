@@ -166,6 +166,7 @@ class NautilusManager:
                 timeout_reconciliation=60.0,
                 timeout_portfolio=60.0,
                 timeout_disconnection=10.0,
+                #start_strategies=False, # We manage strategy startup manually based on config
             )
 
             # Create and build the trading node
