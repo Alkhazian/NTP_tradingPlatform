@@ -55,6 +55,13 @@ class NautilusManager:
         self.strategy_manager = None
         self.trade_recorder = None # Initialize lazily or here
 
+    @property
+    def nautilus_account_id(self) -> Optional[AccountId]:
+        """Get the full AccountId used by Nautilus."""
+        if not self._account_id:
+            return None
+        return AccountId(f"InteractiveBrokers-{self._account_id}")
+
     async def start(self):
         """Initialize and start the NautilusTrader TradingNode"""
         try:
@@ -90,7 +97,7 @@ class NautilusManager:
                     await asyncio.sleep(2)
             
             if gateway_ready:
-                await asyncio.sleep(3) # Give IBC time to handle dialogs/login
+                await asyncio.sleep(20) # Give IBC time to handle dialogs/login
                 logger.info("Gateway ready and settled.")
             else:
                 logger.warning("Gateway port not reachable, proceeding anyway...")
@@ -122,7 +129,9 @@ class NautilusManager:
                 ibg_port=self.port,
                 ibg_client_id=101,
                 use_regular_trading_hours=False,
-                market_data_type=IBMarketDataTypeEnum.DELAYED_FROZEN, 
+                market_data_type=IBMarketDataTypeEnum.REALTIME, 
+                #market_data_type=IBMarketDataTypeEnum.DELAYED_FROZEN, 
+
                 instrument_provider=ib_instrument_config,
             )
 

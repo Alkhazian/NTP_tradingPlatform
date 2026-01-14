@@ -47,7 +47,7 @@ class TslaOptionsIntervalStrategy(BaseStrategy):
         self._discovery_in_progress = False
 
     def on_start_safe(self):
-        self.log.info(f"Starting {self.__class__.__name__} with config ID: {self.tsla_id}")
+        self.logger.info(f"Starting {self.__class__.__name__} with config ID: {self.tsla_id}")
         
         # Setup periodic check for instrument availability
         self.clock.set_timer(
@@ -58,10 +58,10 @@ class TslaOptionsIntervalStrategy(BaseStrategy):
 
         instrument = self.cache.instrument(self.tsla_id)
         if instrument:
-            self.log.info(f"Found instrument {self.tsla_id} in cache.")
+            self.logger.info(f"Found instrument {self.tsla_id} in cache.")
             self._initialize_strategy_logic()
         else:
-            self.log.info(f"Instrument {self.tsla_id} not in cache. Requesting...")
+            self.logger.info(f"Instrument {self.tsla_id} not in cache. Requesting...")
             self._request_base_instrument()
 
     def _request_base_instrument(self):
@@ -72,17 +72,17 @@ class TslaOptionsIntervalStrategy(BaseStrategy):
 
     def _initialize_strategy_logic(self):
         self.subscribe_trade_ticks(self.tsla_id)
-        self.log.info(f"Subscribed to trade ticks for {self.tsla_id}. Waiting for incoming data...")
+        self.logger.info(f"Subscribed to trade ticks for {self.tsla_id}. Waiting for incoming data...")
 
     def _check_instrument_availability(self, event):
         if self.is_active_today: return 
 
         instrument = self.cache.instrument(self.tsla_id)
         if instrument:
-             self.log.info(f"[Timer] Found instrument {self.tsla_id}. Initializing...")
+             self.logger.info(f"[Timer] Found instrument {self.tsla_id}. Initializing...")
              self._initialize_strategy_logic()
         else:
-             self.log.info(f"[Timer] Instrument {self.tsla_id} still not in cache.")
+             self.logger.info(f"[Timer] Instrument {self.tsla_id} still not in cache.")
              if not self._discovery_in_progress: # Only re-request if we aren't already searching for options
                  self._request_base_instrument()
         
@@ -95,33 +95,33 @@ class TslaOptionsIntervalStrategy(BaseStrategy):
             )
 
     def on_instrument_added(self, instrument: Instrument):
-        self.log.info(f"Instrument added: {instrument.id} (Symbol: {instrument.symbol})")
+        self.logger.info(f"Instrument added: {instrument.id} (Symbol: {instrument.symbol})")
         
         # Check for direct match or symbol match (handling ID mismatch)
         is_match = instrument.id == self.tsla_id
         if not is_match and instrument.symbol == "TSLA" and instrument.id.venue.value == "InteractiveBrokers":
-             self.log.warning(f"ID Mismatch detected! Config expects {self.tsla_id}, but received {instrument.id}. Updating to use {instrument.id}.")
+             self.logger.warning(f"ID Mismatch detected! Config expects {self.tsla_id}, but received {instrument.id}. Updating to use {instrument.id}.")
              self.tsla_id = instrument.id
              is_match = True
 
         if is_match:
-            self.log.info(f"Subscribing to {self.tsla_id}")
+            self.logger.info(f"Subscribing to {self.tsla_id}")
             self._initialize_strategy_logic()
             return
 
         if self._discovery_in_progress and hasattr(instrument, 'underlying_id'):
             if instrument.underlying_id == self.tsla_id:
-                self.log.info(f"Candidate option found: {instrument.id}")
+                self.logger.info(f"Candidate option found: {instrument.id}")
                 self.subscribe_quotes(instrument.id)
                 self.candidate_options.add(instrument.id)
 
     def on_stop_safe(self):
+        self.logger.info(f"Stopping {self.__class__.__name__}")
         self._unsubscribe_all_candidates()
         try:
-            self.cancel_all_orders(self.tsla_id) # Try executing with ID if possible
-        except:
-             # Fallback or ignore if it fails (e.g. no open orders)
-             pass
+            self.cancel_all_orders(self.tsla_id)
+        except Exception as e:
+            self.logger.warning(f"Error canceling orders for {self.tsla_id}: {e}")
 
     def on_trade_tick(self, tick: TradeTick):
         if tick.instrument_id != self.tsla_id: return
@@ -131,13 +131,13 @@ class TslaOptionsIntervalStrategy(BaseStrategy):
     def _handle_entry_logic(self, tick: TradeTick):
         current_date = self.clock.utc_now().date()
         if not self.is_active_today and (self.last_trade_date is None or self.last_trade_date != current_date):
-            self.log.info(f"Initiating entry logic for date: {current_date}")
+            self.logger.info(f"Initiating entry logic for date: {current_date}")
             self.last_trade_date = current_date
             self.save_state() # Persist immediately
             self.is_active_today = True
             self._initiate_discovery(tick.price)
         else:
-            self.log.info(f"Skipping entry. Active today: {self.is_active_today}, Last trade: {self.last_trade_date}, Current: {current_date}")
+            self.logger.info(f"Skipping entry. Active today: {self.is_active_today}, Last trade: {self.last_trade_date}, Current: {current_date}")
 
     def _initiate_discovery(self, current_price: Price):
         """Запит опціонів без жорсткої дати — запитуємо поточний місяць."""
@@ -148,7 +148,7 @@ class TslaOptionsIntervalStrategy(BaseStrategy):
         # Отримуємо поточний місяць у форматі YYYYMM
         current_month = self.clock.utc_now().strftime("%Y%m")
         
-        self.log.info(f"Запит опціонів на місяць {current_month} для пошуку найближчої експірації...")
+        self.logger.info(f"Запит опціонів на місяць {current_month} для пошуку найближчої експірації...")
 
         self.request_instruments(
             venue=Venue("InteractiveBrokers"),
@@ -190,13 +190,13 @@ class TslaOptionsIntervalStrategy(BaseStrategy):
                     available_expiries.append(instr.expiration_date)
         
         if not available_expiries:
-            self.log.error("Не знайдено жодної доступної дати експірації.")
+            self.logger.error("Не знайдено жодної доступної дати експірації.")
             self._unsubscribe_all_candidates()
             return
 
         # 2. Вибираємо найближчу дату
         nearest_expiry = min(available_expiries)
-        self.log.info(f"Найближча знайдена експірація: {nearest_expiry}")
+        self.logger.info(f"Найближча знайдена експірація: {nearest_expiry}")
 
         # 3. Тепер шукаємо найкращі Call/Put саме для цієї дати
         best_call, best_put = None, None
@@ -230,7 +230,7 @@ class TslaOptionsIntervalStrategy(BaseStrategy):
             
             self.clock.set_timer("timeout_exit", timedelta(seconds=self.timeout_seconds), self._handle_timeout_exit)
         else:
-            self.log.warn(f"Не знайдено Call/Put для дати {nearest_expiry} з премією ~{self.target_premium}")
+            self.logger.warn(f"Не знайдено Call/Put для дати {nearest_expiry} з премією ~{self.target_premium}")
             self._unsubscribe_all_candidates()
 
     def _submit_entry_limit_order(self, instrument_id: InstrumentId):
@@ -287,9 +287,6 @@ class TslaOptionsIntervalStrategy(BaseStrategy):
             self.unsubscribe_quotes(opt_id)
         self.candidate_options.clear()
 
-    def on_stop_safe(self):
-        self._unsubscribe_all_candidates()
-        self.cancel_all_orders()
 
     def get_state(self) -> Dict[str, Any]:
         return {

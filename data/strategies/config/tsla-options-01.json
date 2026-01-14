@@ -1,7 +1,7 @@
 {
     "id": "tsla-options-01",
     "name": "TSLA Options Interval Strategy",
-    "enabled": true,
+    "enabled": false,
     "instrument_id": "TSLA.NASDAQ",
     "strategy_type": "TslaOptionsIntervalStrategy",
     "order_size": 1.0,

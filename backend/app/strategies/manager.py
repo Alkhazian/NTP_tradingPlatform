@@ -158,7 +158,20 @@ class StrategyManager:
                 strategy = await self.create_strategy(config, auto_start=False)
                 state_name = "READY"
 
-        if not strategy.is_running:
+        # Check if we should call start()
+        # strategy.is_running usually means state == RUNNING
+        # We also want to avoid starting if it's already STARTING
+        can_start = False
+        if state_name == "READY" or state_name == "INITIALIZED":
+            can_start = True
+        elif state_name == "STARTING" or state_name == "RUNNING":
+            logger.info(f"Strategy {strategy_id} is already {state_name}, skipping start.")
+            can_start = False
+        else:
+            # For other states, it depends, but let's try to be safe
+            can_start = not strategy.is_running and state_name not in ("STOPPING", "STOPPED", "RESETTING")
+
+        if can_start:
             if self.node.is_running():
                 logger.info(f"Starting strategy {strategy_id} (State: {state_name})")
                 strategy.start() # Nautilus Strategy start method

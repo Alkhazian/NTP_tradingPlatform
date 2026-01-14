@@ -1,4 +1,5 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import logging
@@ -23,23 +24,36 @@ file_handler = RotatingFileHandler(
 )
 file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
 
+# Configure the root logger to use both stdout and our file handler
 logging.basicConfig(
     level=logging.INFO,
     handlers=[
-        logging.StreamHandler(), # Keep stdout
+        logging.StreamHandler(),
         file_handler
-    ]
+    ],
+    # This force=True ensures basicConfig reconfigures if already set up
+    force=True 
 )
-logger = logging.getLogger(__name__)
 
-# Ensure library loggers also use our file handler
+# For library loggers, we clear their existing handlers and ensure they propagate
+# to the root logger where our file_handler is waiting.
 for logger_name in ["uvicorn", "uvicorn.error", "nautilus_trader"]:
     l = logging.getLogger(logger_name)
-    l.addHandler(file_handler)
+    l.handlers = [] 
     l.propagate = True
+
+logger = logging.getLogger(__name__)
 logger.info("--- Log Stream Initialized ---")
 
 app = FastAPI()
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Global exception caught: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"message": "Internal server error"},
+    )
 
 app.add_middleware(
     CORSMiddleware,

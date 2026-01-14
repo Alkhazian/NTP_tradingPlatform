@@ -1,286 +1,246 @@
+"""
+Phase 1: Simplified Interval Trader
+- Only contains strategy logic (entry/exit signals)
+- Uses base class for all operational concerns
+- Bar-driven instead of timer-driven
+- No duplicate order logic (handled by base)
+"""
+
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 
-from nautilus_trader.model.instruments import Instrument
-from nautilus_trader.model.enums import OrderSide, OrderType, TimeInForce
-from nautilus_trader.model.identifiers import Venue, InstrumentId
-from nautilus_trader.model.data import Bar, BarType, BarSpecification, BarAggregation
-from nautilus_trader.model.enums import PriceType
+from nautilus_trader.model.data import Bar, BarType
+from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.objects import Quantity
-
 from ..base import BaseStrategy
 from ..config import StrategyConfig
 
+
 class SimpleIntervalTrader(BaseStrategy):
     """
-    A simple reference strategy that buys 1 contract every N minutes,
-    holds for M minutes, then closes the position.
+    Simple strategy that:
+    1. Buys 1 contract on specified time intervals (e.g., every 5 minutes)
+    2. Holds for specified duration (e.g., 2 minutes)
+    3. Closes position when hold duration expires
+    
+    STRATEGY LOGIC ONLY - operational concerns handled by BaseStrategy.
     """
     
-    def __init__(self, config: StrategyConfig, integration_manager=None, persistence_manager=None):
+    def __init__(
+        self, 
+        config: StrategyConfig, 
+        integration_manager=None, 
+        persistence_manager=None
+    ):
         super().__init__(config, integration_manager, persistence_manager)
-        self.trader_config: StrategyConfig = config # Type hinting
-        self.instrument_id = InstrumentId.from_str(config.instrument_id)
-        self.instrument: Optional[Instrument] = None
         
-        # Runtime State
-        self.is_position_open = False
-        self.last_buy_time: Optional[str] = None # ISO 8601 string
-        self.open_position_id: Optional[str] = None
-        self._close_timer_name: Optional[str] = None
-        self._start_retry_count = 0
-
-    def on_start_safe(self, time=None):
-        """
-        Start lifecycle: Subscribe to data and schedule first buy.
-        """
-        # Request instrument
-        self.instrument = self.cache.instrument(self.instrument_id)
-        if self.instrument is None:
-            self._start_retry_count += 1
-            if self._start_retry_count <= 12: # Retry for 1 minute (5s * 12)
-                self.logger.warning(
-                    f"Instrument {self.instrument_id} not found in cache (retry {self._start_retry_count}/12). "
-                    "Waiting 5 seconds..."
-                )
-                self.clock.set_time_alert(
-                    name=f"{self.id}.start_retry",
-                    alert_time=self.clock.utc_now() + timedelta(seconds=5),
-                    callback=self.on_start_safe,
-                    override=True
-                )
-            else:
-                self.logger.error(f"Instrument {self.instrument_id} not found in cache after 1 minute. Giving up.")
-            return
-
-        self.logger.info(f"Instrument {self.instrument_id} resolved. Subscribing to data...")
-
-        # Subscribe to 1-minute bars using BarType + BarSpecification
-        bar_spec = BarSpecification.from_str("1-MINUTE-LAST")
-        bar_type = BarType(self.instrument_id, bar_spec)
-        self.subscribe_bars(bar_type)
-        self._functional_ready = True
-
-        # Schedule the first buy loop check
-        # We check every minute if we should buy
-        self.clock.set_time_alert(
-            name=f"{self.id}.check_buy_signal",
-            alert_time=self.clock.utc_now() + timedelta(seconds=10),
-            callback=self._check_buy_signal
+        # Strategy parameters
+        self.buy_interval_minutes = int(
+            self.strategy_config.parameters.get("buy_interval_minutes", 5)
         )
-        self.logger.info("SimpleIntervalTrader started. Waiting for next interval.")
+        self.hold_duration_minutes = int(
+            self.strategy_config.parameters.get("hold_duration_minutes", 2)
+        )
+        
+        # Strategy state
+        self.last_buy_time: Optional[datetime] = None
+        self._close_timer_name: Optional[str] = None
+        self._had_scheduled_close = False
 
-    def _check_buy_signal(self, time):
+    # =========================================================================
+    # LIFECYCLE
+    # =========================================================================
+
+    def on_start_safe(self):
         """
-        Periodically checks if it's time to buy.
+        Called by base after instrument is ready.
+        Subscribe to bar data.
         """
-        if not self.trader_config.enabled:
+        # Subscribe to 1-minute bars
+        from nautilus_trader.model.data import BarSpecification
+        
+        bar_type = BarType(
+            self.instrument_id,
+            BarSpecification.from_str("1-MINUTE-MID")
+        )
+        self.subscribe_bars(bar_type)
+        
+        self.logger.info(
+            f"SimpleIntervalTrader started: "
+            f"buy_interval={self.buy_interval_minutes}m, "
+            f"hold_duration={self.hold_duration_minutes}m"
+        )
+        
+        # Check for any positions that need cleanup or rescheduling
+        self._recover_state_logic()
+
+    def on_stop_safe(self):
+        """Cleanup timers."""
+        self.logger.info("SimpleIntervalTrader stopping...")
+        if self._close_timer_name:
+            try:
+                self.clock.cancel_timer(self._close_timer_name)
+            except Exception as e:
+                self.logger.warning(f"Error canceling close timer: {e}")
+
+    def on_reset_safe(self):
+        """Reset strategy state."""
+        self.logger.info("SimpleIntervalTrader resetting...")
+        self.last_buy_time = None
+        self._close_timer_name = None
+
+    # =========================================================================
+    # STRATEGY LOGIC (Bar-driven entry)
+    # =========================================================================
+
+    def on_bar_safe(self, bar: Bar):
+        """
+        Called on each bar close.
+        Check if it's time to enter based on interval.
+        """
+        self.logger.info(f"Bar received: {bar.bar_type} @ {bar.close}")
+        
+        if not self.strategy_config.enabled:
             return
-
-        self.logger.info(f"DEBUG: _check_buy_signal called at {datetime.utcfromtimestamp(self.clock.timestamp())}")
-        try:
-            # Reschedule check
-            self.clock.set_time_alert(
-                name=f"{self.id}.check_buy_signal",
-                alert_time=self.clock.utc_now() + timedelta(minutes=1),
-                callback=self._check_buy_signal,
-                override=True
-            )
-
-            # If position is already open, ignore
-            if self.is_position_open:
-                return
-
-            now_ts = self.clock.timestamp()
+        
+        # Convert bar timestamp to datetime (nanoseconds to seconds)
+        bar_time = datetime.utcfromtimestamp(bar.ts_event / 1_000_000_000)
+        
+        # Check if this bar closes on our interval boundary
+        if self._should_enter(bar_time):
+            self._generate_entry_signal()
             
-            # Simple logic: Buy if enough time passed since last buy (or never bought)
-            # The user said "on the 5-minute mark" - this implies wall clock time 00:05, 00:10 etc.
-            # Let's approximate by creating a timer logic or checking modulus
-            
-            current_dt = datetime.utcfromtimestamp(now_ts)
-            
-            buy_interval = int(self.trader_config.parameters.get("buy_interval_minutes", 5))
+    def _should_enter(self, bar_time: datetime) -> bool:
+        """
+        Determine if entry signal should be generated.
+        
+        Entry conditions:
+        1. Bar close time aligns with interval (e.g., :00, :05, :10 for 5min interval)
+        2. Haven't bought in this minute already (prevent double entry)
+        3. No position currently open (checked by base.can_submit_entry_order)
+        """
+        # Check if minute aligns with interval
+        if bar_time.minute % self.buy_interval_minutes != 0:
+            return False
+        
+        # Check if we already bought in this minute
+        if self.last_buy_time:
+            if (self.last_buy_time.hour == bar_time.hour and 
+                self.last_buy_time.minute == bar_time.minute):
+                return False
+        
+        return True
 
-            # Check if minutes is divisible by buy_interval
-            if current_dt.minute % buy_interval == 0:
-                # To prevent double buying in the same minute, we check last_buy_time
-                if self.last_buy_time:
-                    last_buy_dt = datetime.fromisoformat(self.last_buy_time)
-                    if last_buy_dt.minute == current_dt.minute and last_buy_dt.hour == current_dt.hour:
-                        return
-                        
-                self.logger.info(f"Time match ({current_dt.time()}). executing buy order.")
-                self._execute_buy()
-                
-        except Exception as e:
-            self.on_unexpected_error(e)
-
-    def _execute_buy(self):
-        if not self.trader_config.enabled:
-            return
+    def _generate_entry_signal(self):
+        """
+        Generate entry signal and submit order.
+        Base class handles duplicate prevention.
+        """
+        self.logger.info("Entry signal generated")
+        
+        # Create market buy order
         order = self.order_factory.market(
             instrument_id=self.instrument_id,
             order_side=OrderSide.BUY,
-            quantity=Quantity.from_int(int(self.trader_config.order_size)),
+            quantity=Quantity.from_int(int(self.strategy_config.order_size)),
         )
-        self.submit_order(order)
-        self.logger.info(f"Submitted BUY order for {self.trader_config.order_size} {self.instrument_id}")
         
-        # Optimistic state update (will be confirmed by fill)
-        self.last_buy_time = self.clock.utc_now().isoformat()
-        
+        # Base class validates and submits
+        if self.submit_entry_order(order):
+            self.last_buy_time = self.clock.utc_now()
+            self.save_state()
+
+    # =========================================================================
+    # STRATEGY LOGIC (Time-based exit)
+    # =========================================================================
+
     def on_order_filled_safe(self, event):
         """
-        Handle order fills.
+        Called after base processes fill.
+        For entry fills: schedule exit after hold duration.
         """
-        if not self.trader_config.enabled:
-             # Even if disabled, we might want to handle fills for pending orders?
-             # Usually yes, to maintain state consistency.
-             pass
-
         if event.order_side == OrderSide.BUY:
-            self.logger.info(f"BUY Filled: {event}")
-            self.is_position_open = True
-            
-            # Record entry price for PnL calculation later
-            self.last_entry_price = float(event.last_px) 
-            self.open_position_id = str(event.client_order_id)
+            self._schedule_exit()
 
-            # Start persistent trade record
-            # We use asyncio.create_task because we can't await easily in this sync callback 
-            # (unless on_order_filled is async in base? No, it's usually sync in Nautilus)
-            # Actually, Nautilus 1.18+ callbacks are sync.
-            # BaseStrategy methods we just added are async. We need to schedule them.
-            import asyncio
-            asyncio.create_task(self.start_trade_record(
-                str(self.instrument_id),
-                self.clock.utc_now().isoformat(),
-                self.last_entry_price,
-                float(event.last_qty),
-                "LONG",
-                float(event.commission) if hasattr(event, 'commission') else 0.0,
-                raw_data=str(event)
-            ))
+    def _schedule_exit(self):
+        """Schedule position close after hold duration."""
+        close_time = self.clock.utc_now() + timedelta(minutes=self.hold_duration_minutes)
+        self._close_timer_name = f"{self.id}.close_position"
+        
+        self.clock.set_time_alert(
+            name=self._close_timer_name,
+            alert_time=close_time,
+            callback=self._execute_exit,
+            override=True
+        )
+        
+        self.logger.info(f"Scheduled position close at {close_time}")
+        self.save_state()
 
-            self.save_state() # Persist "Open Position" state
-            
-            # Schedule release/sell
-            hold_duration = int(self.trader_config.parameters.get("hold_duration_minutes", 2))
-            close_time = self.clock.utc_now() + timedelta(minutes=hold_duration)
-            self._close_timer_name = f"{self.id}.execute_close"
-            self.clock.set_time_alert(
-                name=self._close_timer_name,
-                alert_time=close_time,
-                callback=self._execute_close,
-                override=True
-            )
-            self.logger.info(f"Scheduled SELL for {close_time}")
-
-        elif event.order_side == OrderSide.SELL:
-            self.logger.info(f"SELL Filled: {event}")
-            self.is_position_open = False
-            self.open_position_id = None
-            self._close_timer_name = None
-            
-            # Close persistent trade record
-            multiplier = 1.0
-            if self.instrument and self.instrument.multiplier:
-                multiplier = float(self.instrument.multiplier)
-            
-            import asyncio
-            # We assume exit reason was set before close, or we default
-            reason = getattr(self, "last_exit_reason", "UNKNOWN")
-
-            asyncio.create_task(self.close_trade_record(
-                self.clock.utc_now().isoformat(),
-                float(event.last_px),
-                reason,
-                float(event.last_qty),
-                self.last_entry_price if hasattr(self, 'last_entry_price') else 0.0,
-                float(event.commission) if hasattr(event, 'commission') else 0.0,
-                raw_data=str(event),
-                multiplier=multiplier
-            ))
-
-            self.save_state() # Persist "Closed Position" state
-
-    def _execute_close(self, time):
+    def _execute_exit(self, alert):
         """
-        Close the position.
+        Execute exit when timer fires.
+        Base class handles order validation and submission.
         """
-        if not self.is_position_open:
-            return
+        self.logger.info("Hold duration expired - generating exit signal")
+        self._close_timer_name = None
+        
+        # Use base class method to close position
+        self.close_strategy_position(reason="HOLD_DURATION_EXPIRED")
 
-        self.logger.info("Hold duration expried. Executing SELL order.")
-        self.last_exit_reason = "HOLD_DURATION_EXPIRED"
-        # Close all positions for this instrument (simple approach)
-        self.close_all_positions(self.instrument_id)
+    # =========================================================================
+    # STATE PERSISTENCE
+    # =========================================================================
 
     def get_state(self) -> Dict[str, Any]:
-        """
-        Serialize state.
-        """
+        """Return strategy-specific state."""
         return {
-            "is_position_open": self.is_position_open,
-            "last_buy_time": self.last_buy_time,
-            "open_position_id": self.open_position_id,
-            "last_entry_price": getattr(self, "last_entry_price", 0.0),
-            "last_exit_reason": getattr(self, "last_exit_reason", None)
+            "last_buy_time": self.last_buy_time.isoformat() if self.last_buy_time else None,
+            "has_scheduled_close": self._close_timer_name is not None,
         }
 
     def set_state(self, state: Dict[str, Any]):
-        """
-        Restore state.
-        """
-        self.is_position_open = state.get("is_position_open", False)
-        self.last_buy_time = state.get("last_buy_time")
-        self.open_position_id = state.get("open_position_id")
-        self.last_entry_price = state.get("last_entry_price", 0.0)
-        self.last_exit_reason = state.get("last_exit_reason")
+        """Restore strategy-specific state variables."""
+        # Restore last buy time
+        last_buy_str = state.get("last_buy_time")
+        if last_buy_str:
+            self.last_buy_time = datetime.fromisoformat(last_buy_str)
         
-        # If we restored an open position state, we need to consider if we should close it
-        # If the system crashed and restarted, the hold timer is lost.
-        # We should check if we are past the hold duration.
-        
-        if self.is_position_open and self.last_buy_time:
-            from datetime import timezone
-            now_dt = datetime.now(timezone.utc)
-            # Ensure last_buy_dt is offset-aware
-            last_buy_dt = datetime.fromisoformat(self.last_buy_time)
-            if last_buy_dt.tzinfo is None:
-                last_buy_dt = last_buy_dt.replace(tzinfo=timezone.utc)
-            
-            elapsed_min = (now_dt - last_buy_dt).total_seconds() / 60
-            
-            hold_duration = int(self.trader_config.parameters.get("hold_duration_minutes", 2))
-            
-            if elapsed_min >= hold_duration:
-                self.logger.warning("Restored open position is PAST hold duration. Scheduling immediate close.")
-                # We can't schedule immediately in this method easily if clock isn't running yet,
-                # but on_start_safe calls this, so it should be fine to schedule a quick check?
-                # Actually, on_start runs when Strategy starts.
-                # We can set a flag to check in on_start or just let the user handle it?
-                # Best effort:
-                # We will handle this in on_start_safe or via a separate check.
-    def on_stop_safe(self):
-        """
-        Cleanup when stopping.
-        """
-        self.logger.info(f"SimpleIntervalTrader {self.id} cleaning up timers.")
-        try:
-            self.clock.cancel_timer(f"{self.id}.check_buy_signal")
-            if self._close_timer_name:
-                self.clock.cancel_timer(self._close_timer_name)
-        except Exception as e:
-            self.logger.warning(f"Error canceling timers on stop: {e}")
+        # Flags for recovery logic in on_start_safe
+        self._had_scheduled_close = state.get("has_scheduled_close", False)
 
-    def on_reset_safe(self):
+    def _recover_state_logic(self):
         """
-        Cleanup state for fresh start.
+        Handle position recovery after crash/restart.
+        Called from on_start_safe when RUNNING and instrument is ready.
         """
-        self.logger.info(f"SimpleIntervalTrader {self.id} resetting internal state.")
-        self.is_position_open = False
-        self.last_buy_time = None
-        self.open_position_id = None
-        self._close_timer_name = None
-        self._start_retry_count = 0
+        if self._has_open_position():
+            if self._had_scheduled_close and self.last_buy_time:
+                # Calculate time remaining
+                elapsed = (self.clock.utc_now() - self.last_buy_time).total_seconds() / 60
+                remaining = self.hold_duration_minutes - elapsed
+                
+                if remaining > 0:
+                    # Reschedule with remaining time
+                    self.logger.info(f"Rescheduling close timer ({remaining:.1f}m remaining)")
+                    self._close_timer_name = f"{self.id}.close_position"
+                    self.clock.set_time_alert(
+                        name=self._close_timer_name,
+                        alert_time=self.clock.utc_now() + timedelta(minutes=remaining),
+                        callback=self._execute_exit,
+                        override=True
+                    )
+                else:
+                    # Should have closed already - close immediately
+                    self.logger.warning("Position overdue for close - closing now")
+                    self.close_strategy_position(reason="OVERDUE_AFTER_RESTART")
+            else:
+                # Position exists but no valid scheduled close in state
+                # Close it to start fresh and avoid "stuck" strategy
+                pos = self._get_open_position()
+                if pos:
+                    self.logger.warning(f"Unknown open position found ({pos.id}) - closing to start fresh")
+                    self.close_strategy_position(reason="UNKNOWN_POSITION_RESTART")
+        
+        # Clear recovery flag
+        self._had_scheduled_close = False

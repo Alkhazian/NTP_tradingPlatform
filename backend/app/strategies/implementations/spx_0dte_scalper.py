@@ -11,8 +11,8 @@ from app.strategies.base import BaseStrategy
 from app.strategies.config import StrategyConfig
 
 class SPXZeroDTEScalper(BaseStrategy):
-    def __init__(self, config: StrategyConfig, integration_manager=None):
-        super().__init__(config, integration_manager)
+    def __init__(self, config: StrategyConfig, integration_manager=None, persistence_manager=None):
+        super().__init__(config, integration_manager, persistence_manager)
         
         # Extract parameters from config
         self.spx_instrument_id = InstrumentId.from_str(config.instrument_id)

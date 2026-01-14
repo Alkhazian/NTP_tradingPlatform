@@ -14,5 +14,10 @@
         "strategy_type": "TslaOptionsIntervalStrategy",
         "module": "app.strategies.implementations.Tesla_Options_Interval_Strategy",
         "class_name": "TslaOptionsIntervalStrategy"
+    },
+    {
+        "strategy_type": "SPXZeroDTEScalper",
+        "module": "app.strategies.implementations.spx_0dte_scalper",
+        "class_name": "SPXZeroDTEScalper"
     }
 ]
