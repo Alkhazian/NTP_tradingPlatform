@@ -1,10 +1,10 @@
 {
-    "last_buy_time": "2026-01-13T21:45:41.926734+00:00",
+    "last_buy_time": "2026-01-14T20:31:05.342307464+00:00",
     "has_scheduled_close": false,
-    "active_trade_id": 9,
-    "_last_entry_price": 6998.87,
+    "active_trade_id": null,
+    "_last_entry_price": 6956.75,
     "_last_entry_qty": 1.0,
     "_pending_entry_orders": [],
     "_pending_exit_orders": [],
-    "_last_updated": "2026-01-13T23:36:56.329088"
+    "_last_updated": "2026-01-14T20:32:17.255697"
 }

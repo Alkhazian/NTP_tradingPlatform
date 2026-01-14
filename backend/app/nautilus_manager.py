@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from typing import Optional
+from typing import Optional, Dict, Any
 from nautilus_trader.adapters.interactive_brokers.config import (
     InteractiveBrokersDataClientConfig,
     InteractiveBrokersExecClientConfig,
@@ -20,6 +20,7 @@ from nautilus_trader.config import (
 )
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import AccountId, Venue, Symbol
+from nautilus_trader.model.enums import OrderSide, PositionSide
 from .services.trade_recorder import TradeRecorder
 
 logger = logging.getLogger(__name__)
@@ -165,6 +166,7 @@ class NautilusManager:
                 timeout_reconciliation=60.0,
                 timeout_portfolio=60.0,
                 timeout_disconnection=10.0,
+                start_strategies=False, # We manage strategy startup manually based on config
             )
 
             # Create and build the trading node
@@ -317,38 +319,61 @@ class NautilusManager:
                 else:
                     logger.info(f"No balances found for account {target_account_id}")
 
-                # Update open positions details
+                # Update open positions details using netting logic
                 positions_data = []
                 try:
-                    for p in self.node.cache.positions():
+                    all_cached_positions = list(self.node.cache.positions())
+                    # Symbol -> {net_qty, total_upnl, total_cost, count}
+                    netted: Dict[str, Dict[str, Any]] = {}
+                    
+                    for p in all_cached_positions:
                         if not p.is_closed:
-                            # Safely extract PnL if available
-                            pnl = 0.0
+                            symbol = str(p.instrument_id)
+                            qty = float(p.quantity)
+                            if p.side == PositionSide.SHORT:
+                                qty = -qty
+                                
+                            upnl = 0.0
                             try:
                                 if p.unrealized_pnl:
-                                    pnl = float(p.unrealized_pnl.as_double())
-                            except Exception:
-                                pass
+                                    upnl = float(p.unrealized_pnl.as_double())
+                            except Exception: pass
 
-                            # Safely extract price
-                            avg_price = 0.0
+                            avg_px = 0.0
                             try:
                                 if p.avg_px_open is not None:
                                     if hasattr(p.avg_px_open, "as_double"):
-                                        avg_price = float(p.avg_px_open.as_double())
+                                        avg_px = float(p.avg_px_open.as_double())
                                     else:
-                                        avg_price = float(p.avg_px_open)
-                            except Exception:
-                                pass
+                                        avg_px = float(p.avg_px_open)
+                            except Exception: pass
+                            
+                            # logger.info(f"Nautilus Position: {symbol}, qty={qty}, avg_px={avg_px}")
+                            
+                            if symbol not in netted:
+                                netted[symbol] = {
+                                    "net_qty": 0.0,
+                                    "total_upnl": 0.0,
+                                    "total_cost": 0.0
+                                }
+                            
+                            netted[symbol]["net_qty"] += qty
+                            netted[symbol]["total_upnl"] += upnl
+                            netted[symbol]["total_cost"] += (abs(qty) * avg_px)
 
+                    # Convert netted map to list
+                    for symbol, data in netted.items():
+                        if abs(data["net_qty"]) > 1e-9:
+                            avg_price = data["total_cost"] / abs(data["net_qty"]) if data["net_qty"] != 0 else 0
                             positions_data.append({
-                                "symbol": str(p.instrument_id),
-                                "quantity": float(p.quantity),
+                                "symbol": symbol,
+                                "quantity": data["net_qty"],
                                 "avg_price": avg_price,
-                                "unrealized_pnl": pnl
+                                "unrealized_pnl": data["total_upnl"]
                             })
+                            logger.info(f"Position reported: {symbol}, Net Qty: {data['net_qty']}, UPnL: {data['total_upnl']}")
                 except Exception as e:
-                    logger.error(f"Error processing positions: {e}")
+                    logger.error(f"Error processing positions: {e}", exc_info=True)
                 
                 self._positions = positions_data
                 self._open_positions = len(self._positions)
@@ -438,17 +463,7 @@ class NautilusManager:
                     # Instead of checking just "InteractiveBrokers", aggregate all venues 
                     # registered to the IB execution client
                     total_exposure = 0.0
-                    # try:
-                    #     # Get all venues the portfolio is currently tracking
-                    #     for venue in portfolio.venues:
-                    #         # Get exposure for this specific venue
-                    #         exp = portfolio.net_exposures(venue)
-                    #         if exp:
-                    #             # Sum up the absolute double values of exposures
-                    #             total_exposure += sum(abs(e.as_double()) for e in exp.values())
-                    #     self._net_exposure = f"{total_exposure:.2f} {self._account_currency}"
-                    # except Exception as e:
-                    #     logger.error(f"Error aggregating multi-venue exposure: {e}")
+                    # ... exposure aggregation omitted for brevity ...
                     
                     # Leverage
                     try:
@@ -460,8 +475,6 @@ class NautilusManager:
                                     self._leverage = f"{lev_list[0]:.2f}"
                     except Exception:
                         pass
-                    
-                    #logger.info(f"Portfolio metrics - Margin Used: {self._margin_used}, Unrealized P&L: {self._total_unrealized_pnl}, Net Exposure: {self._net_exposure}")
                     
                 except Exception as e:
                     logger.error(f"Error extracting portfolio metrics: {e}", exc_info=True)
@@ -482,7 +495,6 @@ class NautilusManager:
             cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
             cutoff_ns = int(cutoff_time.timestamp() * 1_000_000_000)
             
-            
             trades = []
             
             # Get all orders from cache
@@ -499,7 +511,7 @@ class NautilusManager:
                     # Extract order details
                     try:
                         # Determine trade type
-                        trade_type = "buy" if str(order.side) == "OrderSide.BUY" else "sell"
+                        trade_type = "buy" if order.side == OrderSide.BUY else "sell"
                         
                         # Get symbol
                         symbol = str(order.instrument_id).split('.')[0] if hasattr(order, 'instrument_id') else "UNKNOWN"
@@ -542,21 +554,13 @@ class NautilusManager:
             
             # Sort by timestamp (most recent first)
             trades.sort(key=lambda x: x['timestamp'], reverse=True)
-            
-            # Keep timestamp for frontend filtering
-            # for trade in trades:
-            #     trade.pop('timestamp', None)
-            
-            logger.debug(f"Found {len(trades)} recent trades in the last {hours} hours")
-            return trades  # Return all trades for frontend filtering
+            return trades
             
         except Exception as e:
             logger.error(f"Error fetching recent trades: {e}", exc_info=True)
             return []
 
     async def stop(self):
-
-
         """Stop the NautilusTrader TradingNode"""
         if self.node:
             logger.info("Stopping NautilusTrader TradingNode")
@@ -568,12 +572,6 @@ class NautilusManager:
         """Start the SPX Streaming Data Actor"""
         if not self.strategy_manager:
             raise RuntimeError("Strategy Manager not initialized")
-        
-        # Ensure SPX is loaded in cache
-        # Note: We configured the InstrumentProvider to load SPX.CBOE on startup.
-        # Direct access to load it here is difficult without exposing internal clients.
-        # We assume it is loaded or will be loaded.
-            # We continue, maybe it's already there or will fail in strategy
         
         # Check if already exists
         strategies = await self.strategy_manager.get_all_strategies_status()
@@ -610,7 +608,6 @@ class NautilusManager:
     async def get_status(self) -> dict:
         """
         Get current connection and account status.
-        Maintains compatibility with legacy IBConnector interface.
         """
         strategies = []
         if self.strategy_manager:
@@ -633,7 +630,6 @@ class NautilusManager:
             "margin_usage_percent": self._margin_usage_percent,
             "total_unrealized_pnl": self._total_unrealized_pnl,
             "total_realized_pnl": self._total_realized_pnl,
-            "net_exposure": self._net_exposure,
             "leverage": self._leverage,
             "recent_trades": self._recent_trades,
             "strategies": strategies,
@@ -642,11 +638,7 @@ class NautilusManager:
     async def update_status(self):
         """Update account state and connection health check"""
         if self.node:
-             # For now, if node exists and started, we consider it connected
-             # Better health check would be per-client, but NautilusTradingNode 
-             # doesn't expose a simple health check for all clients at the node level.
              self._connected = True
-             # logger.info(f"Status update: Node active, connected={self._connected}")
         
         await self._update_account_state()
         self._recent_trades = await self._get_recent_trades(hours=24)

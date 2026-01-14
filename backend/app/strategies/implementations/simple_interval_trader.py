@@ -167,11 +167,16 @@ class SimpleIntervalTrader(BaseStrategy):
         close_time = self.clock.utc_now() + timedelta(minutes=self.hold_duration_minutes)
         self._close_timer_name = f"{self.id}.close_position"
         
+        # Manually cancel existing timer if any (more robust than override=True)
+        try:
+            self.clock.cancel_timer(self._close_timer_name)
+        except Exception:
+            pass # Ignore if timer doesn't exist or already fired
+            
         self.clock.set_time_alert(
             name=self._close_timer_name,
             alert_time=close_time,
-            callback=self._execute_exit,
-            override=True
+            callback=self._execute_exit
         )
         
         self.logger.info(f"Scheduled position close at {close_time}")
@@ -224,11 +229,17 @@ class SimpleIntervalTrader(BaseStrategy):
                     # Reschedule with remaining time
                     self.logger.info(f"Rescheduling close timer ({remaining:.1f}m remaining)")
                     self._close_timer_name = f"{self.id}.close_position"
+                    
+                    # Manually cancel existing timer if any
+                    try:
+                        self.clock.cancel_timer(self._close_timer_name)
+                    except Exception:
+                        pass
+                        
                     self.clock.set_time_alert(
                         name=self._close_timer_name,
                         alert_time=self.clock.utc_now() + timedelta(minutes=remaining),
-                        callback=self._execute_exit,
-                        override=True
+                        callback=self._execute_exit
                     )
                 else:
                     # Should have closed already - close immediately
