@@ -19,7 +19,7 @@ from nautilus_trader.config import (
     RoutingConfig
 )
 from nautilus_trader.live.node import TradingNode
-from nautilus_trader.model.identifiers import AccountId, Venue
+from nautilus_trader.model.identifiers import AccountId, Venue, Symbol
 from .services.trade_recorder import TradeRecorder
 
 logger = logging.getLogger(__name__)
@@ -223,7 +223,20 @@ class NautilusManager:
             logger.info(f"Node state after wait: node.is_running={self.node.is_running()}, trader.is_running={self.node.trader.is_running}, elapsed={elapsed:.1f}s")
             
             if self.node.is_running():
-                logger.info(f"Node is running (waited {elapsed:.1f}s), checking strategies...")
+                logger.info(f"Node is running (waited {elapsed:.1f}s). Requesting SPX option chains...")
+                
+#                 # Request SPX option chains from IBKR
+#                 try:
+#                     self.node.trader.request_instruments(
+#                         venue=Venue("CBOE"),
+#                         instrument_id=Symbol("SPX")
+#                     )
+#                     logger.info("Sent request for SPX option chain to IBKR")
+#                 except Exception as e:
+#                     logger.error(f"Error requesting option chains: {e}")
+                
+                # Give time for option contracts to load before starting strategies
+                await asyncio.sleep(5)
                 
                 # Now that node is running, start any strategies that were configured to auto-start
                 for strategy_id, strategy in self.strategy_manager.strategies.items():
@@ -235,11 +248,7 @@ class NautilusManager:
             
         except Exception as e:
             logger.error(f"Error in background node startup task: {e}", exc_info=True)
-
-        except Exception as e:
-            logger.error(f"Failed to start NautilusTrader: {e}")
             self._connected = False
-            raise
 
     async def _update_account_state(self):
         """Fetch and update account state from NautilusTrader"""

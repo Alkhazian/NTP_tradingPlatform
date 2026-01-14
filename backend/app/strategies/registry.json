@@ -19,5 +19,10 @@
         "strategy_type": "SPXZeroDTEScalper",
         "module": "app.strategies.implementations.spx_0dte_scalper",
         "class_name": "SPXZeroDTEScalper"
+    },
+    {
+        "strategy_type": "Spxw0DteIntervalStrategy",
+        "module": "app.strategies.implementations.SPXW_0DTE_interval_strategy",
+        "class_name": "Spxw0DteIntervalStrategy"
     }
 ]
