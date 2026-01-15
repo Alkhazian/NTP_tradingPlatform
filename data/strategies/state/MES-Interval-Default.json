@@ -2,11 +2,11 @@
     "last_buy_time": "2026-01-15T06:01:05.380443+00:00",
     "has_scheduled_close": false,
     "active_trade_id": null,
-    "_last_entry_price": 6962.5,
-    "_last_entry_qty": 1.0,
+    "_last_entry_price": 6982.62,
+    "_last_entry_qty": 2.0,
     "_pending_entry_orders": [
         "O-20260115-060105-001-000-1"
     ],
     "_pending_exit_orders": [],
-    "_last_updated": "2026-01-15T06:03:28.183717"
+    "_last_updated": "2026-01-15T23:23:45.309318"
 }

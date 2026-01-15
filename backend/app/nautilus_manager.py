@@ -7,6 +7,7 @@ from nautilus_trader.adapters.interactive_brokers.config import (
     InteractiveBrokersExecClientConfig,
     InteractiveBrokersInstrumentProviderConfig,
     IBMarketDataTypeEnum,
+    SymbologyMethod,
 )
 from nautilus_trader.adapters.interactive_brokers.common import IBContract
 from nautilus_trader.adapters.interactive_brokers.factories import (
@@ -121,7 +122,10 @@ class NautilusManager:
                         localSymbol="MESH6",
                         lastTradeDateOrContractMonth="202603",
                     ),
+
                 ),
+                symbology_method=SymbologyMethod.IB_SIMPLIFIED,
+                filter_sec_types=frozenset(["OPT"]),
             )
 
             # Configure Interactive Brokers data client
@@ -157,9 +161,6 @@ class NautilusManager:
                     "InteractiveBrokers": ib_data_config,
                 },
                 exec_clients={
-                    "CME": ib_exec_config,
-                    "CBOE": ib_exec_config,
-                    "SMART": ib_exec_config,
                     "InteractiveBrokers": ib_exec_config,
                 },
                 timeout_connection=90.0,

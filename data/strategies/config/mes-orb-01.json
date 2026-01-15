@@ -1,7 +1,7 @@
 {
     "id": "mes-orb-01",
     "name": "MES Opening Range Breakout",
-    "enabled": true,
+    "enabled": false,
     "instrument_id": "MESH6.CME",
     "strategy_type": "MesOrbStrategy",
     "order_size": 1.0,
