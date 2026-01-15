@@ -196,32 +196,44 @@ export default function Strategies() {
                                     </div>
                                 ) : (
                                     <div className="p-6 flex flex-col gap-6">
-                                        <div className="flex flex-col md:flex-row items-center justify-between gap-6">
-                                            <div className="flex items-center gap-4">
-                                                <div className={`p-4 rounded-xl ${strategy.running ? 'bg-emerald-500/10' : 'bg-white/5'}`}>
+                                        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+                                            <div className="flex items-start md:items-center gap-5">
+                                                {/* Icon Container */}
+                                                <div className={`shrink-0 w-16 h-16 flex items-center justify-center rounded-2xl border ${strategy.running ? 'bg-emerald-500/10 border-emerald-500/20 shadow-[0_0_15px_-3px_rgba(16,185,129,0.2)]' : 'bg-white/5 border-white/10'}`}>
                                                     <Icons.cpu className={`w-8 h-8 ${strategy.running ? 'text-emerald-400' : 'text-muted-foreground'}`} />
                                                 </div>
-                                                <div>
-                                                    <div className="flex items-center gap-2">
-                                                        <h3 className="text-lg font-bold text-white">{strategy.config.name || strategy.id}</h3>
-                                                        <Badge variant={strategy.running ? 'success' : 'secondary'}>
-                                                            {strategy.running ? 'RUNNING' : 'STOPPED'}
+
+                                                <div className="space-y-2">
+                                                    <div className="flex flex-wrap items-center gap-3">
+                                                        <h3 className="text-xl font-bold tracking-tight text-white">{strategy.config.name || strategy.id}</h3>
+                                                        <Badge variant={strategy.running ? 'success' : 'secondary'} className="h-6">
+                                                            {strategy.running ? 'ACTIVE' : 'STOPPED'}
                                                         </Badge>
                                                     </div>
-                                                    <div className="mt-1 flex items-center gap-4 text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                                                        <span className="text-cyan-400/80">{strategy.config.strategy_type}</span>
-                                                        <span>•</span>
-                                                        <span>{strategy.config.instrument_id}</span>
-                                                        <span>•</span>
-                                                        <span className="text-emerald-400/80">Size: {strategy.config.order_size}</span>
+
+                                                    {/* Parameters as Tags */}
+                                                    <div className="flex flex-wrap items-center gap-2">
+                                                        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-xs font-medium text-cyan-200/80">
+                                                            <Icons.activity className="w-3.5 h-3.5 opacity-70" />
+                                                            {strategy.config.strategy_type}
+                                                        </div>
+                                                        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-xs font-medium text-muted-foreground">
+                                                            <span className="opacity-70">ID:</span>
+                                                            {strategy.config.instrument_id}
+                                                        </div>
+                                                        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-xs font-medium text-emerald-200/80">
+                                                            <span className="opacity-70">Size:</span>
+                                                            {strategy.config.order_size}
+                                                        </div>
                                                     </div>
                                                 </div>
                                             </div>
 
-                                            <div className="flex items-center gap-3">
+                                            {/* Actions */}
+                                            <div className="flex items-center gap-3 w-full lg:w-auto mt-2 lg:mt-0">
                                                 <button
                                                     onClick={() => startEditing(strategy)}
-                                                    className="p-2 text-muted-foreground hover:text-white transition-colors bg-white/5 rounded-lg"
+                                                    className="p-3 text-muted-foreground hover:text-white transition-colors bg-white/5 hover:bg-white/10 rounded-xl border border-white/5"
                                                     title="Edit Configuration"
                                                 >
                                                     <Icons.settings className="w-5 h-5" />
@@ -230,18 +242,18 @@ export default function Strategies() {
                                                 {strategy.running ? (
                                                     <button
                                                         onClick={() => handleStop(strategy.id)}
-                                                        className="flex items-center gap-2 px-6 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 font-bold rounded-lg border border-red-500/30 transition-all active:scale-95"
+                                                        className="flex-1 lg:flex-none flex items-center justify-center gap-2 px-6 py-3 bg-red-500/10 hover:bg-red-500/20 text-red-400 font-bold rounded-xl border border-red-500/30 transition-all active:scale-95 shadow-[0_0_20px_-5px_rgba(239,68,68,0.15)]"
                                                     >
-                                                        <Icons.square className="w-4 h-4 fill-current" />
-                                                        STOP
+                                                        <Icons.square className="w-5 h-5 fill-current" />
+                                                        STOP STRATEGY
                                                     </button>
                                                 ) : (
                                                     <button
                                                         onClick={() => handleStart(strategy.id)}
-                                                        className="flex items-center gap-2 px-6 py-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 font-bold rounded-lg border border-emerald-500/30 transition-all active:scale-95"
+                                                        className="flex-1 lg:flex-none flex items-center justify-center gap-2 px-6 py-3 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 font-bold rounded-xl border border-emerald-500/30 transition-all active:scale-95 shadow-[0_0_20px_-5px_rgba(16,185,129,0.15)]"
                                                     >
-                                                        <Icons.play className="w-4 h-4 fill-current" />
-                                                        START
+                                                        <Icons.play className="w-5 h-5 fill-current" />
+                                                        START TRADING
                                                     </button>
                                                 )}
                                             </div>

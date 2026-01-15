@@ -5,9 +5,10 @@ interface HeaderProps {
     title: string;
     subtitle?: string;
     className?: string;
+    onMenuClick?: () => void;
 }
 
-export function Header({ title, subtitle, className }: HeaderProps) {
+export function Header({ title, subtitle, className, onMenuClick }: HeaderProps) {
     const currentTime = new Date().toLocaleTimeString('en-US', {
         hour: '2-digit',
         minute: '2-digit',
@@ -27,23 +28,33 @@ export function Header({ title, subtitle, className }: HeaderProps) {
             "flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8",
             className
         )}>
-            <div className="space-y-1">
-                <h1 className="text-3xl md:text-4xl font-bold tracking-tight gradient-text">
-                    {title}
-                </h1>
-                {subtitle && (
-                    <p className="text-muted-foreground">{subtitle}</p>
-                )}
+            <div className="flex items-center gap-4">
+                {/* Mobile Menu Button - Visible only on mobile */}
+                <button
+                    onClick={onMenuClick}
+                    className="md:hidden p-2 -ml-2 rounded-lg hover:bg-white/10 text-muted-foreground hover:text-foreground transition-colors"
+                >
+                    <Icons.menu className="w-6 h-6" />
+                </button>
+
+                <div className="space-y-1">
+                    <h1 className="text-2xl md:text-3xl lg:text-4xl font-bold tracking-tight gradient-text">
+                        {title}
+                    </h1>
+                    {subtitle && (
+                        <p className="text-sm md:text-base text-muted-foreground hidden sm:block">{subtitle}</p>
+                    )}
+                </div>
             </div>
 
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-4 self-end md:self-auto">
                 {/* Live indicator */}
-                <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10">
+                <div className="flex items-center gap-2 px-3 py-1.5 md:px-4 md:py-2 rounded-full bg-white/5 border border-white/10">
                     <span className="relative flex h-2 w-2">
                         <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                         <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
                     </span>
-                    <span className="text-sm font-medium text-emerald-400">LIVE</span>
+                    <span className="text-xs md:text-sm font-medium text-emerald-400">LIVE</span>
                 </div>
 
                 {/* Time display */}
@@ -97,44 +108,65 @@ export function SidebarItem({ icon, label, active, onClick }: SidebarItemProps) 
 interface SidebarProps {
     className?: string;
     children?: React.ReactNode;
+    isOpen?: boolean;
+    onClose?: () => void;
 }
 
-export function Sidebar({ className, children }: SidebarProps) {
+export function Sidebar({ className, children, isOpen, onClose }: SidebarProps) {
     return (
-        <aside className={cn(
-            "w-64 glass-sidebar flex flex-col h-screen fixed left-0 top-0 z-50",
-            className
-        )}>
-            {/* Logo */}
-            <div className="p-6 border-b border-white/10">
-                <div className="flex items-center gap-3">
-                    <div className="p-2 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600">
-                        <Icons.activity className="w-6 h-6 text-white" />
+        <>
+            {/* Mobile Backdrop */}
+            {isOpen && (
+                <div
+                    className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 md:hidden animate-in fade-in duration-200"
+                    onClick={onClose}
+                />
+            )}
+
+            {/* Sidebar Container */}
+            <aside className={cn(
+                "fixed left-0 top-0 h-screen w-64 glass-sidebar z-50 flex flex-col transition-transform duration-300 md:translate-x-0 border-r border-white/10 bg-background/95 md:bg-transparent",
+                isOpen ? "translate-x-0" : "-translate-x-full",
+                className
+            )}>
+                {/* Logo */}
+                <div className="p-6 border-b border-white/10 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                        <div className="p-2 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600">
+                            <Icons.activity className="w-6 h-6 text-white" />
+                        </div>
+                        <div>
+                            <h2 className="font-bold text-lg">NTD Trader</h2>
+                            <p className="text-xs text-muted-foreground">Dashboard v1.0</p>
+                        </div>
                     </div>
-                    <div>
-                        <h2 className="font-bold text-lg">NTD Trader</h2>
-                        <p className="text-xs text-muted-foreground">Dashboard v1.0</p>
+                    {/* Mobile Close Button */}
+                    <button
+                        onClick={onClose}
+                        className="md:hidden p-2 rounded-lg hover:bg-white/10 text-muted-foreground"
+                    >
+                        <Icons.x className="w-5 h-5" />
+                    </button>
+                </div>
+
+                {/* Navigation */}
+                <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
+                    {children}
+                </nav>
+
+                {/* Footer */}
+                <div className="p-4 border-t border-white/10">
+                    <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-white/5">
+                        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center text-sm font-bold">
+                            T
+                        </div>
+                        <div className="flex-1 min-w-0">
+                            <p className="text-sm font-medium truncate">Trader</p>
+                            <p className="text-xs text-muted-foreground">Paper Trading</p>
+                        </div>
                     </div>
                 </div>
-            </div>
-
-            {/* Navigation */}
-            <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
-                {children}
-            </nav>
-
-            {/* Footer */}
-            <div className="p-4 border-t border-white/10">
-                <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-white/5">
-                    <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center text-sm font-bold">
-                        T
-                    </div>
-                    <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium truncate">Trader</p>
-                        <p className="text-xs text-muted-foreground">Paper Trading</p>
-                    </div>
-                </div>
-            </div>
-        </aside>
+            </aside>
+        </>
     );
 }
