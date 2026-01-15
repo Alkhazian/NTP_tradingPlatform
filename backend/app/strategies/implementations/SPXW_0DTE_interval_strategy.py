@@ -9,7 +9,8 @@ from typing import Dict, Any
 import asyncio
 
 from nautilus_trader.model.data import QuoteTick
-from nautilus_trader.model.enums import OrderSide
+from nautilus_trader.model.enums import OrderSide, OptionKind
+from datetime import datetime, timezone
 from nautilus_trader.model.identifiers import InstrumentId, Venue, Symbol
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.model.instruments import Instrument
@@ -32,7 +33,7 @@ class Spxw0DteIntervalStrategy(BaseStrategy):
         # Використовуємо instrument_id з конфігурації (наприклад ^SPX.CBOE)
         # BaseStrategy вже встановив self.instrument_id = InstrumentId.from_str(config.instrument_id)
         self.underlying_instrument_id = self.instrument_id  # ^SPX.CBOE
-        self.option_symbol_prefix = "SPXW"
+        self.option_symbol_prefix = "SPX"
         self.interval_seconds = config.parameters.get("interval_seconds", 60)
         self.quantity = config.parameters.get("quantity", 1)
         
@@ -133,12 +134,14 @@ class Spxw0DteIntervalStrategy(BaseStrategy):
                     "ib_contracts": [
                         {
                             "secType": "OPT",
-                            "symbol": "SPXW",
+                            "symbol": "SPX",
                             "exchange": "CBOE",
                             "currency": "USD",
                             "lastTradeDateOrContractMonth": expiry_date_ib,
                             "strike": atm_strike,
-                            "right": "C"  # Call only
+                            "right": "C",  # Call only
+                            "tradingClass": "SPXW",
+                            "multiplier": "100"
                         }
                     ]
                 }
@@ -156,37 +159,53 @@ class Spxw0DteIntervalStrategy(BaseStrategy):
             return
         
         # Шукаємо опціони в кеші
-        today = self.clock.utc_now().date()
+        now_ns = self.clock.timestamp_ns()
+        now_dt = datetime.fromtimestamp(now_ns / 1_000_000_000, tz=timezone.utc)
+        today = now_dt.date()
         instruments = list(self.cache.instruments())
         
         # Фільтруємо SPXW 0DTE Call опціони
         options = []
         for inst in instruments:
-            # Перевіряємо чи це опціон (має атрибути option_kind та strike_price)
+            # Check if this is an option
             if not (hasattr(inst, 'option_kind') and hasattr(inst, 'strike_price')):
                 continue
             
-            # Перевіряємо символ
+            # Check symbol prefix (SPXW starts with SPX)
             symbol_str = str(inst.id.symbol.value)
-            if not symbol_str.startswith(self.option_symbol_prefix):
-                continue
+            symbol_match = symbol_str.startswith(self.option_symbol_prefix)
             
-            # Перевіряємо тип (Call) та дату експірації
-            if (hasattr(inst, 'option_kind') and str(inst.option_kind) == 'OptionKind.CALL' and
-                hasattr(inst, 'activation_ns') and inst.activation_ns):
+            # Check if it's a Call
+            kind_match = (inst.option_kind == OptionKind.CALL)
+
+            # Check expiration date (0DTE)
+            expiry_date = None
+            
+            # 1. Try expiration_ns (native Nautilus property for some adapters)
+            if hasattr(inst, 'expiration_ns') and inst.expiration_ns:
+                expiry_dt = datetime.fromtimestamp(inst.expiration_ns / 1_000_000_000, tz=timezone.utc)
+                expiry_date = expiry_dt.date()
+            # 2. Try expiration_date
+            elif hasattr(inst, 'expiration_date') and inst.expiration_date:
+                expiry_date = inst.expiration_date
+            # 3. Fallback: Parse from OCC symbol (RootYYYYMMDDRightStrike)
+            # Example: SPXW260115C06975000
+            elif len(symbol_str) >= 10:
+                try:
+                    # Root is usually 4 chars (SPXW)
+                    date_str = symbol_str[4:10]
+                    expiry_date = datetime.strptime(date_str, "%y%m%d").date()
+                except: pass
+            
+            expiry_match = (str(expiry_date) == str(today))
                 
-                # Перевіряємо дату експірації (0DTE)
-                # Примітка: activation_ns це timestamp експірації
-                from datetime import datetime, timezone
-                expiry_dt = datetime.fromtimestamp(inst.activation_ns / 1_000_000_000, tz=timezone.utc).date()
-                
-                if expiry_dt == today and hasattr(inst, 'strike_price'):
-                    options.append(inst)
+            if symbol_match and kind_match and expiry_match:
+                options.append(inst)
         
         if not options:
             # Логуємо кожні 10 секунд
-            if self.clock.utc_now().second % 10 == 0:
-                self.logger.info(f"No SPXW 0DTE Call options found in cache. Total instruments: {len(instruments)}")
+            if (now_ns / 1_000_000_000) % 10 < 1:
+                self.logger.info(f"No SPXW 0DTE Call options found in cache. Total instruments: {len(instruments)}. Today: {today}")
             return
         
         # Знаходимо найближчий до ATM
