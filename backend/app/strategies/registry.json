@@ -31,8 +31,8 @@
         "class_name": "MesOrbStrategy"
     },
     {
-        "strategy_type": "Orb15LongCallBot",
+        "strategy_type": "Orb15MinLongCallStrategy",
         "module": "app.strategies.implementations.ORB_15_Long_Call_Bot",
-        "class_name": "Orb15LongCallBot"
+        "class_name": "Orb15MinLongCallStrategy"
     }
 ]

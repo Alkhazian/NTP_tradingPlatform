@@ -1,12 +1,18 @@
 {
-    "id": "spx-15-min-orb-long-call-01",
-    "name": "SPX 15 Min ORB Long Call Strategy",
+    "id": "orb_15min_call_1",
+    "name": "ORB 15-Min Long Call",
     "enabled": false,
     "instrument_id": "^SPX.CBOE",
-    "strategy_type": "Orb15LongCallBot",
-    "order_size": 1.0,
+    "strategy_type": "Orb15MinLongCallStrategy",
+    "order_size": 1,
     "parameters": {
-        "interval_seconds": 60,
+        "opening_range_minutes": 15,
+        "target_option_price": 4.0,
+        "stop_loss_percent": 30.0,
+        "take_profit_dollars": 60.0,
+        "max_spread_dollars": 0.2,
+        "cutoff_time_hour": 15,
+        "max_entry_retries": 3,
         "quantity": 1
     }
 }
