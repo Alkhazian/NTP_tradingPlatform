@@ -5,6 +5,7 @@
 - [ ] Add daily volatility regime classifier
 
 ## Strategies
+- [x] Get first SPX option trade working
 - [ ] Streamlit metrics dashboard
 
 ## UI
