@@ -115,7 +115,7 @@ async def broadcast_status():
         except Exception as e:
             logger.error(f"Error in broadcast loop: {e}")
         
-        await asyncio.sleep(10)
+        await asyncio.sleep(20)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
