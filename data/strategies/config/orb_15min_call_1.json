@@ -4,7 +4,7 @@
     "enabled": true,
     "instrument_id": "^SPX.CBOE",
     "strategy_type": "Orb15MinLongCallStrategy",
-    "order_size": 1,
+    "order_size": 1.0,
     "parameters": {
         "opening_range_minutes": 15,
         "target_option_price": 4.0,

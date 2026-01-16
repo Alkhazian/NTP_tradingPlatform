@@ -15,11 +15,11 @@ from datetime import datetime, time, timedelta
 import pytz
 from decimal import Decimal
 
-from nautilus_trader.model.data import QuoteTick, Bar, BarType
+from nautilus_trader.model.data import QuoteTick, Bar, BarType, BarSpecification
 from nautilus_trader.model.enums import OrderSide, OrderType, TimeInForce, OptionKind
 from nautilus_trader.model.identifiers import InstrumentId, Venue
 from nautilus_trader.model.objects import Quantity, Price
-from nautilus_trader.model.instruments import OptionsContract
+from nautilus_trader.model.instruments import Instrument
 
 from app.strategies.base import BaseStrategy
 from app.strategies.config import StrategyConfig
@@ -50,7 +50,7 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         self.stop_loss_percent = float(
             self.strategy_config.parameters.get("stop_loss_percent", 40.0)
         )
-        self.take_profit_dollars_per_contract = float(
+        self.take_profit_dollars = float(
             self.strategy_config.parameters.get("take_profit_dollars", 50.0)
         )
         self.max_spread_dollars = float(
@@ -94,10 +94,11 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         # Entry tracking
         self.breakout_detected = False
         self.entry_attempted_today = False
+        self.entry_retry_count = 0
         
         # Tracking for option selection
         self.options_requested = False
-        self.requested_strike = None
+        self.requested_strikes = []
         self.received_options = []  # Track all received options for selection
 
     # =========================================================================
@@ -111,7 +112,7 @@ class Orb15MinLongCallStrategy(BaseStrategy):
             f"OR={self.opening_range_minutes}m, "
             f"Target option price=${self.target_option_price}, "
             f"SL={self.stop_loss_percent}%, "
-            f"TP=${self.take_profit_dollars_per_contract} per contract, "
+            f"TP=${self.take_profit_dollars} per contract, "
             f"Max spread=${self.max_spread_dollars}, "
             f"Max retries={self.max_entry_retries}"
         )
@@ -125,7 +126,10 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         
         # Subscribe to 1-minute bars for opening range calculation
         try:
-            bar_type = BarType.from_str(f"{self.instrument_id}-1-MINUTE-LAST")
+            bar_type = BarType(
+                self.instrument_id,
+                BarSpecification.from_str("1-MINUTE-LAST")
+            )
             self.subscribe_bars(bar_type)
             self.logger.info(f"Subscribed to 1-minute bars for OR calculation")
         except Exception as e:
@@ -136,7 +140,10 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         # Called by BaseStrategy - subscribe to quotes and bars
         self.subscribe_quote_ticks(self.instrument_id)
         
-        bar_type = BarType.from_str(f"{self.instrument_id}-1-MINUTE-LAST")
+        bar_type = BarType(
+            self.instrument_id,
+            BarSpecification.from_str("1-MINUTE-LAST")
+        )
         self.subscribe_bars(bar_type)
 
     # =========================================================================
@@ -383,7 +390,7 @@ class Orb15MinLongCallStrategy(BaseStrategy):
     def _calculate_target_strike(self) -> Optional[float]:
         """
         Calculate target strike price based on option price target.
-        We want an option priced close to strike_offset_dollars (e.g., $4).
+        We want an option priced close to target_option_price (e.g., $4).
         
         Strategy: Request a range of strikes and select the one closest to target price.
         """
@@ -396,7 +403,7 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         
         self.logger.info(
             f"Will request strike range around ATM ${atm_strike:.0f} "
-            f"to find option priced near ${self.strike_offset_dollars}"
+            f"to find option priced near ${self.target_option_price}"
         )
         
         return atm_strike
@@ -411,17 +418,19 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         today = self.clock.utc_now().date()
         expiry_date_ib = today.strftime("%Y%m%d")
         
-        # Request 5 strikes to find the one priced closest to target
+        # Request 7 strikes to find the one priced closest to target
         strikes_to_request = [
             base_strike,
             base_strike + 5,
             base_strike + 10,
             base_strike + 15,
-            base_strike + 20
+            base_strike + 20,
+            base_strike + 25,
+            base_strike + 30
         ]
         
         self.logger.info(
-            f"Requesting SPX Calls to find option priced near ${self.strike_offset_dollars}: "
+            f"Requesting SPX Calls to find option priced near ${self.target_option_price}: "
             f"Strikes={strikes_to_request}, Expiry={expiry_date_ib}"
         )
         
@@ -445,7 +454,7 @@ class Orb15MinLongCallStrategy(BaseStrategy):
             )
             
             self.options_requested = True
-            self.requested_strike = base_strike  # Store base for reference
+            self.requested_strikes = strikes_to_request
             
             self.logger.info(f"✅ Requested {len(contracts)} SPX Call options")
             
@@ -522,8 +531,8 @@ class Orb15MinLongCallStrategy(BaseStrategy):
             self.logger.warning("No valid option quotes available")
             return
         
-        # Find option with mid price closest to target (strike_offset_dollars)
-        target_price = self.strike_offset_dollars
+        # Find option with mid price closest to target (target_option_price)
+        target_price = self.target_option_price
         best_option_data = min(
             option_prices,
             key=lambda x: abs(x['mid'] - target_price)
@@ -542,7 +551,7 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         # Try to enter with selected option
         self._try_entry_with_option(selected_option)
 
-    def _try_entry_with_option(self, option: OptionsContract):
+    def _try_entry_with_option(self, option: Instrument):
         """
         Attempt to enter position with the received option contract.
         
