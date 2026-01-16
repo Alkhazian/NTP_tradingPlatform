@@ -49,12 +49,13 @@ class BaseStrategy(Strategy):
         integration_manager=None, 
         persistence_manager=None
     ):
-        super().__init__(config=None)
+        super().__init__(config=config)
         
         # Configuration
         self.strategy_config = config
         self.strategy_id = config.id
         self.instrument_id = InstrumentId.from_str(config.instrument_id)
+        self.account_id = getattr(config, 'account_id', None)
         
         # Standard logging
         self.logger = logging.getLogger(f"strategy.{self.strategy_id}")

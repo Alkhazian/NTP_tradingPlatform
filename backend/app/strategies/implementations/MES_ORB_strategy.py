@@ -103,8 +103,8 @@ class MesOrbStrategy(BaseStrategy):
             return
         
         # Create bar types
-        self.bar_type_1min = BarType.from_str(f"{self.instrument_id}-1-MINUTE-LAST-INTERNAL")
-        self.bar_type_30min = BarType.from_str(f"{self.instrument_id}-30-MINUTE-LAST-INTERNAL")
+        self.bar_type_1min = BarType.from_str(f"{self.instrument_id}-1-MINUTE-LAST-EXTERNAL")
+        self.bar_type_30min = BarType.from_str(f"{self.instrument_id}-30-MINUTE-LAST-EXTERNAL")
         
         # Initialize indicators
         self.atr = AverageTrueRange(self.atr_period)
@@ -331,10 +331,11 @@ class MesOrbStrategy(BaseStrategy):
             
             # Only update if new stop is higher (trailing up)
             if self.entry_price and new_stop > (self.entry_price - self.atr.value * self.initial_stop_atr_multiplier):
-                # Ensure new stop is higher than current effective stop? 
-                # Ideally check existing stop order price.
-                self._place_stop_order(new_stop, OrderSide.BUY)
-                updated = True
+                if new_stop < current_price: # Ensure SELL STOP is below market for LONG
+                    self._place_stop_order(new_stop, OrderSide.BUY)
+                    updated = True
+                else:
+                    self.logger.debug(f"Trailing SELL STOP {new_stop:.2f} is in the market (current={current_price:.2f}), skipping")
         
         else:  # SHORT
             # Update lowest price
@@ -346,8 +347,11 @@ class MesOrbStrategy(BaseStrategy):
             
             # Only update if new stop is lower (trailing down)
             if self.entry_price and new_stop < (self.entry_price + self.atr.value * self.initial_stop_atr_multiplier):
-                self._place_stop_order(new_stop, OrderSide.SELL)
-                updated = True
+                if new_stop > current_price: # Ensure BUY STOP is above market for SHORT
+                    self._place_stop_order(new_stop, OrderSide.SELL)
+                    updated = True
+                else:
+                    self.logger.debug(f"Trailing BUY STOP {new_stop:.2f} is in the market (current={current_price:.2f}), skipping")
                 
         if updated:
             self._is_trailing_active = True

@@ -3,6 +3,7 @@ from typing import Optional, Dict, Any, List
 
 class StrategyConfig(BaseModel):
     """Base configuration for all strategies"""
+
     id: str = Field(..., description="Unique identifier for the strategy instance")
     name: str = Field(..., description="Human and machine readable name of the strategy")
     enabled: bool = Field(True, description="Whether the strategy is currently enabled")
