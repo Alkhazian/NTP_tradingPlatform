@@ -20,8 +20,9 @@ class StrategyManager:
     Manages the lifecycle of strategies within the NautilusTrader system.
     """
     
-    def __init__(self, node: TradingNode):
+    def __init__(self, node: TradingNode, integration_manager=None):
         self.node = node
+        self.integration_manager = integration_manager
         self.strategies: Dict[str, BaseStrategy] = {}
         self.persistence = PersistenceManager()
         self._loop = asyncio.get_event_loop()
@@ -59,6 +60,7 @@ class StrategyManager:
         """
         logger.info("Initializing StrategyManager...")
         configs = self.persistence.list_configs()
+        logger.info(f"Found {len(configs)} configurations to restore: {list(configs.keys())}")
         for strategy_id, config_dict in configs.items():
             # Determine config type based on some field or default to StrategyConfig
             try:
@@ -74,11 +76,13 @@ class StrategyManager:
                 
                 config = StrategyConfig(**config_dict)
                 
-                await self.create_strategy(config, auto_start=config.enabled)
+                await self.create_strategy(config, auto_start=False)
+                logger.info(f"Successfully restored strategy: {strategy_id}")
                 
             except Exception as e:
-                logger.error(f"Failed to restore strategy {strategy_id}: {e}")
-
+                logger.error(f"Failed to restore strategy {strategy_id}: {e}", exc_info=True)
+        
+        logger.info("Finished StrategyManager initialization.")
 
 
     async def create_strategy(self, config: StrategyConfig, auto_start: bool = False):
@@ -96,12 +100,15 @@ class StrategyManager:
             logger.info(f"Creating strategy {config.id} ({strategy_type})")
             
             # Instantiate strategy
-            strategy = strategy_class(config=config, integration_manager=self)
+            strategy = strategy_class(
+                config=config, 
+                integration_manager=self.integration_manager,
+                persistence_manager=self.persistence
+            )
             
-            # Register with Nautilus Node
-            # Note: add_strategy usually takes the strategy instance and an execution engine
-            # In live mode, the node handles this.
-            
+            # Register with Nautilus Trader
+            # Strategies must be added before node.run_async() to avoid "Cannot add strategy" error
+            # The enabled check in BaseStrategy.on_start() will prevent disabled strategies from running
             self.node.trader.add_strategy(strategy)
             self.strategies[config.id] = strategy
             
@@ -137,19 +144,35 @@ class StrategyManager:
             else:
                 state_name = str(strategy.state)
         
-        logger.info(f"Checking strategy {strategy_id} state for restart: {state_name}")
-        
         if state_name in ("STOPPED", "FINISHED") or "5" in state_name:
-            logger.info(f"Strategy {strategy_id} is in terminal state ({state_name}). Recreating instance to restart.")
-            config = strategy.strategy_config
-            # Recreate the strategy (this replaces the old one in self.strategies and registers with node)
-            strategy = await self.create_strategy(config, auto_start=False)
+            logger.info(f"Strategy {strategy_id} is in terminal state ({state_name}). Resetting to READY.")
+            try:
+                strategy.reset()
+                state_name = "READY" # Update local state name after reset
+            except Exception as e:
+                logger.error(f"Failed to reset strategy {strategy_id}: {e}")
+                # Fallback to recreation ONLY if reset fails
+                logger.warning(f"Reset failed for {strategy_id}, falling back to recreation.")
+                config = strategy.strategy_config
+                strategy = await self.create_strategy(config, auto_start=False)
+                state_name = "READY"
 
-        if not strategy.is_running:
-            logger.info(f"Starting strategy {strategy_id}")
-            strategy.start() # Nautilus Strategy start method
-            
-            # Update config enabled state (handle immutable msgspec structs)
+        # Check if we should call start()
+        # strategy.is_running usually means state == RUNNING
+        # We also want to avoid starting if it's already STARTING
+        can_start = False
+        if state_name == "READY" or state_name == "INITIALIZED":
+            can_start = True
+        elif state_name == "STARTING" or state_name == "RUNNING":
+            logger.info(f"Strategy {strategy_id} is already {state_name}, skipping start.")
+            can_start = False
+        else:
+            # For other states, it depends, but let's try to be safe
+            can_start = not strategy.is_running and state_name not in ("STOPPING", "STOPPED", "RESETTING")
+
+        if can_start:
+            # Update config enabled state BEFORE starting (handle immutable msgspec structs)
+            # This ensures on_start() sees enabled=True and doesn't immediately stop
             try:
                 strategy.strategy_config.enabled = True
             except (TypeError, AttributeError):
@@ -158,6 +181,18 @@ class StrategyManager:
                     strategy.strategy_config = msgspec.structs.replace(strategy.strategy_config, enabled=True)
                 except Exception as e:
                     logger.warning(f"Failed to update config enabled state (immutable): {e}")
+            
+            if self.node.is_running():
+                # If strategy was stopped (e.g., because it was disabled at startup),
+                # we need to reset it before starting
+                if state_name == "STOPPED":
+                    logger.info(f"Strategy {strategy_id} is STOPPED, resetting before start...")
+                    strategy.reset()
+                
+                logger.info(f"Starting strategy {strategy_id} (State: {state_name})")
+                strategy.start() # Nautilus Strategy start method
+            else:
+                logger.info(f"Node not running. Strategy {strategy_id} will start when node starts.")
 
             self.persistence.save_config(strategy_id, strategy.strategy_config.dict())
 
@@ -185,56 +220,31 @@ class StrategyManager:
 
             self.persistence.save_config(strategy_id, strategy.strategy_config.dict())
 
-    def get_strategy_status(self, strategy_id: str) -> Dict[str, Any]:
+    async def get_strategy_status(self, strategy_id: str) -> Dict[str, Any]:
         """
-        Get status of a specific strategy including performance metrics.
+        Get status of a specific strategy including persistent performance metrics.
         """
         if strategy_id not in self.strategies:
             return {}
             
         strategy = self.strategies[strategy_id]
         
-        # Calculate metrics from portfolio
+        # Default metrics
         metrics = {
             "total_trades": 0,
             "win_rate": 0.0,
-            "realized_pnl": 0.0,
-            "unrealized_pnl": 0.0
+            "total_pnl": 0.0 # Renamed from realized_pnl to match DB
         }
         
-        try:
-            portfolio = self.node.portfolio
-            # In Nautilus, we can filter for positions/trades by strategy_id
-            # However, direct filtering on portfolio might vary by version.
-            # Best effort abstraction:
-            
-            # 1. Unrealized PnL from open positions for this strategy
-            unrealized = 0.0
-            for pos in self.node.cache.positions():
-                if not pos.is_closed and hasattr(pos, "strategy_id") and str(pos.strategy_id) == strategy_id:
-                     if pos.unrealized_pnl:
-                         unrealized += pos.unrealized_pnl.as_double()
-            metrics["unrealized_pnl"] = unrealized
-
-            # 2. Results from closed positions (Realized)
-            realized = 0.0
-            wins = 0
-            total_closed = 0
-            
-            for pos in self.node.cache.positions():
-                if pos.is_closed and hasattr(pos, "strategy_id") and str(pos.strategy_id) == strategy_id:
-                    pnl = pos.realized_pnl.as_double() if pos.realized_pnl else 0.0
-                    realized += pnl
-                    total_closed += 1
-                    if pnl > 0:
-                        wins += 1
-            
-            metrics["realized_pnl"] = realized
-            metrics["total_trades"] = total_closed
-            metrics["win_rate"] = (wins / total_closed * 100) if total_closed > 0 else 0.0
-            
-        except Exception as e:
-            logger.error(f"Error calculating metrics for {strategy_id}: {e}")
+        # Fetch from TradeRecorder if available
+        if self.integration_manager:
+            recorder = getattr(self.integration_manager, 'trade_recorder', None)
+            if recorder:
+                try:
+                    stats = await recorder.get_strategy_stats(strategy_id)
+                    metrics.update(stats)
+                except Exception as e:
+                    logger.error(f"Failed to fetch stats for {strategy_id}: {e}")
 
         # Determine display status
         display_running = strategy.is_running
@@ -246,17 +256,43 @@ class StrategyManager:
         else:
             status_text = "STOPPED"
 
+        try:
+            state = strategy.get_state() if hasattr(strategy, "get_state") else {}
+        except Exception as e:
+            logger.error(f"Failed to get state for strategy {strategy_id}: {e}")
+            state = {"error": str(e)}
+
         return {
             "id": strategy_id,
             "running": display_running,
-            "status": status_text, # Added detailed status
+            "status": status_text, 
             "config": strategy.strategy_config.dict(),
-            "state": strategy.get_state() if hasattr(strategy, "get_state") else {},
+            "state": state,
             "metrics": metrics
         }
 
-    def get_all_strategies_status(self) -> list:
-        return [self.get_strategy_status(sid) for sid in self.strategies]
+    async def get_all_strategies_status(self) -> list:
+        # Fetch all statuses concurrently
+        tasks = [self.get_strategy_status(sid) for sid in self.strategies]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        final_results = []
+        for i, res in enumerate(results):
+            if isinstance(res, Exception):
+                logger.error(f"Failed to get status for strategy {list(self.strategies.keys())[i]}: {res}", exc_info=True)
+                # Return partial info if possible
+                sid = list(self.strategies.keys())[i]
+                final_results.append({
+                    "id": sid,
+                    "status": "ERROR",
+                    "error": str(res),
+                    "running": False,
+                    "config": self.strategies[sid].strategy_config.dict() if sid in self.strategies else {}
+                })
+            else:
+                final_results.append(res)
+                
+        return final_results
 
     async def stop_all_strategies(self):
         """

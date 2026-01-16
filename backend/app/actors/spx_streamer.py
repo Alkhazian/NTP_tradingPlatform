@@ -26,8 +26,8 @@ class SpxStreamer(BaseStrategy):
     DataActor (implemented as Strategy) to stream SPX prices.
     Connects to SPX and broadcasts ticks to Redis for UI.
     """
-    def __init__(self, config: SpxStreamerConfig, integration_manager=None, **kwargs):
-        super().__init__(config, integration_manager)
+    def __init__(self, config: SpxStreamerConfig, integration_manager=None, persistence_manager=None, **kwargs):
+        super().__init__(config, integration_manager, persistence_manager)
         self.instrument_id = InstrumentId.from_str(config.instrument_id)
         self.redis_client = None
         self._last_price = 0.0
@@ -113,6 +113,8 @@ class SpxStreamer(BaseStrategy):
             self.subscribe_quote_ticks(self.instrument_id)
 
     def on_quote_tick(self, tick: QuoteTick):
+        if not self.strategy_config.enabled:
+            return
         # Check if Bid or Ask is available, use Mid or Last logic
         bid = tick.bid_price.as_double()
         ask = tick.ask_price.as_double()
@@ -142,6 +144,15 @@ class SpxStreamer(BaseStrategy):
         if self.redis_client:
             asyncio.create_task(self._log_to_ui("Stopped SPX Streamer"))
             asyncio.create_task(self.redis_client.close())
+            self.redis_client = None
+
+    def on_reset_safe(self):
+        """
+        Cleanup state for fresh start.
+        """
+        self.logger.info(f"SpxStreamer {self.id} resetting internal state.")
+        self._last_price = 0.0
+        self.redis_client = None
 
     def get_state(self):
         return {}

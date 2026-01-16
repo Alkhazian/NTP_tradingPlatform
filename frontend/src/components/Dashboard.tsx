@@ -70,6 +70,7 @@ export default function Dashboard() {
 
     //const [activeNav, setActiveNav] = useState('logs');
     const [activeNav, setActiveNav] = useState('dashboard');
+    const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
     const [, setCurrentTime] = useState(new Date());
 
@@ -78,6 +79,12 @@ export default function Dashboard() {
         const timer = setInterval(() => setCurrentTime(new Date()), 1000);
         return () => clearInterval(timer);
     }, []);
+
+    // Close sidebar when navigating on mobile
+    const handleNavChange = (navInfo: string) => {
+        setActiveNav(navInfo);
+        setIsSidebarOpen(false);
+    };
 
     useEffect(() => {
         let wsUrl: string;
@@ -158,46 +165,47 @@ export default function Dashboard() {
     return (
         <div className="min-h-screen bg-background">
             {/* Sidebar */}
-            <Sidebar>
+            <Sidebar isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)}>
                 <SidebarItem
                     icon="lineChart"
                     label="Dashboard"
                     active={activeNav === 'dashboard'}
-                    onClick={() => setActiveNav('dashboard')}
+                    onClick={() => handleNavChange('dashboard')}
                 />
                 <SidebarItem
                     icon="cpu"
                     label="Strategies"
                     active={activeNav === 'strategies'}
-                    onClick={() => setActiveNav('strategies')}
+                    onClick={() => handleNavChange('strategies')}
                 />
                 <SidebarItem
                     icon="barChart"
                     label="Analytics"
                     active={activeNav === 'analytics'}
-                    onClick={() => setActiveNav('analytics')}
+                    onClick={() => handleNavChange('analytics')}
                 />
                 <SidebarItem
                     icon="activity"
                     label="Positions"
                     active={activeNav === 'positions'}
-                    onClick={() => setActiveNav('positions')}
+                    onClick={() => handleNavChange('positions')}
                 />
                 <SidebarItem
                     icon="server"
                     label="Logs"
                     active={activeNav === 'logs'}
-                    onClick={() => setActiveNav('logs')}
+                    onClick={() => handleNavChange('logs')}
                 />
             </Sidebar>
 
             {/* Main Content */}
-            <main className="ml-64 min-h-screen">
-                <div className="p-8 space-y-8">
+            <main className="transition-all duration-300 md:ml-64 min-h-screen">
+                <div className="p-4 md:p-8 space-y-6 md:space-y-8 max-w-[100vw] overflow-x-hidden">
                     {/* Header */}
                     <Header
                         title={activeNav === 'strategies' ? "Strategy Management" : "Trader Dashboard"}
                         subtitle={activeNav === 'strategies' ? "Configure and control automated trading strategies" : "Real-time portfolio monitoring & trading analytics"}
+                        onMenuClick={() => setIsSidebarOpen(true)}
                     />
 
                     {activeNav === 'strategies' ? (

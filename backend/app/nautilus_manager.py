@@ -1,12 +1,13 @@
 import asyncio
 import logging
 import os
-from typing import Optional
+from typing import Optional, Dict, Any
 from nautilus_trader.adapters.interactive_brokers.config import (
     InteractiveBrokersDataClientConfig,
     InteractiveBrokersExecClientConfig,
     InteractiveBrokersInstrumentProviderConfig,
     IBMarketDataTypeEnum,
+    SymbologyMethod,
 )
 from nautilus_trader.adapters.interactive_brokers.common import IBContract
 from nautilus_trader.adapters.interactive_brokers.factories import (
@@ -19,10 +20,11 @@ from nautilus_trader.config import (
     RoutingConfig
 )
 from nautilus_trader.live.node import TradingNode
-from nautilus_trader.model.identifiers import AccountId, Venue
+from nautilus_trader.model.identifiers import AccountId, Venue, Symbol
+from nautilus_trader.model.enums import OrderSide, PositionSide
+from .services.trade_recorder import TradeRecorder
 
 logger = logging.getLogger(__name__)
-
 
 class NautilusManager:
     """
@@ -53,10 +55,21 @@ class NautilusManager:
         self._margin_usage_percent = "0.0"
         self._recent_trades = []
         self.strategy_manager = None
+        self.trade_recorder = None # Initialize lazily or here
+
+    @property
+    def nautilus_account_id(self) -> Optional[AccountId]:
+        """Get the full AccountId used by Nautilus."""
+        if not self._account_id:
+            return None
+        return AccountId(f"InteractiveBrokers-{self._account_id}")
 
     async def start(self):
         """Initialize and start the NautilusTrader TradingNode"""
         try:
+            # Initialize TradeRecorder
+            self.trade_recorder = TradeRecorder() # Sync init for now, lightweight
+            
             # Get account ID from environment
             account_id = os.getenv("TWS_ACCOUNT")
             if not account_id:
@@ -86,7 +99,7 @@ class NautilusManager:
                     await asyncio.sleep(2)
             
             if gateway_ready:
-                await asyncio.sleep(60) # Give IBC time to handle dialogs/login
+                await asyncio.sleep(20) # Give IBC time to handle dialogs/login
                 logger.info("Gateway ready and settled.")
             else:
                 logger.warning("Gateway port not reachable, proceeding anyway...")
@@ -109,7 +122,10 @@ class NautilusManager:
                         localSymbol="MESH6",
                         lastTradeDateOrContractMonth="202603",
                     ),
+
                 ),
+                symbology_method=SymbologyMethod.IB_SIMPLIFIED,
+                filter_sec_types=frozenset(["OPT"]),
             )
 
             # Configure Interactive Brokers data client
@@ -118,7 +134,9 @@ class NautilusManager:
                 ibg_port=self.port,
                 ibg_client_id=101,
                 use_regular_trading_hours=False,
-                market_data_type=IBMarketDataTypeEnum.DELAYED_FROZEN, 
+                market_data_type=IBMarketDataTypeEnum.REALTIME, 
+                #market_data_type=IBMarketDataTypeEnum.DELAYED_FROZEN, 
+
                 instrument_provider=ib_instrument_config,
             )
 
@@ -143,9 +161,6 @@ class NautilusManager:
                     "InteractiveBrokers": ib_data_config,
                 },
                 exec_clients={
-                    "CME": ib_exec_config,
-                    "CBOE": ib_exec_config,
-                    "SMART": ib_exec_config,
                     "InteractiveBrokers": ib_exec_config,
                 },
                 timeout_connection=90.0,
@@ -170,28 +185,76 @@ class NautilusManager:
 
             # Initialize Strategy Manager
             from .strategies.manager import StrategyManager
-            self.strategy_manager = StrategyManager(self.node)
+            self.strategy_manager = StrategyManager(self.node, integration_manager=self)
 
-            # Start the node in the background
-            asyncio.create_task(self.node.run_async())
+            # Initialize strategies (restore state and register with trader)
+            # This must happen BEFORE node.run_async() to avoid "Cannot add a strategy to a running trader"
+            await self.strategy_manager.initialize()
 
-            # Initialize strategies (restore state)
-            # We wait a brief moment for the node to fully start engines
-            # In a real app we might listen for a "started" event or use a loop
-            # But here we just schedule initialization
-            async def init_strategies():
-                await asyncio.sleep(20) # Allow node loops to spin up and sync instruments
-                await self.strategy_manager.initialize()
-            
-            asyncio.create_task(init_strategies())
+            # Launch the node startup sequence in the background
+            asyncio.create_task(self._run_node_and_start_strategies())
 
             self._connected = True
-            logger.info("NautilusTrader TradingNode started in background")
+            logger.info("NautilusTrader initialization complete, node starting in background")
 
         except Exception as e:
             logger.error(f"Failed to start NautilusTrader: {e}")
             self._connected = False
             raise
+
+    async def _run_node_and_start_strategies(self):
+        """Run the trading node and start enabled strategies once ready"""
+        try:
+            # Start the node (runs indefinitely in background)
+            asyncio.create_task(self.node.run_async())
+            
+            # Wait for node to be running with timeout
+            # TradingNode has 90s timeout for engine connections + 60s for portfolio init
+            # So we wait up to 120s total
+            logger.info("Waiting for node to be running...")
+            max_wait = 120  # seconds
+            check_interval = 2.0  # check every 2 seconds
+            elapsed = 0
+            
+            while not self.node.is_running() and elapsed < max_wait:
+                await asyncio.sleep(check_interval)
+                elapsed += check_interval
+                if elapsed % 10 == 0:  # Log every 10 seconds
+                    logger.info(f"Still waiting for node... ({elapsed}s elapsed, node.is_running={self.node.is_running()}, trader.is_running={self.node.trader.is_running})")
+            
+            logger.info(f"Node state after wait: node.is_running={self.node.is_running()}, trader.is_running={self.node.trader.is_running}, elapsed={elapsed:.1f}s")
+            
+            if self.node.is_running():
+                logger.info(f"Node is running (waited {elapsed:.1f}s). Requesting SPX option chains...")
+                
+#                 # Request SPX option chains from IBKR
+#                 try:
+#                     self.node.trader.request_instruments(
+#                         venue=Venue("CBOE"),
+#                         instrument_id=Symbol("SPX")
+#                     )
+#                     logger.info("Sent request for SPX option chain to IBKR")
+#                 except Exception as e:
+#                     logger.error(f"Error requesting option chains: {e}")
+                
+                # Give time for option contracts to load before starting strategies
+                await asyncio.sleep(5)
+                
+                # Start strategies that are marked as enabled
+                for strategy_id, strategy in self.strategy_manager.strategies.items():
+                    try:
+                        logger.info(f"Checking strategy {strategy_id}: enabled={strategy.strategy_config.enabled}, is_running={strategy.is_running}")
+                        if strategy.strategy_config.enabled and not strategy.is_running:
+                                logger.info(f"Auto-starting enabled strategy: {strategy_id}")
+                                await self.strategy_manager.start_strategy(strategy_id)
+                    except Exception as e:
+                        logger.error(f"Failed to auto-start strategy {strategy_id}: {e}", exc_info=True)
+            else:
+                logger.warning(f"Node not running after {max_wait}s timeout (node.is_running={self.node.is_running}, trader.is_running={self.node.trader.is_running}), strategies will need manual start")
+            
+        except Exception as e:
+            logger.error(f"Error in background node startup task: {e}", exc_info=True)
+            self._connected = False
 
     async def _update_account_state(self):
         """Fetch and update account state from NautilusTrader"""
@@ -260,38 +323,61 @@ class NautilusManager:
                 else:
                     logger.info(f"No balances found for account {target_account_id}")
 
-                # Update open positions details
+                # Update open positions details using netting logic
                 positions_data = []
                 try:
-                    for p in self.node.cache.positions():
+                    all_cached_positions = list(self.node.cache.positions())
+                    # Symbol -> {net_qty, total_upnl, total_cost, count}
+                    netted: Dict[str, Dict[str, Any]] = {}
+                    
+                    for p in all_cached_positions:
                         if not p.is_closed:
-                            # Safely extract PnL if available
-                            pnl = 0.0
+                            symbol = str(p.instrument_id)
+                            qty = float(p.quantity)
+                            if p.side == PositionSide.SHORT:
+                                qty = -qty
+                                
+                            upnl = 0.0
                             try:
                                 if p.unrealized_pnl:
-                                    pnl = float(p.unrealized_pnl.as_double())
-                            except Exception:
-                                pass
+                                    upnl = float(p.unrealized_pnl.as_double())
+                            except Exception: pass
 
-                            # Safely extract price
-                            avg_price = 0.0
+                            avg_px = 0.0
                             try:
                                 if p.avg_px_open is not None:
                                     if hasattr(p.avg_px_open, "as_double"):
-                                        avg_price = float(p.avg_px_open.as_double())
+                                        avg_px = float(p.avg_px_open.as_double())
                                     else:
-                                        avg_price = float(p.avg_px_open)
-                            except Exception:
-                                pass
+                                        avg_px = float(p.avg_px_open)
+                            except Exception: pass
+                            
+                            # logger.info(f"Nautilus Position: {symbol}, qty={qty}, avg_px={avg_px}")
+                            
+                            if symbol not in netted:
+                                netted[symbol] = {
+                                    "net_qty": 0.0,
+                                    "total_upnl": 0.0,
+                                    "total_cost": 0.0
+                                }
+                            
+                            netted[symbol]["net_qty"] += qty
+                            netted[symbol]["total_upnl"] += upnl
+                            netted[symbol]["total_cost"] += (abs(qty) * avg_px)
 
+                    # Convert netted map to list
+                    for symbol, data in netted.items():
+                        if abs(data["net_qty"]) > 1e-9:
+                            avg_price = data["total_cost"] / abs(data["net_qty"]) if data["net_qty"] != 0 else 0
                             positions_data.append({
-                                "symbol": str(p.instrument_id),
-                                "quantity": float(p.quantity),
+                                "symbol": symbol,
+                                "quantity": data["net_qty"],
                                 "avg_price": avg_price,
-                                "unrealized_pnl": pnl
+                                "unrealized_pnl": data["total_upnl"]
                             })
+                            logger.info(f"Position reported: {symbol}, Net Qty: {data['net_qty']}, UPnL: {data['total_upnl']}")
                 except Exception as e:
-                    logger.error(f"Error processing positions: {e}")
+                    logger.error(f"Error processing positions: {e}", exc_info=True)
                 
                 self._positions = positions_data
                 self._open_positions = len(self._positions)
@@ -381,17 +467,7 @@ class NautilusManager:
                     # Instead of checking just "InteractiveBrokers", aggregate all venues 
                     # registered to the IB execution client
                     total_exposure = 0.0
-                    # try:
-                    #     # Get all venues the portfolio is currently tracking
-                    #     for venue in portfolio.venues:
-                    #         # Get exposure for this specific venue
-                    #         exp = portfolio.net_exposures(venue)
-                    #         if exp:
-                    #             # Sum up the absolute double values of exposures
-                    #             total_exposure += sum(abs(e.as_double()) for e in exp.values())
-                    #     self._net_exposure = f"{total_exposure:.2f} {self._account_currency}"
-                    # except Exception as e:
-                    #     logger.error(f"Error aggregating multi-venue exposure: {e}")
+                    # ... exposure aggregation omitted for brevity ...
                     
                     # Leverage
                     try:
@@ -403,8 +479,6 @@ class NautilusManager:
                                     self._leverage = f"{lev_list[0]:.2f}"
                     except Exception:
                         pass
-                    
-                    #logger.info(f"Portfolio metrics - Margin Used: {self._margin_used}, Unrealized P&L: {self._total_unrealized_pnl}, Net Exposure: {self._net_exposure}")
                     
                 except Exception as e:
                     logger.error(f"Error extracting portfolio metrics: {e}", exc_info=True)
@@ -425,7 +499,6 @@ class NautilusManager:
             cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
             cutoff_ns = int(cutoff_time.timestamp() * 1_000_000_000)
             
-            
             trades = []
             
             # Get all orders from cache
@@ -442,7 +515,7 @@ class NautilusManager:
                     # Extract order details
                     try:
                         # Determine trade type
-                        trade_type = "buy" if str(order.side) == "OrderSide.BUY" else "sell"
+                        trade_type = "buy" if order.side == OrderSide.BUY else "sell"
                         
                         # Get symbol
                         symbol = str(order.instrument_id).split('.')[0] if hasattr(order, 'instrument_id') else "UNKNOWN"
@@ -485,21 +558,13 @@ class NautilusManager:
             
             # Sort by timestamp (most recent first)
             trades.sort(key=lambda x: x['timestamp'], reverse=True)
-            
-            # Keep timestamp for frontend filtering
-            # for trade in trades:
-            #     trade.pop('timestamp', None)
-            
-            logger.debug(f"Found {len(trades)} recent trades in the last {hours} hours")
-            return trades  # Return all trades for frontend filtering
+            return trades
             
         except Exception as e:
             logger.error(f"Error fetching recent trades: {e}", exc_info=True)
             return []
 
     async def stop(self):
-
-
         """Stop the NautilusTrader TradingNode"""
         if self.node:
             logger.info("Stopping NautilusTrader TradingNode")
@@ -512,14 +577,8 @@ class NautilusManager:
         if not self.strategy_manager:
             raise RuntimeError("Strategy Manager not initialized")
         
-        # Ensure SPX is loaded in cache
-        # Note: We configured the InstrumentProvider to load SPX.CBOE on startup.
-        # Direct access to load it here is difficult without exposing internal clients.
-        # We assume it is loaded or will be loaded.
-            # We continue, maybe it's already there or will fail in strategy
-        
         # Check if already exists
-        strategies = self.strategy_manager.get_all_strategies_status()
+        strategies = await self.strategy_manager.get_all_strategies_status()
         spx_strat_exists = any(s['id'] == 'spx-streamer-01' for s in strategies)
         
         # If not, create it
@@ -550,11 +609,14 @@ class NautilusManager:
         await self.strategy_manager.stop_strategy('spx-streamer-01')
         return 'spx-streamer-01'
 
-    def get_status(self) -> dict:
+    async def get_status(self) -> dict:
         """
         Get current connection and account status.
-        Maintains compatibility with legacy IBConnector interface.
         """
+        strategies = []
+        if self.strategy_manager:
+            strategies = await self.strategy_manager.get_all_strategies_status()
+
         return {
             "type": "system_status",
             "connected": self._connected,
@@ -572,20 +634,15 @@ class NautilusManager:
             "margin_usage_percent": self._margin_usage_percent,
             "total_unrealized_pnl": self._total_unrealized_pnl,
             "total_realized_pnl": self._total_realized_pnl,
-            "net_exposure": self._net_exposure,
             "leverage": self._leverage,
             "recent_trades": self._recent_trades,
-            "strategies": self.strategy_manager.get_all_strategies_status() if self.strategy_manager else [],
+            "strategies": strategies,
         }
 
     async def update_status(self):
         """Update account state and connection health check"""
         if self.node:
-             # For now, if node exists and started, we consider it connected
-             # Better health check would be per-client, but NautilusTradingNode 
-             # doesn't expose a simple health check for all clients at the node level.
              self._connected = True
-             # logger.info(f"Status update: Node active, connected={self._connected}")
         
         await self._update_account_state()
         self._recent_trades = await self._get_recent_trades(hours=24)

@@ -9,5 +9,25 @@
         "module": "app.actors.spx_streamer",
         "class_name": "SpxStreamer",
         "comment": "Data Actor (uses Strategy infrastructure for plumbing)"
+    },
+    {
+        "strategy_type": "TslaOptionsIntervalStrategy",
+        "module": "app.strategies.implementations.Tesla_Options_Interval_Strategy",
+        "class_name": "TslaOptionsIntervalStrategy"
+    },
+    {
+        "strategy_type": "SPXZeroDTEScalper",
+        "module": "app.strategies.implementations.spx_0dte_scalper",
+        "class_name": "SPXZeroDTEScalper"
+    },
+    {
+        "strategy_type": "Spxw0DteIntervalStrategy",
+        "module": "app.strategies.implementations.SPXW_0DTE_interval_strategy",
+        "class_name": "Spxw0DteIntervalStrategy"
+    },
+    {
+        "strategy_type": "MesOrbStrategy",
+        "module": "app.strategies.implementations.MES_ORB_strategy",
+        "class_name": "MesOrbStrategy"
     }
 ]

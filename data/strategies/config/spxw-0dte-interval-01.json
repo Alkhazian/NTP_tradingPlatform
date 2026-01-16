@@ -1,0 +1,12 @@
+{
+    "id": "spxw-0dte-interval-01",
+    "name": "SPXW 0DTE Interval Strategy",
+    "enabled": false,
+    "instrument_id": "^SPX.CBOE",
+    "strategy_type": "Spxw0DteIntervalStrategy",
+    "order_size": 1.0,
+    "parameters": {
+        "interval_seconds": 60,
+        "quantity": 1
+    }
+}

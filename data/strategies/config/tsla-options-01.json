@@ -1,0 +1,15 @@
+{
+    "id": "tsla-options-01",
+    "name": "TSLA Options Interval Strategy",
+    "enabled": false,
+    "instrument_id": "TSLA.NASDAQ",
+    "strategy_type": "TslaOptionsIntervalStrategy",
+    "order_size": 1.0,
+    "parameters": {
+        "target_premium": 2.0,
+        "call_profit_trigger": 4.0,
+        "put_profit_trigger": 3.0,
+        "timeout_seconds": 300,
+        "min_days_to_expiry": 1
+    }
+}

@@ -1,4 +1,3 @@
-
 import { useState, useEffect } from 'react';
 import { Card, CardContent } from './ui/card';
 import { Badge } from './ui/badge';
@@ -21,7 +20,9 @@ interface StrategyStatus {
     metrics?: {
         total_trades: number;
         win_rate: number;
-        realized_pnl: number;
+        total_pnl: number;
+        total_commission: number;
+        net_pnl: number;
         unrealized_pnl: number;
     };
 }
@@ -31,6 +32,10 @@ export default function Strategies() {
     const [editingId, setEditingId] = useState<string | null>(null);
     const [jsonEdit, setJsonEdit] = useState("");
     const [editError, setEditError] = useState<string | null>(null);
+
+    // Logs State
+    const [allLogs, setAllLogs] = useState<string[]>([]);
+    const [expandedLogs, setExpandedLogs] = useState<Set<string>>(new Set());
 
     const rawApiUrl = import.meta.env.VITE_API_URL || '';
     const apiUrl = rawApiUrl.endsWith('/') ? rawApiUrl.slice(0, -1) : rawApiUrl;
@@ -51,6 +56,40 @@ export default function Strategies() {
         fetchStrategies();
         const interval = setInterval(fetchStrategies, 5000);
         return () => clearInterval(interval);
+    }, []);
+
+    // WebSocket for Logs
+    useEffect(() => {
+        let wsUrl: string;
+        const apiEnv = import.meta.env.VITE_API_URL;
+
+        if (apiEnv && apiEnv.startsWith('http')) {
+            wsUrl = apiEnv.replace('http', 'ws');
+            if (!wsUrl.endsWith('/')) wsUrl += '/';
+            wsUrl += 'ws/logs';
+        } else {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            let host = window.location.host;
+            if (host.includes(':5173')) {
+                host = window.location.hostname;
+            }
+            wsUrl = `${protocol}//${host}/ws/logs`;
+        }
+
+        const ws = new WebSocket(wsUrl);
+
+        ws.onmessage = (event) => {
+            setAllLogs(prev => {
+                const newLogs = [...prev, event.data];
+                // Keep only last 1000 lines
+                if (newLogs.length > 1000) {
+                    return newLogs.slice(-1000);
+                }
+                return newLogs;
+            });
+        };
+
+        return () => ws.close();
     }, []);
 
     const handleStart = async (id: string) => {
@@ -84,7 +123,6 @@ export default function Strategies() {
 
     const saveConfig = async (id: string) => {
         try {
-            // Validate JSON
             let parsed;
             try {
                 parsed = JSON.parse(jsonEdit);
@@ -112,16 +150,17 @@ export default function Strategies() {
         }
     };
 
+    const toggleLogs = (id: string) => {
+        setExpandedLogs(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    };
+
     return (
         <div className="space-y-6">
-            <div className="flex items-center justify-between">
-                <div>
-                    <h2 className="text-2xl font-bold tracking-tight">Strategy Management</h2>
-                    <p className="text-muted-foreground">Configure and control automated trading strategies</p>
-                </div>
-            </div>
-
-            {/* Strategy List */}
             <div className="grid gap-6">
                 {strategies.length === 0 ? (
                     <Card variant="glass">
@@ -133,7 +172,7 @@ export default function Strategies() {
                     </Card>
                 ) : (
                     strategies
-                        .filter(s => s.id !== 'spx-streamer-01') // Hide system actors
+                        .filter(s => s.id !== 'spx-streamer-01')
                         .map((strategy) => (
                             <Card key={strategy.id} variant="glass" className="overflow-hidden border-t-2 border-t-cyan-500/20">
                                 {editingId === strategy.id ? (
@@ -157,32 +196,44 @@ export default function Strategies() {
                                     </div>
                                 ) : (
                                     <div className="p-6 flex flex-col gap-6">
-                                        <div className="flex flex-col md:flex-row items-center justify-between gap-6">
-                                            <div className="flex items-center gap-4">
-                                                <div className={`p-4 rounded-xl ${strategy.running ? 'bg-emerald-500/10' : 'bg-white/5'}`}>
+                                        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
+                                            <div className="flex items-start md:items-center gap-5">
+                                                {/* Icon Container */}
+                                                <div className={`shrink-0 w-16 h-16 flex items-center justify-center rounded-2xl border ${strategy.running ? 'bg-emerald-500/10 border-emerald-500/20 shadow-[0_0_15px_-3px_rgba(16,185,129,0.2)]' : 'bg-white/5 border-white/10'}`}>
                                                     <Icons.cpu className={`w-8 h-8 ${strategy.running ? 'text-emerald-400' : 'text-muted-foreground'}`} />
                                                 </div>
-                                                <div>
-                                                    <div className="flex items-center gap-2">
-                                                        <h3 className="text-lg font-bold text-white">{strategy.config.name || strategy.id}</h3>
-                                                        <Badge variant={strategy.running ? 'success' : 'secondary'}>
-                                                            {strategy.running ? 'RUNNING' : 'STOPPED'}
+
+                                                <div className="space-y-2">
+                                                    <div className="flex flex-wrap items-center gap-3">
+                                                        <h3 className="text-xl font-bold tracking-tight text-white">{strategy.config.name || strategy.id}</h3>
+                                                        <Badge variant={strategy.running ? 'success' : 'secondary'} className="h-6">
+                                                            {strategy.running ? 'ACTIVE' : 'STOPPED'}
                                                         </Badge>
                                                     </div>
-                                                    <div className="mt-1 flex items-center gap-4 text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                                                        <span className="text-cyan-400/80">{strategy.config.strategy_type}</span>
-                                                        <span>•</span>
-                                                        <span>{strategy.config.instrument_id}</span>
-                                                        <span>•</span>
-                                                        <span className="text-emerald-400/80">Size: {strategy.config.order_size}</span>
+
+                                                    {/* Parameters as Tags */}
+                                                    <div className="flex flex-wrap items-center gap-2">
+                                                        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-xs font-medium text-cyan-200/80">
+                                                            <Icons.activity className="w-3.5 h-3.5 opacity-70" />
+                                                            {strategy.config.strategy_type}
+                                                        </div>
+                                                        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-xs font-medium text-muted-foreground">
+                                                            <span className="opacity-70">ID:</span>
+                                                            {strategy.config.instrument_id}
+                                                        </div>
+                                                        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-xs font-medium text-emerald-200/80">
+                                                            <span className="opacity-70">Size:</span>
+                                                            {strategy.config.order_size}
+                                                        </div>
                                                     </div>
                                                 </div>
                                             </div>
 
-                                            <div className="flex items-center gap-3">
+                                            {/* Actions */}
+                                            <div className="flex items-center gap-3 w-full lg:w-auto mt-2 lg:mt-0">
                                                 <button
                                                     onClick={() => startEditing(strategy)}
-                                                    className="p-2 text-muted-foreground hover:text-white transition-colors bg-white/5 rounded-lg"
+                                                    className="p-3 text-muted-foreground hover:text-white transition-colors bg-white/5 hover:bg-white/10 rounded-xl border border-white/5"
                                                     title="Edit Configuration"
                                                 >
                                                     <Icons.settings className="w-5 h-5" />
@@ -191,25 +242,25 @@ export default function Strategies() {
                                                 {strategy.running ? (
                                                     <button
                                                         onClick={() => handleStop(strategy.id)}
-                                                        className="flex items-center gap-2 px-6 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 font-bold rounded-lg border border-red-500/30 transition-all active:scale-95"
+                                                        className="flex-1 lg:flex-none flex items-center justify-center gap-2 px-6 py-3 bg-red-500/10 hover:bg-red-500/20 text-red-400 font-bold rounded-xl border border-red-500/30 transition-all active:scale-95 shadow-[0_0_20px_-5px_rgba(239,68,68,0.15)]"
                                                     >
-                                                        <Icons.square className="w-4 h-4 fill-current" />
-                                                        STOP
+                                                        <Icons.square className="w-5 h-5 fill-current" />
+                                                        STOP STRATEGY
                                                     </button>
                                                 ) : (
                                                     <button
                                                         onClick={() => handleStart(strategy.id)}
-                                                        className="flex items-center gap-2 px-6 py-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 font-bold rounded-lg border border-emerald-500/30 transition-all active:scale-95"
+                                                        className="flex-1 lg:flex-none flex items-center justify-center gap-2 px-6 py-3 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 font-bold rounded-xl border border-emerald-500/30 transition-all active:scale-95 shadow-[0_0_20px_-5px_rgba(16,185,129,0.15)]"
                                                     >
-                                                        <Icons.play className="w-4 h-4 fill-current" />
-                                                        START
+                                                        <Icons.play className="w-5 h-5 fill-current" />
+                                                        START TRADING
                                                     </button>
                                                 )}
                                             </div>
                                         </div>
 
                                         {/* Metrics Grid */}
-                                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 p-4 bg-white/5 rounded-xl border border-white/5">
+                                        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 p-4 bg-white/5 rounded-xl border border-white/5">
                                             <div className="space-y-1">
                                                 <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest">Total Trades</p>
                                                 <p className="text-xl font-bold">{strategy.metrics?.total_trades || 0}</p>
@@ -221,17 +272,65 @@ export default function Strategies() {
                                                 </p>
                                             </div>
                                             <div className="space-y-1">
-                                                <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest">Realized PnL</p>
-                                                <p className={`text-xl font-bold ${(strategy.metrics?.realized_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                                    ${strategy.metrics?.realized_pnl?.toFixed(2) || '0.00'}
+                                                <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest">Gross PnL</p>
+                                                <p className={`text-xl font-bold ${(strategy.metrics?.total_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                                    {(strategy.metrics?.total_pnl || 0) < 0 ? '-' : ''}${Math.abs(strategy.metrics?.total_pnl || 0).toFixed(2)}
                                                 </p>
                                             </div>
                                             <div className="space-y-1">
-                                                <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest">Unrealized PnL</p>
-                                                <p className={`text-xl font-bold ${(strategy.metrics?.unrealized_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                                    ${strategy.metrics?.unrealized_pnl?.toFixed(2) || '0.00'}
+                                                <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest">Comms</p>
+                                                <p className="text-xl font-bold text-amber-400">
+                                                    ${(strategy.metrics?.total_commission || 0).toFixed(2)}
                                                 </p>
                                             </div>
+                                            <div className="space-y-1">
+                                                <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest">Net PnL</p>
+                                                <p className={`text-xl font-bold ${(strategy.metrics?.net_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                                    {(strategy.metrics?.net_pnl || 0) < 0 ? '-' : ''}${Math.abs(strategy.metrics?.net_pnl || 0).toFixed(2)}
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        {/* Logs Section */}
+                                        <div className="pt-4 border-t border-white/5">
+                                            <button
+                                                onClick={() => toggleLogs(strategy.id)}
+                                                className="flex items-center gap-2 text-xs font-bold text-muted-foreground hover:text-white uppercase tracking-wider transition-colors w-full group"
+                                            >
+                                                <div className="p-1.5 rounded bg-white/5 group-hover:bg-cyan-500/20 group-hover:text-cyan-400 transition-colors">
+                                                    <Icons.activity className="w-3 h-3" />
+                                                </div>
+                                                <span>Live Logs</span>
+                                                <div className="ml-auto">
+                                                    {expandedLogs.has(strategy.id) ?
+                                                        <Icons.chevronUp className="w-4 h-4 text-muted-foreground group-hover:text-white" /> :
+                                                        <Icons.chevronDown className="w-4 h-4 text-muted-foreground group-hover:text-white" />
+                                                    }
+                                                </div>
+                                            </button>
+
+                                            {expandedLogs.has(strategy.id) && (
+                                                <div className="mt-3">
+                                                    <div className="p-3 bg-black/40 rounded-lg border border-white/10 h-64 overflow-auto font-mono text-[10px] shadow-inner">
+                                                        {(() => {
+                                                            const stratLogs = allLogs.filter(l =>
+                                                                l.includes(strategy.id) ||
+                                                                l.includes(strategy.config.strategy_type)
+                                                            ).slice().reverse();
+
+                                                            if (stratLogs.length === 0) {
+                                                                return <div className="text-white/30 italic text-center py-8">Waiting for logs...</div>;
+                                                            }
+
+                                                            return stratLogs.map((log, i) => (
+                                                                <div key={i} className="mb-1 pb-1 border-b border-white/5 last:border-0 text-white/70 break-all whitespace-pre-wrap">
+                                                                    {log}
+                                                                </div>
+                                                            ));
+                                                        })()}
+                                                    </div>
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
                                 )}

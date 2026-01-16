@@ -1,0 +1,18 @@
+{
+    "id": "mes-orb-01",
+    "name": "MES Opening Range Breakout",
+    "enabled": false,
+    "instrument_id": "MESH6.CME",
+    "strategy_type": "MesOrbStrategy",
+    "order_size": 1.0,
+    "parameters": {
+        "or_period_minutes": 15,
+        "atr_period": 14,
+        "or_atr_multiplier": 0.5,
+        "initial_stop_atr_multiplier": 1.25,
+        "trailing_stop_atr_multiplier": 3.0,
+        "ema_period": 200,
+        "adx_period": 14,
+        "adx_threshold": 20
+    }
+}

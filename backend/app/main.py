@@ -1,4 +1,5 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import logging
@@ -23,23 +24,36 @@ file_handler = RotatingFileHandler(
 )
 file_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
 
+# Configure the root logger to use both stdout and our file handler
 logging.basicConfig(
     level=logging.INFO,
     handlers=[
-        logging.StreamHandler(), # Keep stdout
+        logging.StreamHandler(),
         file_handler
-    ]
+    ],
+    # This force=True ensures basicConfig reconfigures if already set up
+    force=True 
 )
-logger = logging.getLogger(__name__)
 
-# Ensure library loggers also use our file handler
+# For library loggers, we clear their existing handlers and ensure they propagate
+# to the root logger where our file_handler is waiting.
 for logger_name in ["uvicorn", "uvicorn.error", "nautilus_trader"]:
     l = logging.getLogger(logger_name)
-    l.addHandler(file_handler)
+    l.handlers = [] 
     l.propagate = True
+
+logger = logging.getLogger(__name__)
 logger.info("--- Log Stream Initialized ---")
 
 app = FastAPI()
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Global exception caught: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"message": "Internal server error"},
+    )
 
 app.add_middleware(
     CORSMiddleware,
@@ -82,7 +96,7 @@ async def broadcast_status():
             # Update account state from NautilusTrader
             await nautilus_manager.update_status()
             
-            status = nautilus_manager.get_status()
+            status = await nautilus_manager.get_status()
             
             redis_status = False
             try:
@@ -109,7 +123,7 @@ async def websocket_endpoint(websocket: WebSocket):
     logger.info("WebSocket connection accepted")
     
     # Send initial status immediately
-    status = nautilus_manager.get_status()
+    status = await nautilus_manager.get_status()
     try:
         if redis_manager.redis:
             status["redis_connected"] = await redis_manager.redis.ping()
@@ -130,7 +144,7 @@ async def websocket_endpoint(websocket: WebSocket):
         else:
             # Fallback if Redis fails, just loop status
             while True:
-                status = nautilus_manager.get_status()
+                status = await nautilus_manager.get_status()
                 status["redis_connected"] = False
                 await websocket.send_text(json.dumps(status))
                 await asyncio.sleep(1)
@@ -180,13 +194,57 @@ async def websocket_logs(websocket: WebSocket):
 async def health():
     return {"status": "ok"}
 
+@app.get("/strategies/{strategy_id}/trades")
+async def get_strategy_trades(strategy_id: str, limit: int = 100):
+    if not nautilus_manager.strategy_manager:
+        return []
+    
+    # Access TradeRecorder through NautilusManager
+    recorder = getattr(nautilus_manager, 'trade_recorder', None)
+    if not recorder:
+        return []
+        
+    trades = await recorder.get_trades_for_strategy(strategy_id, limit)
+    
+    # Convert tuples to dicts for JSON response
+    # Schema: id, strategy_id, instrument_id, entry_time, entry_price, exit_time, exit_price, exit_reason, trade_type, quantity, direction, pnl, raw_data
+    result = []
+    for t in trades:
+        result.append({
+            "id": t[0],
+            "strategy_id": t[1],
+            "instrument_id": t[2],
+            "entry_time": t[3],
+            "entry_price": t[4],
+            "exit_time": t[5],
+            "exit_price": t[6],
+            "exit_reason": t[7],
+            "trade_type": t[8],
+            "quantity": t[9],
+            "direction": t[10],
+            "pnl": t[11],
+            "raw_data": t[12]
+        })
+    return result
+
+@app.get("/strategies/{strategy_id}/stats")
+async def get_strategy_stats(strategy_id: str):
+    if not nautilus_manager.strategy_manager:
+        return {}
+        
+    recorder = getattr(nautilus_manager, 'trade_recorder', None)
+    if not recorder:
+        return {}
+        
+    return await recorder.get_strategy_stats(strategy_id)
+
 # Strategy Management Endpoints
 
 @app.get("/strategies")
 async def list_strategies():
     if not nautilus_manager.strategy_manager:
         return []
-    return nautilus_manager.strategy_manager.get_all_strategies_status()
+    return await nautilus_manager.strategy_manager.get_all_strategies_status()
 
 @app.post("/strategies")
 async def create_strategy(config: dict):

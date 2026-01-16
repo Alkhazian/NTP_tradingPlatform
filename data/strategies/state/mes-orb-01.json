@@ -1,0 +1,15 @@
+{
+    "or_high": 7011.25,
+    "or_low": 6998.0,
+    "or_complete": true,
+    "traded_today": true,
+    "current_trade_date": "2026-01-15",
+    "entry_price": 6995.75,
+    "is_overnight_hold": false,
+    "active_trade_id": 18,
+    "_last_entry_price": 6995.5,
+    "_last_entry_qty": 1.0,
+    "_pending_entry_orders": [],
+    "_pending_exit_orders": [],
+    "_last_updated": "2026-01-15T18:06:47.051079"
+}

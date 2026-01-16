@@ -1,0 +1,10 @@
+{
+    "entry_done": false,
+    "generated_instruments": [],
+    "active_trade_id": null,
+    "_last_entry_price": null,
+    "_last_entry_qty": null,
+    "_pending_entry_orders": [],
+    "_pending_exit_orders": [],
+    "_last_updated": "2026-01-14T23:55:20.762303"
+}
