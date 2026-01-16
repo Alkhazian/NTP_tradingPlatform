@@ -35,6 +35,7 @@
 ## UI
 - [ ] [Analytics] Add strategy analytics section: strategy selector, equity curve, statistics. Read data from trades.db
 - [ ] [Strategies] Improve logs for strategies on UI. As of now UI reads ony the first 500 lines from app.log. Hence, all logs from the strategy are not displayed
+- [ ] [Strategies] Add unrealized P&L to strategy stats/status
 
 ## Backtesting
 - [ ] Create backtesting engine
