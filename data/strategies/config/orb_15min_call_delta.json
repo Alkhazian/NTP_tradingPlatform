@@ -1,13 +1,13 @@
 {
-    "id": "orb_15min_call_1",
-    "name": "ORB 15-Min Long Call",
+    "id": "orb_15min_call_delta",
+    "name": "ORB 15-Min Long Call Delta",
     "enabled": true,
     "instrument_id": "^SPX.CBOE",
-    "strategy_type": "Orb15MinLongCallStrategy",
+    "strategy_type": "Orb15MinLongCallDeltaStrategy",
     "order_size": 1.0,
     "parameters": {
         "opening_range_minutes": 15,
-        "target_option_price": 4.0,
+        "target_delta": 0.25,
         "stop_loss_percent": 30.0,
         "take_profit_dollars": 60.0,
         "max_spread_dollars": 0.2,

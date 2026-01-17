@@ -34,5 +34,10 @@
         "strategy_type": "Orb15MinLongCallStrategy",
         "module": "app.strategies.implementations.ORB_15_Long_Call_Bot",
         "class_name": "Orb15MinLongCallStrategy"
+    },
+    {
+        "strategy_type": "Orb15MinLongCallDeltaStrategy",
+        "module": "app.strategies.implementations.ORB_15_Long_Call_delta",
+        "class_name": "Orb15MinLongCallDeltaStrategy"
     }
 ]

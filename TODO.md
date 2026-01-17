@@ -2,15 +2,16 @@
 
 ## New strategies
 - [ ] [Options] SPX ORB 15 min 5 size with vertical credit spreads (call credit and put credit)
-- [ ] [Options] SPX ORB 15 min long call
-- [ ] [Options] SPX ORB 15 min long put
+- [x] [Options] SPX ORB 15 min long call - use delta
+- [x] [Options] SPX ORB 15 min long call - search for $ value of the call option
+- [ ] [Options] SPX ORB 15 min long put - search for $ value of the put option
 - [ ] [Options] SPX ORB 60 min 10 size with vertical credit spreads §(call credit and put credit)
 - [ ] [Futures] MNQ ORB 5 min + Fair Value Gap (FVG)
 
 
 ## Strategies enhancements
 - [x] Get first SPX option trade working
-- [ ] [Options] - check bid/ask spread before posting an order, add a condition for the spread side. It is relevant for option spread instruments
+- [ ] [Options] - check bid/ask spread before posting an order, add a condition for the spread size. It is relevant for option spread instruments
 - [ ] Add Risk Management
     - [ ] Create RiskManager class
     - [ ] Integrate pre-order validation
@@ -19,7 +20,6 @@
     - [ ] Add max orders per day limit
 - [ ] Refactor BaseStrategy
     - [ ] Remove dual config pattern (use only self.strategy_config)
-    - [ ] Remove custom logger (use inherited Nautilus logger)
     - [ ] Add lifecycle state machine
     - [ ] Implement on_instrument(), on_order_book() base handlers
 - [ ] Strategy Manager Improvements
@@ -48,6 +48,7 @@
 ## System
 - [ ] Fix UI status of IB connection. As of now it in not taken into account 
 - [ ] [Logging] Log more nautilus trader events in app.log. For example, issues with IBKR connection are not logged to the app.log
+- [ ] [Logging] ? Remove custom logger (use inherited Nautilus logger)
 - [ ] Enhanced Configuration
     - [ ] Create strategy-specific config classes
     - [ ] Add Pydantic validators
