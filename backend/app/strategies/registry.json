@@ -32,12 +32,17 @@
     },
     {
         "strategy_type": "Orb15MinLongCallStrategy",
-        "module": "app.strategies.implementations.ORB_15_Long_Call_Bot",
+        "module": "app.strategies.implementations.ORB_15_Long_Call",
         "class_name": "Orb15MinLongCallStrategy"
     },
     {
         "strategy_type": "Orb15MinLongCallDeltaStrategy",
         "module": "app.strategies.implementations.ORB_15_Long_Call_delta",
         "class_name": "Orb15MinLongCallDeltaStrategy"
+    },
+    {
+        "strategy_type": "Orb15MinLongPutStrategy",
+        "module": "app.strategies.implementations.ORB_15_Long_Put",
+        "class_name": "Orb15MinLongPutStrategy"
     }
 ]

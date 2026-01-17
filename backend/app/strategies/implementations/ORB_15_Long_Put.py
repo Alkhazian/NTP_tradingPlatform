@@ -1,13 +1,13 @@
 """
-ORB 15-Minute Long Call Strategy
+ORB 15-Minute Long Put Strategy
 
 Opening Range Breakout strategy that:
 1. Calculates 15-minute opening range (9:30-9:45 AM ET)
-2. Enters Long Call when SPX breaks above opening range high
-3. Entry conditions: Market open, before 3 PM ET, SPX > OR High
-4. Position: SPX Call, 0DTE, strike ~$4 OTM from current price
+2. Enters Long Put when SPX breaks below opening range low
+3. Entry conditions: Market open, before 3 PM ET, SPX < OR Low
+4. Position: SPX Put, 0DTE, strike ~$4 OTM from current price
 5. Risk management: 40% stop loss, $50 take profit
-6. Entry validation: Bid/ask spread < $20
+6. Entry validation: Bid/ask spread < $0.2
 """
 
 from typing import Dict, Any, Optional
@@ -25,11 +25,11 @@ from app.strategies.base import BaseStrategy
 from app.strategies.config import StrategyConfig
 
 
-class Orb15MinLongCallStrategy(BaseStrategy):
+class Orb15MinLongPutStrategy(BaseStrategy):
     """
-    Opening Range Breakout 15-Minute Long Call Strategy.
+    Opening Range Breakout 15-Minute Long Put Strategy.
     
-    Trades SPX 0DTE Call options based on opening range breakout.
+    Trades SPX 0DTE Put options based on opening range breakout.
     """
 
     def __init__(
@@ -82,7 +82,7 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         
         # SPX price tracking
         self.current_spx_price = 0.0
-        self.current_spx_high = 0.0  # Today's high
+        self.current_spx_low = 1_000_000.0  # Today's low, init to high number so first price sets it
         self.last_quote_time_ns = 0
         
         # Position management
@@ -108,7 +108,7 @@ class Orb15MinLongCallStrategy(BaseStrategy):
     def on_start_safe(self):
         """Called after instrument is ready and base setup complete."""
         self.logger.info(
-            f"ORB 15-Min Long Call Strategy starting: "
+            f"ORB 15-Min Long Put Strategy starting: "
             f"OR={self.opening_range_minutes}m, "
             f"Target option price=${self.target_option_price}, "
             f"SL={self.stop_loss_percent}%, "
@@ -204,10 +204,10 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         if self.should_reset_daily_state():
             self._reset_daily_state()
         
-        # Update current high
-        bar_high = bar.high.as_double()
-        if bar_high > self.current_spx_high:
-            self.current_spx_high = bar_high
+        # Update current low
+        bar_low = bar.low.as_double()
+        if bar_low < self.current_spx_low:
+            self.current_spx_low = bar_low
         
         # Collect bars during opening range period
         if self.is_in_opening_range_period() and not self.or_calculated:
@@ -258,7 +258,7 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         self.or_bars = []
         self.or_end_time = None
         
-        self.current_spx_high = 0.0
+        self.current_spx_low = 1_000_000.0
         self.breakout_detected = False
         self.entry_attempted_today = False
         self.entry_retry_count = 0
@@ -287,19 +287,19 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         else:
             return
         
-        # Update daily high
-        if self.current_spx_price > self.current_spx_high:
-            self.current_spx_high = self.current_spx_price
+        # Update daily low
+        if self.current_spx_price < self.current_spx_low:
+            self.current_spx_low = self.current_spx_price
         
         # Track quote time
         self.last_quote_time_ns = tick.ts_event
         
         # Log SPX price periodically
         if int(self.clock.timestamp_ns() / 1_000_000_000) % 30 == 0:
-            or_status = f"OR High={self.or_high:.2f}" if self.or_high else "OR pending"
+            or_status = f"OR Low={self.or_low:.2f}" if self.or_low else "OR pending"
             self.logger.info(
                 f"SPX: {self.current_spx_price:.2f}, "
-                f"Today High: {self.current_spx_high:.2f}, "
+                f"Today Low: {self.current_spx_low:.2f}, "
                 f"{or_status}"
             )
         
@@ -316,14 +316,14 @@ class Orb15MinLongCallStrategy(BaseStrategy):
     # =========================================================================
 
     def _check_breakout(self):
-        """Check if SPX has broken above opening range high."""
+        """Check if SPX has broken below opening range low."""
         if self.breakout_detected or self.entry_attempted_today:
             return
         
-        if self.current_spx_high > self.or_high:
+        if self.current_spx_low < self.or_low:
             self.logger.info(
-                f"🔥 BREAKOUT DETECTED! SPX High {self.current_spx_high:.2f} > "
-                f"OR High {self.or_high:.2f}"
+                f"🔥 BREAKOUT DETECTED! SPX Low {self.current_spx_low:.2f} < "
+                f"OR Low {self.or_low:.2f}"
             )
             self.breakout_detected = True
             
@@ -383,7 +383,7 @@ class Orb15MinLongCallStrategy(BaseStrategy):
             return
         
         # Request range of strikes to find best price match
-        self._request_call_options(base_strike)
+        self._request_put_options(base_strike)
         
         self.entry_attempted_today = True
 
@@ -398,7 +398,7 @@ class Orb15MinLongCallStrategy(BaseStrategy):
             return None
         
         # We'll request multiple strikes around ATM and pick the best one
-        # This is a placeholder - we'll request a range in _request_call_options
+        # This is a placeholder - we'll request a range in _request_put_options
         atm_strike = round(self.current_spx_price / 5) * 5
         
         self.logger.info(
@@ -408,9 +408,9 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         
         return atm_strike
 
-    def _request_call_options(self, base_strike: float):
+    def _request_put_options(self, base_strike: float):
         """
-        Request multiple SPX Call option contracts to find best price match.
+        Request multiple SPX Put option contracts to find best price match.
         Requests strikes: ATM, ATM+5, ATM+10, ATM+15, ATM+20
         """
         
@@ -421,16 +421,16 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         # Request 7 strikes to find the one priced closest to target
         strikes_to_request = [
             base_strike,
-            base_strike + 5,
-            base_strike + 10,
-            base_strike + 15,
-            base_strike + 20,
-            base_strike + 25,
-            base_strike + 30
+            base_strike - 5,
+            base_strike - 10,
+            base_strike - 15,
+            base_strike - 20,
+            base_strike - 25,
+            base_strike - 30
         ]
         
         self.logger.info(
-            f"Requesting SPX Calls to find option priced near ${self.target_option_price}: "
+            f"Requesting SPX Puts to find option priced near ${self.target_option_price}: "
             f"Strikes={strikes_to_request}, Expiry={expiry_date_ib}"
         )
         
@@ -444,7 +444,7 @@ class Orb15MinLongCallStrategy(BaseStrategy):
                     "currency": "USD",
                     "lastTradeDateOrContractMonth": expiry_date_ib,
                     "strike": float(strike),
-                    "right": "C",
+                    "right": "P",
                     "multiplier": "100"
                 })
             
@@ -456,10 +456,10 @@ class Orb15MinLongCallStrategy(BaseStrategy):
             self.options_requested = True
             self.requested_strikes = strikes_to_request
             
-            self.logger.info(f"✅ Requested {len(contracts)} SPX Call options")
+            self.logger.info(f"✅ Requested {len(contracts)} SPX Put options")
             
         except Exception as e:
-            self.logger.error(f"❌ Failed to request Call options: {e}", exc_info=True)
+            self.logger.error(f"❌ Failed to request Put options: {e}", exc_info=True)
 
     def on_instrument(self, instrument):
         """Called when new instrument is added to cache."""
@@ -469,7 +469,7 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         if (self.options_requested and
             not self.active_option_id and
             hasattr(instrument, 'option_kind') and
-            instrument.option_kind == OptionKind.CALL):
+            instrument.option_kind == OptionKind.PUT):
             
             self.logger.info(f"Received option: {instrument.id}, Strike: {instrument.strike_price}")
             self.received_options.append(instrument)
@@ -695,7 +695,7 @@ class Orb15MinLongCallStrategy(BaseStrategy):
 
     def on_stop_safe(self):
         """Called when strategy stops."""
-        self.logger.info("Stopping ORB 15-Min Long Call strategy")
+        self.logger.info("Stopping ORB 15-Min Long Put strategy")
         
         # Close any open positions
         if self._has_open_position():
@@ -719,7 +719,7 @@ class Orb15MinLongCallStrategy(BaseStrategy):
             "or_low": self.or_low,
             "or_calculated": self.or_calculated,
             "last_or_calculation_date": str(self.last_or_calculation_date) if self.last_or_calculation_date else None,
-            "current_spx_high": self.current_spx_high,
+            "current_spx_low": self.current_spx_low,
             "breakout_detected": self.breakout_detected,
             "entry_attempted_today": self.entry_attempted_today,
             "entry_retry_count": self.entry_retry_count,
@@ -742,7 +742,7 @@ class Orb15MinLongCallStrategy(BaseStrategy):
             from datetime import datetime
             self.last_or_calculation_date = datetime.fromisoformat(date_str).date()
         
-        self.current_spx_high = state.get("current_spx_high", 0.0)
+        self.current_spx_low = state.get("current_spx_low", 0.0)
         self.breakout_detected = state.get("breakout_detected", False)
         self.entry_attempted_today = state.get("entry_attempted_today", False)
         self.entry_retry_count = state.get("entry_retry_count", 0)
