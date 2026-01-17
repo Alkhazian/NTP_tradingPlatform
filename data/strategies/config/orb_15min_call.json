@@ -1,5 +1,5 @@
 {
-    "id": "orb_15min_call_1",
+    "id": "orb_15min_call",
     "name": "ORB 15-Min Long Call",
     "enabled": true,
     "instrument_id": "^SPX.CBOE",
