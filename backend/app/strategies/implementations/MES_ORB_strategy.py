@@ -10,14 +10,14 @@ Entry Rules:
 Risk Management:
 - Only trade if OR width >= 0.5 * ATR(14)
 - Initial stop: 1.25 * ATR
-- Trailing stop: 3.0 * ATR
+- Trailing stop: 3.0 * ATR (software-managed, not broker orders)
 
 Overnight Hold Conditions:
 - Price > EMA(200) on 30-min bars
 - ADX > 20
 
 Exit Rules:
-- Stop hit OR 15:55 ET (forced flat for day trades)
+- Software stop hit OR 15:55 ET (forced flat for day trades)
 - Overnight positions exit at next day's open
 - Maximum 1 trade per day
 """
@@ -31,7 +31,7 @@ from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import OrderSide, TimeInForce, OrderType, PositionSide
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import Instrument
-from nautilus_trader.model.orders import MarketOrder, StopMarketOrder
+from nautilus_trader.model.orders import MarketOrder
 from nautilus_trader.model.position import Position
 from nautilus_trader.indicators import (
     AverageTrueRange, 
@@ -46,6 +46,9 @@ from ..config import StrategyConfig
 class MesOrbStrategy(BaseStrategy):
     """
     MES Opening Range Breakout Strategy
+    
+    Uses software-managed stops instead of broker stop orders to avoid
+    order management complexity and rate limiting issues.
     """
     
     def __init__(self, config: StrategyConfig, integration_manager=None, persistence_manager=None):
@@ -88,16 +91,19 @@ class MesOrbStrategy(BaseStrategy):
         self.traded_today = False
         self.current_trade_date: Optional[datetime] = None
         self.entry_price: Optional[float] = None
-        self.stop_order_id: Optional[str] = None
+        self.is_overnight_hold = False
+        
+        # Software stop management (no broker stop orders)
+        self.stop_price: Optional[float] = None
+        self.position_side: Optional[PositionSide] = None
         self.highest_price_since_entry: Optional[float] = None
         self.lowest_price_since_entry: Optional[float] = None
-        self.is_overnight_hold = False
         
         # Timezone
         self.et_tz = pytz.timezone('America/New_York')
     
     def on_start_safe(self):
-        """Initialize strategy when started"""
+        """Initialize strategy when started."""
         if not self.instrument:
             self.logger.warning("Instrument not ready, waiting...")
             return
@@ -123,16 +129,13 @@ class MesOrbStrategy(BaseStrategy):
         self.logger.info(f"MES ORB Strategy started: ATR={self.atr_period}, EMA={self.ema_period}, ADX={self.adx_period}")
     
     def on_bar(self, bar: Bar):
-        """Handle incoming bars"""
+        """Handle incoming bars."""
         if bar.bar_type == self.bar_type_1min:
             self._handle_1min_bar(bar)
 
     def _handle_1min_bar(self, bar: Bar):
-        """Process 1-minute bars for OR and ATR"""
-        # Note: ATR updated automatically
-        
+        """Process 1-minute bars for OR, ATR, and stop management."""
         # Get current time in ET
-        # bar.ts_event is int (ns), convert to datetime
         dt_utc = datetime.fromtimestamp(bar.ts_event / 1_000_000_000, tz=timezone.utc)
         bar_time_et = dt_utc.astimezone(self.et_tz).time()
         bar_date = dt_utc.astimezone(self.et_tz).date()
@@ -154,19 +157,21 @@ class MesOrbStrategy(BaseStrategy):
         if self.or_complete and not self.traded_today and not self._has_open_position:
             self._check_entry(bar)
         
-        # Update trailing stops if in position
-        if self._has_open_position:
-            self._update_trailing_stop(bar)
+        # SOFTWARE STOP: Check if stop is triggered
+        if self._has_open_position and self.stop_price is not None:
+            self._check_stop_triggered(bar)
         
-        # Force exit at 15:55 if day trade
+        # Update trailing stop level (just the price, no orders)
+        if self._has_open_position and self.stop_price is not None:
+            self._update_trailing_stop_level(bar)
+        
         # Force exit at 15:55 if day trade
         if bar_time_et >= self.exit_time and self._has_open_position and not self.is_overnight_hold:
             self.logger.info("Forcing exit at 15:55 ET (day trade)")
-            self.close_strategy_position(reason="END_OF_DAY")
-    
+            self._exit_position("END_OF_DAY")
     
     def _reset_daily_state(self, trade_date):
-        """Reset state for new trading day"""
+        """Reset state for new trading day."""
         self.logger.info(f"Resetting daily state for {trade_date}")
         self.or_high = None
         self.or_low = None
@@ -178,14 +183,13 @@ class MesOrbStrategy(BaseStrategy):
         # If holding overnight position, exit at open
         if self.is_overnight_hold and self._has_open_position:
             self.logger.info("Exiting overnight position at market open")
-            # Using close_strategy_position handles logging and persistence
-            self.close_strategy_position(reason="OVERNIGHT_CLOSE")
+            self._exit_position("OVERNIGHT_CLOSE")
             self.is_overnight_hold = False
             # Ensure this exit doesn't count as the "day trade" for today
             self.traded_today = False
     
     def _calculate_opening_range(self):
-        """Calculate opening range high/low"""
+        """Calculate opening range high/low."""
         if not self.or_bars:
             return
         
@@ -195,7 +199,7 @@ class MesOrbStrategy(BaseStrategy):
         
         # Check if OR is wide enough (>= 0.5 * ATR)
         if self.atr.initialized:
-            min_width = 0.5 * self.atr.value * self.or_atr_multiplier
+            min_width = self.atr.value * self.or_atr_multiplier
             if or_width < min_width:
                 self.logger.info(f"OR too narrow: {or_width:.2f} < {min_width:.2f}, skipping today")
                 self.traded_today = True  # Mark as traded to prevent entries
@@ -205,7 +209,7 @@ class MesOrbStrategy(BaseStrategy):
         self.logger.info(f"OR calculated: High={self.or_high:.2f}, Low={self.or_low:.2f}, Width={or_width:.2f}")
     
     def _check_entry(self, bar: Bar):
-        """Check for breakout entry"""
+        """Check for breakout entry."""
         if not self.atr.initialized:
             return
         
@@ -222,19 +226,24 @@ class MesOrbStrategy(BaseStrategy):
             self._enter_position(OrderSide.SELL, close)
     
     def _enter_position(self, side: OrderSide, entry_price: float):
-        """Enter a position with initial stop"""
+        """Enter a position and set initial software stop."""
         self.traded_today = True
         self.entry_price = entry_price
         
-        # Calculate initial stop
+        # Calculate initial stop distance
         stop_distance = self.atr.value * self.initial_stop_atr_multiplier
         
+        # Set position side and initial stop price
         if side == OrderSide.BUY:
-            stop_price = entry_price - stop_distance
+            self.position_side = PositionSide.LONG
+            self.stop_price = entry_price - stop_distance
             self.highest_price_since_entry = entry_price
+            self.lowest_price_since_entry = None
         else:
-            stop_price = entry_price + stop_distance
+            self.position_side = PositionSide.SHORT
+            self.stop_price = entry_price + stop_distance
             self.lowest_price_since_entry = entry_price
+            self.highest_price_since_entry = None
         
         # Submit market order
         order = self.order_factory.market(
@@ -244,116 +253,111 @@ class MesOrbStrategy(BaseStrategy):
         )
         
         self.submit_order(order)
-        self.logger.info(f"Entered {side.name} at {entry_price:.2f}, initial stop at {stop_price:.2f}")
-        
-        # Place initial stop order
-        self._place_stop_order(stop_price, side)
-    
-    def on_order_filled(self, event):
-        """Override to capture proper exit reason from stop orders"""
-        if self.stop_order_id and str(event.client_order_id) == self.stop_order_id:
-            # Determine if this was an initial stop or trailing stop
-            # We can check if highest/lowest price moved locally since entry
-            is_trailing = False
-            if self.entry_price:
-                dist = abs(self.entry_price - float(event.last_px))
-                initial_dist = self.atr.value * self.initial_stop_atr_multiplier if self.atr and self.atr.initialized else 0
-                # If distance is significantly different from initial stop, it was likely trailed
-                # Or simplistically, if we ever updated the stop order, it's a trailing stop.
-                # Since we don't track update count easily here, let's use the price check
-                pass
-
-            # Simpler approach: If we ever updated the trailing stop, we can set a flag
-            # For now, let's just default to STOP_LOSS, unless we know we trailed
-            reason = "STOP_LOSS"
-            
-            # If we updated the stop order, it's a trailing stop
-            # We can track this in _update_trailing_stop
-            if getattr(self, "_is_trailing_active", False):
-                reason = "TRAILING_STOP"
-                
-            self._last_exit_reason = reason
-            self.logger.info(f"Stop order filled. Reason set to: {reason}")
-
-        super().on_order_filled(event)
-
-    def _place_stop_order(self, stop_price: float, position_side: OrderSide):
-        """Place or update stop order"""
-        # Cancel existing stop if any
-        if self.stop_order_id:
-            # Cancel logic here - checking cache for cancellable order
-            # For now assuming we just place new one or modify
-            # In a real impl we'd cancel the old one first
-            pass
-        
-        # Determine stop order side (opposite of position)
-        stop_side = OrderSide.SELL if position_side == OrderSide.BUY else OrderSide.BUY
-        
-        # Create stop order
-        stop_order = self.order_factory.stop_market(
-            instrument_id=self.instrument_id,
-            order_side=stop_side,
-            quantity=self.instrument.make_qty(self.strategy_config.order_size),
-            trigger_price=self.instrument.make_price(stop_price)
+        self.logger.info(
+            f"Entered {side.name} at {entry_price:.2f}, "
+            f"initial stop at {self.stop_price:.2f} (distance: {stop_distance:.2f})"
         )
-        
-        self.submit_order(stop_order)
-        self.stop_order_id = str(stop_order.client_order_id)
-        
-        # If this isn't the first stop, it's likely a trailing update (or initial placement)
-        # We can set a flag if this is a modification.
-        if hasattr(self, "entry_price") and self.entry_price:
-             # Calculate distance
-             pass
-             
-        self.logger.info(f"Stop order placed at {stop_price:.2f}")
-
-    def _update_trailing_stop(self, bar: Bar):
-        """Update trailing stop based on price movement"""
-        if not self._has_open_position:
+    
+    def _check_stop_triggered(self, bar: Bar):
+        """Check if software stop price was hit and exit if so."""
+        if self.stop_price is None or self.position_side is None:
             return
         
-        position = self._get_open_position()
-        if not position:
+        current = float(bar.close)
+        high = float(bar.high)
+        low = float(bar.low)
+        
+        triggered = False
+        
+        if self.position_side == PositionSide.LONG:
+            # Check if low touched stop (more accurate than just close)
+            if low <= self.stop_price:
+                triggered = True
+                exit_reason = "TRAILING_STOP" if self._is_trailing_active() else "STOP_LOSS"
+                self.logger.info(
+                    f"Stop triggered (LONG): low={low:.2f} <= stop={self.stop_price:.2f}"
+                )
+        else:  # SHORT
+            # Check if high touched stop
+            if high >= self.stop_price:
+                triggered = True
+                exit_reason = "TRAILING_STOP" if self._is_trailing_active() else "STOP_LOSS"
+                self.logger.info(
+                    f"Stop triggered (SHORT): high={high:.2f} >= stop={self.stop_price:.2f}"
+                )
+        
+        if triggered:
+            self._exit_position(exit_reason)
+    
+    def _is_trailing_active(self) -> bool:
+        """Check if the stop has been trailed from initial level."""
+        if self.entry_price is None or self.stop_price is None:
+            return False
+        
+        initial_distance = self.atr.value * self.initial_stop_atr_multiplier if self.atr and self.atr.initialized else 0
+        
+        if self.position_side == PositionSide.LONG:
+            initial_stop = self.entry_price - initial_distance
+            return self.stop_price > initial_stop + 0.01  # Small tolerance
+        else:
+            initial_stop = self.entry_price + initial_distance
+            return self.stop_price < initial_stop - 0.01
+    
+    def _update_trailing_stop_level(self, bar: Bar):
+        """Update the trailing stop PRICE (no broker orders)."""
+        if self.stop_price is None or self.position_side is None:
             return
         
-        current_price = float(bar.close)
+        if not self.atr or not self.atr.initialized:
+            return
+        
+        current = float(bar.close)
         trailing_distance = self.atr.value * self.trailing_stop_atr_multiplier
         
-        updated = False
-        if position.side == PositionSide.LONG:
+        if self.position_side == PositionSide.LONG:
             # Update highest price
-            if self.highest_price_since_entry is None or current_price > self.highest_price_since_entry:
-                self.highest_price_since_entry = current_price
+            if self.highest_price_since_entry is None or current > self.highest_price_since_entry:
+                self.highest_price_since_entry = current
             
             # Calculate new trailing stop
             new_stop = self.highest_price_since_entry - trailing_distance
             
-            # Only update if new stop is higher (trailing up)
-            if self.entry_price and new_stop > (self.entry_price - self.atr.value * self.initial_stop_atr_multiplier):
-                # Ensure new stop is higher than current effective stop? 
-                # Ideally check existing stop order price.
-                self._place_stop_order(new_stop, OrderSide.BUY)
-                updated = True
+            # Only raise stop (never lower for longs)
+            if new_stop > self.stop_price:
+                old_stop = self.stop_price
+                self.stop_price = new_stop
+                self.logger.debug(f"Trailing stop raised: {old_stop:.2f} -> {self.stop_price:.2f}")
         
         else:  # SHORT
             # Update lowest price
-            if self.lowest_price_since_entry is None or current_price < self.lowest_price_since_entry:
-                self.lowest_price_since_entry = current_price
+            if self.lowest_price_since_entry is None or current < self.lowest_price_since_entry:
+                self.lowest_price_since_entry = current
             
             # Calculate new trailing stop
             new_stop = self.lowest_price_since_entry + trailing_distance
             
-            # Only update if new stop is lower (trailing down)
-            if self.entry_price and new_stop < (self.entry_price + self.atr.value * self.initial_stop_atr_multiplier):
-                self._place_stop_order(new_stop, OrderSide.SELL)
-                updated = True
-                
-        if updated:
-            self._is_trailing_active = True
+            # Only lower stop (never raise for shorts)
+            if new_stop < self.stop_price:
+                old_stop = self.stop_price
+                self.stop_price = new_stop
+                self.logger.debug(f"Trailing stop lowered: {old_stop:.2f} -> {self.stop_price:.2f}")
+    
+    def _exit_position(self, reason: str):
+        """Exit the current position and clear stop state."""
+        self._last_exit_reason = reason
+        self.close_strategy_position(reason=reason)
+        self._clear_stop_state()
+    
+    def _clear_stop_state(self):
+        """Clear all stop-related state after position is closed."""
+        self.stop_price = None
+        self.position_side = None
+        self.highest_price_since_entry = None
+        self.lowest_price_since_entry = None
+        self.entry_price = None
     
     def _check_overnight_hold_conditions(self) -> bool:
-        """Check if position should be held overnight"""
+        """Check if position should be held overnight."""
         if not self.ema.initialized or not self.dm.initialized:
             return False
         
@@ -373,23 +377,38 @@ class MesOrbStrategy(BaseStrategy):
         
         return False
     
-    def _close_position(self, reason: str):
-        """Deprecated: Use close_strategy_position instead"""
-        self.close_strategy_position(reason=reason)
-    
     @property
     def _has_open_position(self) -> bool:
-        """Check if strategy has an open position"""
+        """Check if strategy has an open position."""
         position = self._get_open_position()
         return position is not None and not position.is_closed
     
     def _get_open_position(self) -> Optional[Position]:
-        """Get current open position for this instrument"""
+        """Get current open position for this instrument."""
         positions = self.cache.positions_open(instrument_id=self.instrument_id)
         return positions[0] if positions else None
     
+    def on_order_filled(self, event):
+        """Handle order fills - sync position side from actual fill."""
+        # Sync position side from actual fill event
+        if event.order_side == OrderSide.BUY:
+            # Could be entry (LONG) or exit (closing SHORT)
+            if self.position_side is None:
+                self.position_side = PositionSide.LONG
+        else:  # SELL
+            if self.position_side is None:
+                self.position_side = PositionSide.SHORT
+        
+        # Check if this is an exit fill (position closed)
+        pos = self._get_open_position()
+        if pos is None:
+            self.logger.info("Position closed, clearing stop state")
+            self._clear_stop_state()
+        
+        super().on_order_filled(event)
+    
     def get_state(self) -> Dict[str, Any]:
-        """Return strategy state for persistence"""
+        """Return strategy state for persistence."""
         return {
             "or_high": self.or_high,
             "or_low": self.or_low,
@@ -397,11 +416,16 @@ class MesOrbStrategy(BaseStrategy):
             "traded_today": self.traded_today,
             "current_trade_date": self.current_trade_date.isoformat() if self.current_trade_date else None,
             "entry_price": self.entry_price,
-            "is_overnight_hold": self.is_overnight_hold
+            "is_overnight_hold": self.is_overnight_hold,
+            # Software stop state
+            "stop_price": self.stop_price,
+            "position_side": self.position_side.name if self.position_side else None,
+            "highest_price_since_entry": self.highest_price_since_entry,
+            "lowest_price_since_entry": self.lowest_price_since_entry,
         }
     
     def set_state(self, state: Dict[str, Any]):
-        """Restore strategy state from persistence"""
+        """Restore strategy state from persistence."""
         self.or_high = state.get("or_high")
         self.or_low = state.get("or_low")
         self.or_complete = state.get("or_complete", False)
@@ -413,7 +437,17 @@ class MesOrbStrategy(BaseStrategy):
         
         self.entry_price = state.get("entry_price")
         self.is_overnight_hold = state.get("is_overnight_hold", False)
+        
+        # Restore software stop state
+        self.stop_price = state.get("stop_price")
+        position_side_str = state.get("position_side")
+        if position_side_str:
+            self.position_side = PositionSide[position_side_str]
+        else:
+            self.position_side = None
+        self.highest_price_since_entry = state.get("highest_price_since_entry")
+        self.lowest_price_since_entry = state.get("lowest_price_since_entry")
     
     def on_stop_safe(self):
-        """Cleanup when strategy stops"""
+        """Cleanup when strategy stops."""
         self.logger.info("MES ORB Strategy stopping...")
