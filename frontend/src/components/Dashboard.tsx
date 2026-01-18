@@ -34,6 +34,9 @@ interface SystemStatus {
         id: string;
         running: boolean;
         status: string;
+        config?: {
+            name?: string;
+        };
         positions?: Array<{
             symbol: string;
             side: string;
@@ -299,7 +302,7 @@ export default function Dashboard() {
                                                             <tr key={strategy.id} className="hover:bg-white/5 transition-colors">
                                                                 <td className="px-4 py-3 font-medium">
                                                                     <div className="flex items-center gap-2">
-                                                                        <span>{strategy.id}</span>
+                                                                        <span>{strategy.config?.name || strategy.id}</span>
                                                                     </div>
                                                                 </td>
                                                                 <td className="px-4 py-3">
