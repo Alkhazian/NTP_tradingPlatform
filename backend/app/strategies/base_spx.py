@@ -14,12 +14,14 @@ from abc import abstractmethod
 from typing import Dict, Any, Optional, List, Callable
 from datetime import timedelta
 from decimal import Decimal
+import uuid
 
 
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.identifiers import InstrumentId, Venue
 from nautilus_trader.model.instruments import Instrument
-from nautilus_trader.model.enums import OptionKind
+from nautilus_trader.model.enums import OptionKind, PositionSide
+from nautilus_trader.model.position import Position
 
 from .base import BaseStrategy
 
@@ -39,6 +41,10 @@ class SPXBaseStrategy(BaseStrategy):
     # Constants - avoid duplication of instrument ID
     SPX_INSTRUMENT_ID = InstrumentId.from_str("^SPX.CBOE")
     
+    # Default timeout for option selection (can be overridden in derived strategies)
+    # IMPORTANT: In live trading, increase this value if IB is slow (e.g., market open)
+    DEFAULT_SELECTION_DELAY_SECONDS = 2.0
+    
     def __init__(self, config, integration_manager=None, persistence_manager=None):
         """
         Initialize SPXBaseStrategy.
@@ -55,6 +61,10 @@ class SPXBaseStrategy(BaseStrategy):
         self.spx_instrument: Instrument = None
         self.current_spx_price = 0.0
         self.spx_subscribed = False
+        
+        # Dictionary for parallel option premium searches
+        # Key: search_id (UUID), Value: search state dict
+        self._premium_searches: Dict[str, Dict[str, Any]] = {}
         
         self.logger.info(f"SPXBaseStrategy initialized with SPX instrument: {self.spx_instrument_id}")
     
@@ -274,12 +284,16 @@ class SPXBaseStrategy(BaseStrategy):
         max_spread: Optional[float] = None,
         selection_delay_seconds: float = 2.0,
         callback: Optional[Callable[[Optional[Instrument], Optional[Dict]], None]] = None
-    ):
+    ) -> Optional[str]:
         """
         Search for SPX options by target premium (option price).
         
         This method requests multiple strikes around ATM, collects quotes,
         and finds the option with price closest to target premium.
+        
+        Supports parallel searches - each call creates a new isolated search
+        identified by a unique ID. This allows searching for multiple options
+        simultaneously (e.g., for Iron Condor strategies).
         
         Args:
             target_premium: Target option price (e.g., 4.0 for $4 option)
@@ -289,32 +303,44 @@ class SPXBaseStrategy(BaseStrategy):
             strike_step: Step between strikes in points (default 5)
             max_spread: Maximum allowed bid-ask spread, None = no filter
             selection_delay_seconds: Delay before selecting best option (default 2.0)
-            callback: Function to call with (selected_option, option_data) or (None, None) if failed
+            callback: Function to call with (search_id, selected_option, option_data) or (search_id, None, None) if failed
         
         Returns:
-            None - results delivered via callback
+            search_id: Unique ID for this search (can be used to cancel)
             
         Example:
-            self.find_option_by_premium(
+            # For Iron Condor - search for multiple options in parallel
+            call_search_id = self.find_option_by_premium(
                 target_premium=4.0,
                 option_kind=OptionKind.CALL,
                 max_spread=0.20,
-                callback=self._on_option_found
+                callback=self._on_call_found
+            )
+            put_search_id = self.find_option_by_premium(
+                target_premium=4.0,
+                option_kind=OptionKind.PUT,
+                max_spread=0.20,
+                callback=self._on_put_found
             )
         """
         if self.current_spx_price == 0:
             self.logger.error("Cannot search for options: SPX price not available")
             if callback:
-                callback(None, None)
-            return
+                callback(None, None, None)
+            return None
         
-        # Initialize search state
-        self._premium_search_state = {
+        # Generate unique ID for this search
+        search_id = str(uuid.uuid4())
+        
+        # Initialize search state in dictionary
+        self._premium_searches[search_id] = {
+            'search_id': search_id,
             'target_premium': target_premium,
             'option_kind': option_kind,
             'max_spread': max_spread,
             'callback': callback,
             'received_options': [],
+            'subscribed_instrument_ids': [],  # Track subscribed options for cleanup
             'active': True
         }
         
@@ -363,14 +389,10 @@ class SPXBaseStrategy(BaseStrategy):
                 params={"ib_contracts": contracts}
             )
             
-            self.logger.info(f"✅ Requested {len(contracts)} SPX {option_kind.name} options")
+            self.logger.info(f"✅ Requested {len(contracts)} SPX {option_kind.name} options (search_id: {search_id[:8]}...)")
             
-            # Set timer to select best option after delay
-            timer_name = f"{self.id}.select_premium_option"
-            try:
-                self.clock.cancel_timer(timer_name)
-            except Exception:
-                pass
+            # Set timer with unique name for this search
+            timer_name = f"{self.id}.premium_search.{search_id}"
             
             self.clock.set_time_alert(
                 name=timer_name,
@@ -378,46 +400,73 @@ class SPXBaseStrategy(BaseStrategy):
                 callback=self._on_premium_search_complete
             )
             
+            return search_id
+            
         except Exception as e:
             self.logger.error(f"❌ Failed to request options: {e}", exc_info=True)
+            # Clean up failed search
+            self._premium_searches.pop(search_id, None)
             if callback:
-                callback(None, None)
+                callback(search_id, None, None)
+            return None
     
     def _handle_option_for_premium_search(self, instrument: Instrument):
         """
         Internal handler for options received during premium search.
         Called from on_instrument().
         
+        Routes received options to all active searches that match the option type.
+        
         Args:
             instrument: Received option instrument
         """
-        if not hasattr(self, '_premium_search_state') or not self._premium_search_state.get('active'):
-            return
-        
-        # Check if this is the option type we're looking for
+        # Check if this is an option instrument
         if not hasattr(instrument, 'option_kind'):
             return
         
-        if instrument.option_kind != self._premium_search_state['option_kind']:
-            return
-        
-        self.logger.debug(f"Received option for premium search: {instrument.id}")
-        
-        # Subscribe to quotes for this option
-        self.subscribe_quote_ticks(instrument.id)
-        
-        # Add to received options
-        self._premium_search_state['received_options'].append(instrument)
+        # Check all active searches
+        for search_id, state in self._premium_searches.items():
+            if not state.get('active'):
+                continue
+            
+            # Check if this option matches the search criteria
+            if instrument.option_kind != state['option_kind']:
+                continue
+            
+            self.logger.debug(f"Received option for search {search_id[:8]}...: {instrument.id}")
+            
+            # Subscribe to quotes for this option
+            self.subscribe_quote_ticks(instrument.id)
+            
+            # Track subscription for cleanup after search completes
+            if instrument.id not in state['subscribed_instrument_ids']:
+                state['subscribed_instrument_ids'].append(instrument.id)
+            
+            # Add to this search's received options
+            state['received_options'].append(instrument)
     
     def _on_premium_search_complete(self, timer_event):
         """
         Timer callback to select best option after receiving options.
         Finds option with price closest to target premium.
+        
+        Extracts search_id from timer name to support parallel searches.
         """
-        if not hasattr(self, '_premium_search_state') or not self._premium_search_state.get('active'):
+        # Extract search_id from timer name: "{self.id}.premium_search.{search_id}"
+        timer_name = timer_event.name if hasattr(timer_event, 'name') else str(timer_event)
+        parts = timer_name.rsplit('.', 1)
+        if len(parts) < 2:
+            self.logger.error(f"Invalid timer name format: {timer_name}")
             return
         
-        state = self._premium_search_state
+        search_id = parts[-1]
+        
+        # Get and validate search state
+        state = self._premium_searches.get(search_id)
+        if not state or not state.get('active'):
+            self.logger.warning(f"Search {search_id[:8]}... not found or already completed")
+            return
+        
         state['active'] = False  # Mark search complete
         
         received_options = state['received_options']
@@ -425,10 +474,14 @@ class SPXBaseStrategy(BaseStrategy):
         max_spread = state['max_spread']
         callback = state['callback']
         
+        self.logger.info(f"🔍 Completing premium search {search_id[:8]}...")
+        
         if not received_options:
-            self.logger.warning("No options received for premium search")
+            self.logger.warning(f"No options received for search {search_id[:8]}...")
+            # Clean up and call callback
+            self._premium_searches.pop(search_id, None)
             if callback:
-                callback(None, None)
+                callback(search_id, None, None)
             return
         
         self.logger.info(f"Selecting from {len(received_options)} received options")
@@ -474,10 +527,20 @@ class SPXBaseStrategy(BaseStrategy):
                 f"Mid=${mid:.2f}, Spread=${spread:.2f}"
             )
         
+        # Get subscribed instruments for cleanup
+        subscribed_instrument_ids = state.get('subscribed_instrument_ids', [])
+        
+        # Clean up search state
+        self._premium_searches.pop(search_id, None)
+        
         if not option_prices:
-            self.logger.warning("No valid option quotes available after filtering")
+            self.logger.warning(f"No valid option quotes for search {search_id[:8]}... after filtering")
+            
+            # --- CRITICAL FIX: Unsubscribe from ALL options since none were selected ---
+            self._unsubscribe_from_options(subscribed_instrument_ids, None)
+            
             if callback:
-                callback(None, None)
+                callback(search_id, None, None)
             return
         
         # Find option closest to target premium
@@ -488,16 +551,92 @@ class SPXBaseStrategy(BaseStrategy):
         
         selected_option = best_option_data['option']
         
+        # --- CRITICAL FIX: Unsubscribe from all options EXCEPT the selected one ---
+        # This prevents IB market data limit errors from accumulating subscriptions
+        self._unsubscribe_from_options(subscribed_instrument_ids, selected_option.id)
+        
         self.logger.info(
-            f"✅ Selected: Strike ${best_option_data['strike']:.0f}, "
+            f"✅ Search {search_id[:8]}... selected: Strike ${best_option_data['strike']:.0f}, "
             f"Mid=${best_option_data['mid']:.2f} "
             f"(target: ${target_premium:.2f}), "
             f"Spread=${best_option_data['spread']:.2f}"
         )
         
-        # Call callback with result
+        # Call callback with search_id and result
         if callback:
-            callback(selected_option, best_option_data)
+            callback(search_id, selected_option, best_option_data)
+    
+    def _unsubscribe_from_options(
+        self, 
+        subscribed_instrument_ids: List[InstrumentId], 
+        keep_instrument_id: Optional[InstrumentId]
+    ):
+        """
+        Unsubscribe from option quotes, optionally keeping one subscription.
+        
+        CRITICAL: This prevents IB market data limit errors by cleaning up
+        subscriptions to options we didn't select.
+        
+        Args:
+            subscribed_instrument_ids: List of instrument IDs to unsubscribe from
+            keep_instrument_id: Optional ID to keep subscribed (the selected option)
+        """
+        unsubscribed_count = 0
+        for instrument_id in subscribed_instrument_ids:
+            if keep_instrument_id is not None and instrument_id == keep_instrument_id:
+                continue
+            try:
+                self.unsubscribe_quote_ticks(instrument_id)
+                unsubscribed_count += 1
+            except Exception as e:
+                self.logger.warning(f"Failed to unsubscribe from {instrument_id}: {e}")
+        
+        if unsubscribed_count > 0:
+            self.logger.info(
+                f"🧹 Cleaned up {unsubscribed_count} option subscriptions "
+                f"(kept: {keep_instrument_id if keep_instrument_id else 'none'})"
+            )
+    
+    def cancel_premium_search(self, search_id: str) -> bool:
+        """
+        Cancel an active premium search.
+        
+        Args:
+            search_id: The search ID returned by find_option_by_premium()
+            
+        Returns:
+            True if search was cancelled, False if not found
+        """
+        state = self._premium_searches.pop(search_id, None)
+        if state:
+            state['active'] = False
+            
+            # Unsubscribe from all options in this search
+            subscribed_ids = state.get('subscribed_instrument_ids', [])
+            self._unsubscribe_from_options(subscribed_ids, None)
+            
+            # Cancel the timer
+            timer_name = f"{self.id}.premium_search.{search_id}"
+            try:
+                self.clock.cancel_timer(timer_name)
+            except Exception:
+                pass
+            
+            self.logger.info(f"Cancelled premium search {search_id[:8]}...")
+            return True
+        return False
+    
+    def get_active_searches(self) -> List[str]:
+        """
+        Get list of active search IDs.
+        
+        Returns:
+            List of search_id strings for active searches
+        """
+        return [
+            search_id for search_id, state in self._premium_searches.items()
+            if state.get('active')
+        ]
     
     def on_instrument(self, instrument: Instrument):
         """
@@ -526,6 +665,100 @@ class SPXBaseStrategy(BaseStrategy):
         
         # Handle options for premium search
         self._handle_option_for_premium_search(instrument)
+    
+    # =========================================================================
+    # POSITION MANAGEMENT OVERRIDE FOR OPTIONS
+    # =========================================================================
+    
+    def _get_open_position_for_instrument(self, instrument_id: InstrumentId) -> Optional[Position]:
+        """
+        Get open position for a specific instrument using EXACT matching.
+        
+        CRITICAL: For options, each contract is a unique instrument.
+        The base class uses fuzzy symbol matching which can incorrectly
+        combine different option strikes into one "net position".
+        
+        This method uses exact InstrumentId matching which is correct
+        for option positions.
+        
+        Args:
+            instrument_id: Exact instrument ID to find position for
+            
+        Returns:
+            Position if found, None otherwise
+        """
+        positions = self.cache.positions_open(instrument_id=instrument_id)
+        
+        if not positions:
+            return None
+        
+        # Return first matching position
+        return positions[0]
+    
+    def has_open_option_position(self, instrument_id: InstrumentId) -> bool:
+        """
+        Check if there's an open position for a specific option instrument.
+        
+        Uses exact InstrumentId matching (not fuzzy symbol matching).
+        
+        Args:
+            instrument_id: Option instrument ID to check
+            
+        Returns:
+            True if position exists, False otherwise
+        """
+        return self._get_open_position_for_instrument(instrument_id) is not None
+    
+    def get_all_spx_option_positions(self) -> List[Position]:
+        """
+        Get all open positions for SPX/SPXW options.
+        
+        Useful for strategies that manage multiple option positions
+        (e.g., spreads, iron condors).
+        
+        Returns:
+            List of all open SPX option positions
+        """
+        all_positions = self.cache.positions_open()
+        spx_options = []
+        
+        for pos in all_positions:
+            # Check if this is an SPX option
+            symbol = str(pos.instrument_id.symbol)
+            if symbol.startswith("SPXW") or symbol.startswith("SPX"):
+                spx_options.append(pos)
+        
+        return spx_options
+    
+    def get_net_spx_option_exposure(self) -> Dict[str, float]:
+        """
+        Calculate net exposure for all SPX option positions.
+        
+        Returns:
+            Dictionary with:
+            - 'total_long_qty': Total quantity of long positions
+            - 'total_short_qty': Total quantity of short positions
+            - 'net_qty': Net quantity (long - short)
+            - 'positions_count': Number of open positions
+        """
+        positions = self.get_all_spx_option_positions()
+        
+        total_long = 0.0
+        total_short = 0.0
+        
+        for pos in positions:
+            qty = float(pos.quantity)
+            if pos.side == PositionSide.LONG:
+                total_long += qty
+            else:
+                total_short += qty
+        
+        return {
+            'total_long_qty': total_long,
+            'total_short_qty': total_short,
+            'net_qty': total_long - total_short,
+            'positions_count': len(positions)
+        }
     
     # =========================================================================
     # ABSTRACT METHODS - Must be implemented by strategies
