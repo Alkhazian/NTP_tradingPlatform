@@ -39,5 +39,10 @@
         "strategy_type": "MesOrbSimpleStrategy",
         "module": "app.strategies.implementations.MES_ORB_simple_strategy",
         "class_name": "MesOrbSimpleStrategy"
+    },
+    {
+        "strategy_type": "Orb15MinLongPutV2Strategy",
+        "module": "app.strategies.implementations.ORB_15_Long_Put_v2",
+        "class_name": "Orb15MinLongPutV2Strategy"
     }
 ]
