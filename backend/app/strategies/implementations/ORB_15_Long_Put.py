@@ -2,12 +2,12 @@
 ORB 15-Minute Long Put Strategy
 
 Opening Range Breakout strategy that:
-1. Calculates 15-minute opening range (9:30-9:45 AM ET)
+1. Calculates opening range during configurable period (default: 9:30-9:45 AM ET)
 2. Enters Long Put when SPX breaks below opening range low
-3. Entry conditions: Market open, before 3 PM ET, SPX < OR Low
-4. Position: SPX Put, 0DTE, strike ~$4 OTM from current price
-5. Risk management: 40% stop loss, $50 take profit
-6. Entry validation: Bid/ask spread < $0.2
+3. Entry conditions: Market open, before cutoff time (configurable), SPX < OR Low
+4. Position: SPX Put, 0DTE, strike selected by target option price (configurable)
+5. Risk management: Configurable stop loss %, configurable take profit $
+6. Entry validation: Bid/ask spread < configurable max spread
 """
 
 from typing import Dict, Any, Optional
@@ -59,9 +59,6 @@ class Orb15MinLongPutStrategy(BaseStrategy):
         self.cutoff_time_hour = int(
             self.strategy_config.parameters.get("cutoff_time_hour", 15)  # 3 PM
         )
-        self.max_entry_retries = int(
-            self.strategy_config.parameters.get("max_entry_retries", 3)
-        )
         self.quantity = int(
             self.strategy_config.parameters.get("quantity", 1)
         )
@@ -94,7 +91,6 @@ class Orb15MinLongPutStrategy(BaseStrategy):
         # Entry tracking
         self.breakout_detected = False
         self.entry_attempted_today = False
-        self.entry_retry_count = 0
         
         # Tracking for option selection
         self.options_requested = False
@@ -106,16 +102,22 @@ class Orb15MinLongPutStrategy(BaseStrategy):
     # =========================================================================
 
     def on_start_safe(self):
-        """Called after instrument is ready and base setup complete."""
+        """Called after instrument is ready and base setup complete.
+        
+        Note: Data subscriptions are handled by _subscribe_data() called from base class.
+        """
         self.logger.info(
             f"ORB 15-Min Long Put Strategy starting: "
             f"OR={self.opening_range_minutes}m, "
             f"Target option price=${self.target_option_price}, "
             f"SL={self.stop_loss_percent}%, "
             f"TP=${self.take_profit_dollars} per contract, "
-            f"Max spread=${self.max_spread_dollars}, "
-            f"Max retries={self.max_entry_retries}"
+            f"Max spread=${self.max_spread_dollars}"
         )
+
+    def _subscribe_data(self):
+        """Subscribe to required data feeds."""
+        # Called by BaseStrategy - subscribe to quotes and bars
         
         # Subscribe to SPX quotes
         try:
@@ -135,24 +137,18 @@ class Orb15MinLongPutStrategy(BaseStrategy):
         except Exception as e:
             self.logger.error(f"Failed to subscribe to bars: {e}", exc_info=True)
 
-    def _subscribe_data(self):
-        """Subscribe to required data feeds."""
-        # Called by BaseStrategy - subscribe to quotes and bars
-        self.subscribe_quote_ticks(self.instrument_id)
-        
-        bar_type = BarType(
-            self.instrument_id,
-            BarSpecification.from_str("1-MINUTE-LAST")
-        )
-        self.subscribe_bars(bar_type)
 
     # =========================================================================
     # MARKET HOURS & TIMING
     # =========================================================================
 
+    def _get_eastern_now(self) -> datetime:
+        """Get current time in Eastern timezone using strategy clock (backtestable)."""
+        return self.clock.utc_now().astimezone(self.eastern_tz)
+
     def is_market_open(self) -> bool:
         """Check if SPX options market is currently open."""
-        now = datetime.now(self.eastern_tz)
+        now = self._get_eastern_now()
         
         # Weekend check
         if now.weekday() >= 5:  # Saturday=5, Sunday=6
@@ -164,7 +160,7 @@ class Orb15MinLongPutStrategy(BaseStrategy):
 
     def is_before_cutoff(self) -> bool:
         """Check if current time is before entry cutoff (default 3 PM ET)."""
-        now = datetime.now(self.eastern_tz)
+        now = self._get_eastern_now()
         return now.time() < self.cutoff_time
 
     def get_or_end_time(self) -> time:
@@ -178,15 +174,15 @@ class Orb15MinLongPutStrategy(BaseStrategy):
 
     def is_in_opening_range_period(self) -> bool:
         """Check if we're currently in the opening range period."""
-        now = datetime.now(self.eastern_tz)
+        now = self._get_eastern_now()
         current_time = now.time()
         or_end = self.get_or_end_time()
         
-        return self.market_open_time <= current_time <= or_end
+        return self.market_open_time <= current_time < or_end
 
     def should_reset_daily_state(self) -> bool:
         """Check if we need to reset daily state (new trading day)."""
-        now = datetime.now(self.eastern_tz)
+        now = self._get_eastern_now()
         today = now.date()
         
         if self.last_or_calculation_date != today:
@@ -239,7 +235,7 @@ class Orb15MinLongPutStrategy(BaseStrategy):
         self.or_low = min(lows)
         self.or_calculated = True
         
-        now = datetime.now(self.eastern_tz)
+        now = self._get_eastern_now()
         self.last_or_calculation_date = now.date()
         
         self.logger.info(
@@ -261,7 +257,6 @@ class Orb15MinLongPutStrategy(BaseStrategy):
         self.current_spx_low = 1_000_000.0
         self.breakout_detected = False
         self.entry_attempted_today = False
-        self.entry_retry_count = 0
         
         self.options_requested = False
         self.requested_strikes = []
@@ -272,7 +267,12 @@ class Orb15MinLongPutStrategy(BaseStrategy):
     # =========================================================================
 
     def on_quote_tick(self, tick: QuoteTick):
-        """Handle SPX quote ticks."""
+        """Handle quote ticks - only process SPX quotes for price tracking."""
+        
+        # Filter: Only process quotes for the primary instrument (SPX)
+        # Option quotes are handled separately for position monitoring
+        if tick.instrument_id != self.instrument_id:
+            return
         
         # Update SPX price
         bid = tick.bid_price.as_double()
@@ -474,14 +474,21 @@ class Orb15MinLongPutStrategy(BaseStrategy):
             self.logger.info(f"Received option: {instrument.id}, Strike: {instrument.strike_price}")
             self.received_options.append(instrument)
             
+            # Subscribe to option quotes immediately so data is available for selection
+            self.subscribe_quote_ticks(instrument.id)
+            
             # After receiving options, try to select the best one
-            # We'll wait a bit for all options to arrive, then select
-            # Schedule selection attempt
-            self.clock.set_timer(
-                name=f"{self.id}.select_option",
-                interval=timedelta(seconds=2),  # Wait 2 seconds for all options
-                callback=self._select_and_enter_best_option,
-                start_time=self.clock.utc_now() + timedelta(seconds=2)
+            # Use one-shot time alert (cancel existing to avoid duplicates)
+            timer_name = f"{self.id}.select_option"
+            try:
+                self.clock.cancel_timer(timer_name)
+            except Exception:
+                pass  # Timer may not exist
+            
+            self.clock.set_time_alert(
+                name=timer_name,
+                alert_time=self.clock.utc_now() + timedelta(seconds=2),
+                callback=self._select_and_enter_best_option
             )
 
     def _select_and_enter_best_option(self, timer_event):
@@ -722,7 +729,6 @@ class Orb15MinLongPutStrategy(BaseStrategy):
             "current_spx_low": self.current_spx_low,
             "breakout_detected": self.breakout_detected,
             "entry_attempted_today": self.entry_attempted_today,
-            "entry_retry_count": self.entry_retry_count,
             "active_option_id": str(self.active_option_id) if self.active_option_id else None,
             "entry_price": self.entry_price,
             "stop_loss_price": self.stop_loss_price,
@@ -742,10 +748,9 @@ class Orb15MinLongPutStrategy(BaseStrategy):
             from datetime import datetime
             self.last_or_calculation_date = datetime.fromisoformat(date_str).date()
         
-        self.current_spx_low = state.get("current_spx_low", 0.0)
+        self.current_spx_low = state.get("current_spx_low", 1_000_000.0)
         self.breakout_detected = state.get("breakout_detected", False)
         self.entry_attempted_today = state.get("entry_attempted_today", False)
-        self.entry_retry_count = state.get("entry_retry_count", 0)
         
         option_id_str = state.get("active_option_id")
         if option_id_str:

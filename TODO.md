@@ -11,7 +11,8 @@
 
 ## Strategies enhancements
 - [x] Get first SPX option trade working
-- [ ] [Options] - check bid/ask spread before posting an order, add a condition for the spread size. It is relevant for option spread instruments
+- [x] [Options] - check bid/ask spread before posting an order, add a condition for the spread size.
+- [ ] [Options] - for option spread instruments implement a limit order exit, instead of market order. E.g. post the order with mid-price as limit price and then increase steadily the limit price until the order is filled
 - [ ] Add Risk Management
     - [ ] Create RiskManager class
     - [ ] Integrate pre-order validation
@@ -48,6 +49,7 @@
 ## System
 - [ ] Fix UI status of IB connection. As of now it in not taken into account 
 - [ ] [Logging] Log more nautilus trader events in app.log. For example, issues with IBKR connection are not logged to the app.log
+- [ ] Integrate with exchange_calendars library or maintain a holiday list. Update strategy logic to account for holidays
 - [ ] [Logging] ? Remove custom logger (use inherited Nautilus logger)
 - [ ] Enhanced Configuration
     - [ ] Create strategy-specific config classes
