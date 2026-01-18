@@ -30,7 +30,19 @@ interface SystemStatus {
     net_exposure?: string;
     leverage?: string;
     recent_trades?: Trade[];
-    strategies?: Array<{ id: string; running: boolean }>;
+    strategies?: Array<{
+        id: string;
+        running: boolean;
+        status: string;
+        positions?: Array<{
+            symbol: string;
+            side: string;
+            quantity: number;
+            entry_price: number;
+            current_price: number;
+            unrealized_pnl: number;
+        }>;
+    }>;
 }
 
 interface Position {
@@ -126,9 +138,9 @@ export default function Dashboard() {
         return () => ws.close();
     }, []);
 
-    const formatCurrency = useCallback((value: string, currency?: string) => {
+    const formatCurrency = useCallback((value: string | number, currency?: string) => {
         if (value === "N/A") return value;
-        const num = parseFloat(value.replace(/[^0-9.-]/g, ''));
+        const num = typeof value === 'string' ? parseFloat(value.replace(/[^0-9.-]/g, '')) : value;
         if (isNaN(num)) return value;
         return new Intl.NumberFormat('en-US', {
             style: 'currency',
@@ -255,149 +267,82 @@ export default function Dashboard() {
 
                             {/* Charts and Status */}
                             <section className="grid gap-6 lg:grid-cols-3">
-                                {/* Risk & Margin Panel */}
+                                {/* Active Strategies Panel */}
                                 <Card variant="glass" className="lg:col-span-2">
                                     <CardHeader className="flex flex-row items-center justify-between">
                                         <div>
-                                            <CardTitle>Risk & Margin</CardTitle>
+                                            <CardTitle>Active Strategies</CardTitle>
                                             <p className="text-sm text-muted-foreground mt-1">
-                                                Portfolio risk metrics and margin utilization
+                                                Running strategies and their performance
                                             </p>
                                         </div>
                                         <div className="flex items-center gap-2">
                                             <Badge variant="success" pulse>
-                                                Live Data
+                                                Live
                                             </Badge>
                                         </div>
                                     </CardHeader>
                                     <CardContent>
-                                        <div className="grid gap-6 md:grid-cols-2">
-                                            {/* Margin Usage */}
-                                            <div className="space-y-4">
-                                                <div>
-                                                    <div className="flex items-center justify-between mb-2">
-                                                        <span className="text-sm font-medium text-muted-foreground">Margin Usage</span>
-                                                        <span className="text-sm font-bold text-cyan-400">
-                                                            {status.margin_usage_percent || "0"}%
-                                                        </span>
-                                                    </div>
-                                                    <div className="h-2 bg-white/5 rounded-full overflow-hidden">
-                                                        <div
-                                                            className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 transition-all duration-500"
-                                                            style={{ width: `${Math.min(parseFloat(status.margin_usage_percent || "0"), 100)}%` }}
-                                                        />
-                                                    </div>
-                                                    <div className="flex items-center justify-between mt-2 text-xs text-muted-foreground">
-                                                        <span>Used: {formatCurrency(status.margin_used || "0")}</span>
-                                                        <span>Available: {formatCurrency(status.margin_available || "0")}</span>
-                                                    </div>
-                                                </div>
-
-                                                {/* Net Exposure */}
-                                                <div className="p-4 rounded-xl bg-white/5 border border-white/10">
-                                                    <div className="flex items-center gap-3">
-                                                        <div className="p-3 rounded-lg bg-purple-500/10">
-                                                            <Icons.activity className="w-5 h-5 text-purple-400" />
-                                                        </div>
-                                                        <div className="flex-1">
-                                                            <p className="text-xs text-muted-foreground">Net Exposure</p>
-                                                            <p className="text-lg font-bold tabular-nums">
-                                                                {formatCurrency(status.net_exposure || "0")}
-                                                            </p>
-                                                        </div>
-                                                    </div>
-                                                </div>
-
-                                                {/* Leverage */}
-                                                <div className="p-4 rounded-xl bg-white/5 border border-white/10">
-                                                    <div className="flex items-center gap-3">
-                                                        <div className="p-3 rounded-lg bg-orange-500/10">
-                                                            <Icons.zap className="w-5 h-5 text-orange-400" />
-                                                        </div>
-                                                        <div className="flex-1">
-                                                            <p className="text-xs text-muted-foreground">Leverage</p>
-                                                            <p className="text-lg font-bold tabular-nums">
-                                                                {status.leverage || "1.0"}x
-                                                            </p>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            {/* P&L Metrics */}
-                                            <div className="space-y-4">
-                                                {/* Total Unrealized P&L */}
-                                                <div className="p-4 rounded-xl bg-white/5 border border-white/10">
-                                                    <div className="flex items-center gap-3">
-                                                        <div className={`p-3 rounded-lg ${parseFloat((status.total_unrealized_pnl || "0").replace(/[^0-9.-]/g, '')) >= 0
-                                                            ? 'bg-emerald-500/10'
-                                                            : 'bg-red-500/10'
-                                                            }`}>
-                                                            <Icons.trendingUp className={`w-5 h-5 ${parseFloat((status.total_unrealized_pnl || "0").replace(/[^0-9.-]/g, '')) >= 0
-                                                                ? 'text-emerald-400'
-                                                                : 'text-red-400'
-                                                                }`} />
-                                                        </div>
-                                                        <div className="flex-1">
-                                                            <p className="text-xs text-muted-foreground">Unrealized P&L</p>
-                                                            <p className={`text-lg font-bold tabular-nums ${parseFloat((status.total_unrealized_pnl || "0").replace(/[^0-9.-]/g, '')) >= 0
-                                                                ? 'text-emerald-400'
-                                                                : 'text-red-400'
-                                                                }`}>
-                                                                {formatCurrency(status.total_unrealized_pnl || "0")}
-                                                            </p>
-                                                        </div>
-                                                    </div>
-                                                </div>
-
-                                                {/* Total Realized P&L */}
-                                                <div className="p-4 rounded-xl bg-white/5 border border-white/10">
-                                                    <div className="flex items-center gap-3">
-                                                        <div className={`p-3 rounded-lg ${parseFloat((status.total_realized_pnl || "0").replace(/[^0-9.-]/g, '')) >= 0
-                                                            ? 'bg-emerald-500/10'
-                                                            : 'bg-red-500/10'
-                                                            }`}>
-                                                            <Icons.dollarSign className={`w-5 h-5 ${parseFloat((status.total_realized_pnl || "0").replace(/[^0-9.-]/g, '')) >= 0
-                                                                ? 'text-emerald-400'
-                                                                : 'text-red-400'
-                                                                }`} />
-                                                        </div>
-                                                        <div className="flex-1">
-                                                            <p className="text-xs text-muted-foreground">Total Realized P&L</p>
-                                                            <p className={`text-lg font-bold tabular-nums ${parseFloat((status.total_realized_pnl || "0").replace(/[^0-9.-]/g, '')) >= 0
-                                                                ? 'text-emerald-400'
-                                                                : 'text-red-400'
-                                                                }`}>
-                                                                {formatCurrency(status.total_realized_pnl || "0")}
-                                                            </p>
-                                                        </div>
-                                                    </div>
-                                                </div>
-
-                                                {/* Day Realized P&L */}
-                                                <div className="p-4 rounded-xl bg-white/5 border border-white/10">
-                                                    <div className="flex items-center gap-3">
-                                                        <div className={`p-3 rounded-lg ${parseFloat((status.day_realized_pnl || "0").replace(/[^0-9.-]/g, '')) >= 0
-                                                            ? 'bg-emerald-500/10'
-                                                            : 'bg-red-500/10'
-                                                            }`}>
-                                                            <Icons.clock className={`w-5 h-5 ${parseFloat((status.day_realized_pnl || "0").replace(/[^0-9.-]/g, '')) >= 0
-                                                                ? 'text-emerald-400'
-                                                                : 'text-red-400'
-                                                                }`} />
-                                                        </div>
-                                                        <div className="flex-1">
-                                                            <p className="text-xs text-muted-foreground">Day Realized P&L</p>
-                                                            <p className={`text-lg font-bold tabular-nums ${parseFloat((status.day_realized_pnl || "0").replace(/[^0-9.-]/g, '')) >= 0
-                                                                ? 'text-emerald-400'
-                                                                : 'text-red-400'
-                                                                }`}>
-                                                                {formatCurrency(status.day_realized_pnl || "0")}
-                                                            </p>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            </div>
+                                        <div className="overflow-x-auto">
+                                            <table className="w-full text-left text-sm">
+                                                <thead className="border-b border-white/10 uppercase text-xs text-muted-foreground">
+                                                    <tr>
+                                                        <th className="px-4 py-3">Strategy</th>
+                                                        <th className="px-4 py-3">Status</th>
+                                                        <th className="px-4 py-3">Position</th>
+                                                        <th className="px-4 py-3 text-right">Unrealized P&L</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-white/5">
+                                                    {status.strategies && status.strategies.filter(s => s.running || (s.positions && s.positions.length > 0)).length > 0 ? (
+                                                        status.strategies.filter(s => s.running || (s.positions && s.positions.length > 0)).map((strategy) => (
+                                                            <tr key={strategy.id} className="hover:bg-white/5 transition-colors">
+                                                                <td className="px-4 py-3 font-medium">
+                                                                    <div className="flex items-center gap-2">
+                                                                        <span>{strategy.id}</span>
+                                                                    </div>
+                                                                </td>
+                                                                <td className="px-4 py-3">
+                                                                    <Badge variant={strategy.running ? "success" : "secondary"} className="text-[10px]">
+                                                                        {strategy.status || (strategy.running ? "RUNNING" : "STOPPED")}
+                                                                    </Badge>
+                                                                </td>
+                                                                <td className="px-4 py-3">
+                                                                    {strategy.positions && strategy.positions.length > 0 ? (
+                                                                        strategy.positions.map((pos, idx) => (
+                                                                            <div key={idx} className="text-xs">
+                                                                                <span className="font-semibold">{pos.symbol}</span>
+                                                                                <span className="ml-1 text-muted-foreground">
+                                                                                    ({pos.quantity > 0 ? '+' : ''}{pos.quantity})
+                                                                                </span>
+                                                                            </div>
+                                                                        ))
+                                                                    ) : (
+                                                                        <span className="text-muted-foreground text-xs">Flat</span>
+                                                                    )}
+                                                                </td>
+                                                                <td className="px-4 py-3 text-right">
+                                                                    {strategy.positions && strategy.positions.length > 0 ? (
+                                                                        strategy.positions.map((pos, idx) => (
+                                                                            <div key={idx} className={`tabular-nums font-medium ${pos.unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                                                                {formatCurrency(pos.unrealized_pnl)}
+                                                                            </div>
+                                                                        ))
+                                                                    ) : (
+                                                                        <span className="text-muted-foreground">-</span>
+                                                                    )}
+                                                                </td>
+                                                            </tr>
+                                                        ))
+                                                    ) : (
+                                                        <tr>
+                                                            <td colSpan={4} className="px-4 py-8 text-center text-muted-foreground">
+                                                                No active strategies
+                                                            </td>
+                                                        </tr>
+                                                    )}
+                                                </tbody>
+                                            </table>
                                         </div>
                                     </CardContent>
                                 </Card>
