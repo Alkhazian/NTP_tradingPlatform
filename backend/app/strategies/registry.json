@@ -11,16 +11,6 @@
         "comment": "Data Actor (uses Strategy infrastructure for plumbing)"
     },
     {
-        "strategy_type": "TslaOptionsIntervalStrategy",
-        "module": "app.strategies.implementations.Tesla_Options_Interval_Strategy",
-        "class_name": "TslaOptionsIntervalStrategy"
-    },
-    {
-        "strategy_type": "SPXZeroDTEScalper",
-        "module": "app.strategies.implementations.spx_0dte_scalper",
-        "class_name": "SPXZeroDTEScalper"
-    },
-    {
         "strategy_type": "Spxw0DteIntervalStrategy",
         "module": "app.strategies.implementations.SPXW_0DTE_interval_strategy",
         "class_name": "Spxw0DteIntervalStrategy"
@@ -44,5 +34,10 @@
         "strategy_type": "Orb15MinLongPutStrategy",
         "module": "app.strategies.implementations.ORB_15_Long_Put",
         "class_name": "Orb15MinLongPutStrategy"
+    },
+    {
+        "strategy_type": "MesOrbSimpleStrategy",
+        "module": "app.strategies.implementations.MES_ORB_simple_strategy",
+        "class_name": "MesOrbSimpleStrategy"
     }
 ]
