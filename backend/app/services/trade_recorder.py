@@ -123,35 +123,48 @@ class TradeRecorder:
         await self._run_query(query, (exit_time, exit_price, exit_reason, pnl, commission, raw_data, pnl, commission, pnl, commission, trade_id))
 
     async def get_trades_for_strategy(self, strategy_id: str, limit: int = 100) -> List[tuple]:
-        query = "SELECT * FROM trades WHERE strategy_id = ? ORDER BY entry_time DESC LIMIT ?"
-        return await self._run_query(query, (strategy_id, limit))
+        if limit > 0:
+            query = "SELECT * FROM trades WHERE strategy_id = ? ORDER BY entry_time DESC LIMIT ?"
+            return await self._run_query(query, (strategy_id, limit))
+        else:
+            query = "SELECT * FROM trades WHERE strategy_id = ? ORDER BY entry_time ASC"
+            return await self._run_query(query, (strategy_id,))
 
     async def get_strategy_stats(self, strategy_id: str) -> Dict[str, Any]:
         """
-        Calculate aggregate stats: Win Rate, Total PnL, Trade Count
+        Calculate aggregate stats: Win Rate, Total PnL, Trade Count, Max Win, Max Loss
         """
-        # Run multiple queries or one complex one.
-        # Let's count total trades, wins, and sum PnL
-        
         # We need realized trades (where exit_time IS NOT NULL)
         query = """
             SELECT 
                 COUNT(*) as total_trades,
                 SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as wins,
                 SUM(pnl) as total_pnl,
-                SUM(commission) as total_commission
+                SUM(commission) as total_commission,
+                MAX(pnl - commission) as max_win_net,
+                MIN(pnl - commission) as max_loss_net
             FROM trades 
             WHERE strategy_id = ? AND exit_time IS NOT NULL
         """
         result = await self._run_query(query, (strategy_id,))
         if not result or not result[0]:
-            return {"total_trades": 0, "win_rate": 0.0, "total_pnl": 0.0}
+            return {
+                "total_trades": 0, 
+                "win_rate": 0.0, 
+                "total_pnl": 0.0, 
+                "total_commission": 0.0,
+                "net_pnl": 0.0,
+                "max_win": 0.0,
+                "max_loss": 0.0
+            }
             
-        total, wins, pnl, comm = result[0]
+        total, wins, pnl, comm, max_win, max_loss = result[0]
         total = total or 0
         wins = wins or 0
         pnl = pnl or 0.0
         comm = comm or 0.0
+        max_win = max_win or 0.0
+        max_loss = max_loss or 0.0
         
         win_rate = (wins / total * 100) if total > 0 else 0.0
         net_pnl = pnl - comm
@@ -161,5 +174,7 @@ class TradeRecorder:
             "win_rate": round(win_rate, 2),
             "total_pnl": round(pnl, 2),
             "total_commission": round(comm, 2),
-            "net_pnl": round(net_pnl, 2)
+            "net_pnl": round(net_pnl, 2),
+            "max_win": round(max_win, 2),
+            "max_loss": round(max_loss, 2)
         }

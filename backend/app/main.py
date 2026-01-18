@@ -207,10 +207,15 @@ async def get_strategy_trades(strategy_id: str, limit: int = 100):
     trades = await recorder.get_trades_for_strategy(strategy_id, limit)
     
     # Convert tuples to dicts for JSON response
-    # Schema: id, strategy_id, instrument_id, entry_time, entry_price, exit_time, exit_price, exit_reason, trade_type, quantity, direction, pnl, raw_data
+    # Actual DB Schema finding: 
+    # 0:id, 1:strategy_id, 2:instrument_id, 3:entry_time, 4:entry_price, 5:exit_time, 
+    # 6:exit_price, 7:exit_reason, 8:trade_type, 9:quantity, 10:direction, 11:pnl, 
+    # 12:raw_data, 13:commission, 14:result
     result = []
     for t in trades:
-        result.append({
+        # Safety check for tuple length in case of schema drifts
+        t_len = len(t)
+        trade_dict = {
             "id": t[0],
             "strategy_id": t[1],
             "instrument_id": t[2],
@@ -223,8 +228,11 @@ async def get_strategy_trades(strategy_id: str, limit: int = 100):
             "quantity": t[9],
             "direction": t[10],
             "pnl": t[11],
-            "raw_data": t[12]
-        })
+            "raw_data": t[12] if t_len > 12 else None,
+            "commission": t[13] if t_len > 13 else 0.0,
+            "result": t[14] if t_len > 14 else None
+        }
+        result.append(trade_dict)
     return result
 
 @app.get("/strategies/{strategy_id}/stats")

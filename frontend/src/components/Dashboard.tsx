@@ -218,8 +218,8 @@ export default function Dashboard() {
                 <div className="p-4 md:p-8 space-y-6 md:space-y-8 max-w-[100vw] overflow-x-hidden">
                     {/* Header */}
                     <Header
-                        title={activeNav === 'strategies' ? "Strategy Management" : "Trader Dashboard"}
-                        subtitle={activeNav === 'strategies' ? "Configure and control automated trading strategies" : "Real-time portfolio monitoring & trading analytics"}
+                        title={activeNav === 'strategies' ? "Strategy Management" : activeNav === 'analytics' ? "Trade Analytics" : "Trader Dashboard"}
+                        subtitle={activeNav === 'strategies' ? "Configure and control automated trading strategies" : activeNav === 'analytics' ? "Performance metrics and trade history" : "Real-time portfolio monitoring & trading analytics"}
                         onMenuClick={() => setIsSidebarOpen(true)}
                     />
 
