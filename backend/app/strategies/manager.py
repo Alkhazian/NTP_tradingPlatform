@@ -268,8 +268,85 @@ class StrategyManager:
             "status": status_text, 
             "config": strategy.strategy_config.dict(),
             "state": state,
-            "metrics": metrics
+            "metrics": metrics,
+            "positions": self._get_strategy_positions(strategy)
         }
+
+    def _get_strategy_positions(self, strategy: BaseStrategy) -> list:
+        """
+        Get detailed position info for a strategy including manual PnL.
+        """
+        try:
+            # Strategies in current codebase use _get_open_position() for checks
+            # This logic mimics BaseStrategy._get_open_position but returns list format
+            pos = strategy._get_open_position()
+            if not pos:
+                return []
+            
+            # Extract basic data
+            # Determine side symbol explicitly as string for safety
+            side_str = "LONG" if pos.side.value == "LONG" else "SHORT"
+            if hasattr(pos, "side") and hasattr(pos.side, "name"):
+                side_str = pos.side.name # Use enum name if available
+                
+            qty = float(pos.quantity)
+            
+            # We want signed quantity for display in many UIs, but BaseStrategy usually tracks abs qty + SIDE
+            # Let's keep qty absolute here and let side field explain, or sign it?
+            # Standard convention: Long is +, Short is -
+            signed_qty = qty if side_str == "LONG" else -qty
+            
+            # Entry Price
+            # Try to get from strategy state first (most accurate for this strategy instance)
+            entry_price = 0.0
+            if hasattr(strategy, "_last_entry_price") and strategy._last_entry_price:
+                 entry_price = float(strategy._last_entry_price)
+            elif pos.avg_px_open:
+                 try: entry_price = float(pos.avg_px_open.as_double())
+                 except: entry_price = float(pos.avg_px_open)
+                 
+            # Current Price
+            current_price = 0.0
+            ticker = strategy.instrument_id
+            
+            # 1. Try Last Trade
+            last_trade = strategy.cache.trade_tick(ticker)
+            if last_trade:
+                current_price = float(last_trade.price)
+            else:
+                # 2. Try Last Bar
+                last_bar = strategy.cache.bar(ticker)
+                if last_bar:
+                     current_price = float(last_bar.close)
+                else:
+                    # 3. Try Quote Mid
+                    quote = strategy.cache.quote_tick(ticker)
+                    if quote:
+                         bid = float(quote.bid_price)
+                         ask = float(quote.ask_price)
+                         if bid > 0 and ask > 0:
+                             current_price = (bid + ask) / 2.0
+            
+            # Calculate Unrealized PnL
+            unrealized_pnl = 0.0
+            if current_price > 0 and entry_price > 0:
+                multiplier = float(strategy.instrument.multiplier) if strategy.instrument else 1.0
+                if side_str == "LONG":
+                    unrealized_pnl = (current_price - entry_price) * qty * multiplier
+                else:
+                    unrealized_pnl = (entry_price - current_price) * qty * multiplier
+            
+            return [{
+                "symbol": str(pos.instrument_id),
+                "side": side_str,
+                "quantity": signed_qty,
+                "entry_price": entry_price,
+                "current_price": current_price,
+                "unrealized_pnl": unrealized_pnl
+            }]
+        except Exception as e:
+            logger.error(f"Error getting positions for {strategy.strategy_id}: {e}")
+            return []
 
     async def get_all_strategies_status(self) -> list:
         # Fetch all statuses concurrently
