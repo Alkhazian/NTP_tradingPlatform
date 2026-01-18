@@ -14,7 +14,7 @@ from abc import abstractmethod
 from typing import Dict, Any, Optional, List, Callable
 from datetime import timedelta
 from decimal import Decimal
-import asyncio
+
 
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.identifiers import InstrumentId, Venue
@@ -111,44 +111,64 @@ class SPXBaseStrategy(BaseStrategy):
                 }
             )
             
-            # Start fallback polling mechanism
-            asyncio.create_task(self._wait_for_spx_and_subscribe())
+            # BACKTEST-SAFE: Use clock.set_time_alert() instead of asyncio for polling
+            # This ensures polling uses simulated time in backtest mode, not wall-clock time
+            self.clock.set_time_alert(
+                name=f"{self.id}_spx_poll",
+                alert_time=self.clock.utc_now() + timedelta(seconds=1),
+                callback=self._poll_spx_availability,
+            )
+            self._spx_poll_attempt = 1
     
-    async def _wait_for_spx_and_subscribe(self):
+    def _poll_spx_availability(self, event):
         """
-        Fallback polling to ensure SPX subscription if on_instrument doesn't fire immediately.
+        Backtest-safe polling method using clock.set_time_alert().
         
-        Polls cache for up to 30 seconds waiting for SPX instrument to be available.
+        Uses simulated time (data time) rather than wall-clock time,
+        ensuring correct behavior in both live and backtest environments.
+        
+        Args:
+            event: Timer event from clock.set_time_alert()
         """
-        self.logger.info("Starting SPX availability polling (30s timeout)")
+        # Already subscribed (via on_instrument) - stop polling
+        if self.spx_subscribed:
+            return
         
-        for attempt in range(30):
-            # Check if SPX is now in cache
-            self.spx_instrument = self.cache.instrument(self.spx_instrument_id)
-            
-            if self.spx_instrument:
-                self.logger.info(f"SPX instrument found via polling (attempt {attempt + 1}), subscribing...")
-                
-                # Subscribe to quote ticks
-                self.subscribe_quote_ticks(self.spx_instrument_id)
-                self.spx_subscribed = True
-                
-                # Notify strategy that SPX is ready
-                try:
-                    self.on_spx_ready()
-                except Exception as e:
-                    self.on_unexpected_error(e)
-                
-                return
-            
-            # Wait 1 second before next attempt
-            await asyncio.sleep(1)
+        attempt = self._spx_poll_attempt
         
-        # Timeout - SPX not available
-        self.logger.error(
-            f"Timeout waiting for SPX instrument {self.spx_instrument_id} from IB. "
-            "Strategy may not function correctly."
-        )
+        # Check if SPX is now in cache
+        self.spx_instrument = self.cache.instrument(self.spx_instrument_id)
+        
+        if self.spx_instrument:
+            self.logger.info(f"SPX instrument found via polling (attempt {attempt}), subscribing...")
+            
+            # Subscribe to quote ticks
+            self.subscribe_quote_ticks(self.spx_instrument_id)
+            self.spx_subscribed = True
+            
+            # Notify strategy that SPX is ready
+            try:
+                self.on_spx_ready()
+            except Exception as e:
+                self.on_unexpected_error(e)
+            return
+        
+        # If not found and attempts not exhausted (30 attempts = 30 simulated seconds)
+        if attempt < 30:
+            self._spx_poll_attempt = attempt + 1
+            
+            # Schedule next poll using simulated time (not wall-clock!)
+            self.clock.set_time_alert(
+                name=f"{self.id}_spx_poll",
+                alert_time=self.clock.utc_now() + timedelta(seconds=1),
+                callback=self._poll_spx_availability,
+            )
+        else:
+            # Timeout - SPX not available after 30 simulated seconds
+            self.logger.error(
+                f"Timeout waiting for SPX instrument {self.spx_instrument_id} from IB. "
+                "Strategy may not function correctly."
+            )
     
     # =========================================================================
     # SPX TICK HANDLING
