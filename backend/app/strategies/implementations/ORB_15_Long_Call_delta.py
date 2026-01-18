@@ -441,7 +441,8 @@ class Orb15MinLongCallDeltaStrategy(BaseStrategy):
                 contracts.append({
                     "secType": "OPT",
                     "symbol": "SPX",
-                    "exchange": "SMART",
+                    "tradingClass": "SPXW",
+                    "exchange": "CBOE",
                     "currency": "USD",
                     "lastTradeDateOrContractMonth": expiry_date_ib,
                     "strike": float(strike),

@@ -4,18 +4,22 @@ SPXBaseStrategy - Base class for all SPX-related strategies
 Provides:
 - Unified SPX instrument subscription with fallback mechanism
 - SPX price tracking and tick handling
+- Option search by premium (target price)
 - State persistence for SPX subscription status
 - Abstract methods for strategy-specific SPX logic
 - Proper resource cleanup on stop
 """
 
 from abc import abstractmethod
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List, Callable
+from datetime import timedelta
+from decimal import Decimal
 import asyncio
 
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.identifiers import InstrumentId, Venue
 from nautilus_trader.model.instruments import Instrument
+from nautilus_trader.model.enums import OptionKind
 
 from .base import BaseStrategy
 
@@ -146,31 +150,6 @@ class SPXBaseStrategy(BaseStrategy):
             "Strategy may not function correctly."
         )
     
-    def on_instrument(self, instrument: Instrument):
-        """
-        Called when instrument data is received.
-        Handles SPX instrument addition.
-        
-        Args:
-            instrument: Instrument that was added
-        """
-        # Let parent handle primary instrument
-        super().on_instrument(instrument)
-        
-        # Check if this is the SPX instrument
-        if instrument.id == self.spx_instrument_id and not self.spx_subscribed:
-            self.logger.info(f"SPX instrument received via on_instrument: {instrument.id}")
-            
-            self.spx_instrument = instrument
-            self.subscribe_quote_ticks(self.spx_instrument_id)
-            self.spx_subscribed = True
-            
-            # Notify strategy that SPX is ready
-            try:
-                self.on_spx_ready()
-            except Exception as e:
-                self.on_unexpected_error(e)
-    
     # =========================================================================
     # SPX TICK HANDLING
     # =========================================================================
@@ -260,6 +239,273 @@ class SPXBaseStrategy(BaseStrategy):
             f"SPX state restored: price={self.current_spx_price:.2f}, "
             f"subscribed={self.spx_subscribed}"
         )
+    
+    # =========================================================================
+    # OPTION SEARCH BY PREMIUM
+    # =========================================================================
+    
+    def find_option_by_premium(
+        self,
+        target_premium: float,
+        option_kind: OptionKind,
+        expiry_date: Optional[str] = None,
+        strike_range: int = 7,
+        strike_step: int = 5,
+        max_spread: Optional[float] = None,
+        selection_delay_seconds: float = 2.0,
+        callback: Optional[Callable[[Optional[Instrument], Optional[Dict]], None]] = None
+    ):
+        """
+        Search for SPX options by target premium (option price).
+        
+        This method requests multiple strikes around ATM, collects quotes,
+        and finds the option with price closest to target premium.
+        
+        Args:
+            target_premium: Target option price (e.g., 4.0 for $4 option)
+            option_kind: OptionKind.CALL or OptionKind.PUT
+            expiry_date: Expiry date in YYYYMMDD format, default today (0DTE)
+            strike_range: Number of strikes to request (default 7)
+            strike_step: Step between strikes in points (default 5)
+            max_spread: Maximum allowed bid-ask spread, None = no filter
+            selection_delay_seconds: Delay before selecting best option (default 2.0)
+            callback: Function to call with (selected_option, option_data) or (None, None) if failed
+        
+        Returns:
+            None - results delivered via callback
+            
+        Example:
+            self.find_option_by_premium(
+                target_premium=4.0,
+                option_kind=OptionKind.CALL,
+                max_spread=0.20,
+                callback=self._on_option_found
+            )
+        """
+        if self.current_spx_price == 0:
+            self.logger.error("Cannot search for options: SPX price not available")
+            if callback:
+                callback(None, None)
+            return
+        
+        # Initialize search state
+        self._premium_search_state = {
+            'target_premium': target_premium,
+            'option_kind': option_kind,
+            'max_spread': max_spread,
+            'callback': callback,
+            'received_options': [],
+            'active': True
+        }
+        
+        # Calculate ATM strike (round to nearest 5)
+        atm_strike = round(self.current_spx_price / strike_step) * strike_step
+        
+        # Calculate strike range
+        half_range = strike_range // 2
+        if option_kind == OptionKind.CALL:
+            # For calls: request ATM and OTM strikes
+            strikes = [atm_strike + (i * strike_step) for i in range(strike_range)]
+        else:
+            # For puts: request ATM and ITM strikes
+            strikes = [atm_strike - (i * strike_step) for i in range(strike_range)]
+        
+        # Get expiry date (default today for 0DTE)
+        if expiry_date is None:
+            expiry_date = self.clock.utc_now().date().strftime("%Y%m%d")
+        
+        right = "C" if option_kind == OptionKind.CALL else "P"
+        
+        self.logger.info(
+            f"🔍 Searching for {option_kind.name} option with premium ~${target_premium:.2f}\n"
+            f"   ATM Strike: ${atm_strike:.0f}, Strikes: {strikes}\n"
+            f"   Expiry: {expiry_date}, Max Spread: ${max_spread if max_spread else 'N/A'}"
+        )
+        
+        # Build option contracts to request
+        contracts = []
+        for strike in strikes:
+            contracts.append({
+                "secType": "OPT",
+                "symbol": "SPX",
+                "tradingClass": "SPXW",
+                "exchange": "CBOE",
+                "currency": "USD",
+                "lastTradeDateOrContractMonth": expiry_date,
+                "strike": float(strike),
+                "right": right,
+                "multiplier": "100"
+            })
+        
+        try:
+            self.request_instruments(
+                venue=Venue("InteractiveBrokers"),
+                params={"ib_contracts": contracts}
+            )
+            
+            self.logger.info(f"✅ Requested {len(contracts)} SPX {option_kind.name} options")
+            
+            # Set timer to select best option after delay
+            timer_name = f"{self.id}.select_premium_option"
+            try:
+                self.clock.cancel_timer(timer_name)
+            except Exception:
+                pass
+            
+            self.clock.set_time_alert(
+                name=timer_name,
+                alert_time=self.clock.utc_now() + timedelta(seconds=selection_delay_seconds),
+                callback=self._on_premium_search_complete
+            )
+            
+        except Exception as e:
+            self.logger.error(f"❌ Failed to request options: {e}", exc_info=True)
+            if callback:
+                callback(None, None)
+    
+    def _handle_option_for_premium_search(self, instrument: Instrument):
+        """
+        Internal handler for options received during premium search.
+        Called from on_instrument().
+        
+        Args:
+            instrument: Received option instrument
+        """
+        if not hasattr(self, '_premium_search_state') or not self._premium_search_state.get('active'):
+            return
+        
+        # Check if this is the option type we're looking for
+        if not hasattr(instrument, 'option_kind'):
+            return
+        
+        if instrument.option_kind != self._premium_search_state['option_kind']:
+            return
+        
+        self.logger.debug(f"Received option for premium search: {instrument.id}")
+        
+        # Subscribe to quotes for this option
+        self.subscribe_quote_ticks(instrument.id)
+        
+        # Add to received options
+        self._premium_search_state['received_options'].append(instrument)
+    
+    def _on_premium_search_complete(self, timer_event):
+        """
+        Timer callback to select best option after receiving options.
+        Finds option with price closest to target premium.
+        """
+        if not hasattr(self, '_premium_search_state') or not self._premium_search_state.get('active'):
+            return
+        
+        state = self._premium_search_state
+        state['active'] = False  # Mark search complete
+        
+        received_options = state['received_options']
+        target_premium = state['target_premium']
+        max_spread = state['max_spread']
+        callback = state['callback']
+        
+        if not received_options:
+            self.logger.warning("No options received for premium search")
+            if callback:
+                callback(None, None)
+            return
+        
+        self.logger.info(f"Selecting from {len(received_options)} received options")
+        
+        # Collect quotes for all options
+        option_prices = []
+        
+        for option in received_options:
+            quote = self.cache.quote_tick(option.id)
+            
+            if not quote:
+                continue
+            
+            bid = quote.bid_price.as_double()
+            ask = quote.ask_price.as_double()
+            
+            if bid <= 0 or ask <= 0:
+                continue
+            
+            mid = (bid + ask) / 2
+            spread = ask - bid
+            
+            # Apply spread filter if specified
+            if max_spread is not None and spread > max_spread:
+                self.logger.debug(
+                    f"  Strike ${float(option.strike_price.as_double()):.0f}: "
+                    f"SKIPPED (spread ${spread:.2f} > max ${max_spread:.2f})"
+                )
+                continue
+            
+            option_data = {
+                'option': option,
+                'bid': bid,
+                'ask': ask,
+                'mid': mid,
+                'spread': spread,
+                'strike': float(option.strike_price.as_double())
+            }
+            option_prices.append(option_data)
+            
+            self.logger.info(
+                f"  Strike ${option_data['strike']:.0f}: "
+                f"Mid=${mid:.2f}, Spread=${spread:.2f}"
+            )
+        
+        if not option_prices:
+            self.logger.warning("No valid option quotes available after filtering")
+            if callback:
+                callback(None, None)
+            return
+        
+        # Find option closest to target premium
+        best_option_data = min(
+            option_prices,
+            key=lambda x: abs(x['mid'] - target_premium)
+        )
+        
+        selected_option = best_option_data['option']
+        
+        self.logger.info(
+            f"✅ Selected: Strike ${best_option_data['strike']:.0f}, "
+            f"Mid=${best_option_data['mid']:.2f} "
+            f"(target: ${target_premium:.2f}), "
+            f"Spread=${best_option_data['spread']:.2f}"
+        )
+        
+        # Call callback with result
+        if callback:
+            callback(selected_option, best_option_data)
+    
+    def on_instrument(self, instrument: Instrument):
+        """
+        Called when instrument data is received.
+        Handles SPX instrument and option search.
+        
+        Args:
+            instrument: Instrument that was added
+        """
+        # Let parent handle primary instrument
+        super().on_instrument(instrument)
+        
+        # Check if this is the SPX instrument
+        if instrument.id == self.spx_instrument_id and not self.spx_subscribed:
+            self.logger.info(f"SPX instrument received via on_instrument: {instrument.id}")
+            
+            self.spx_instrument = instrument
+            self.subscribe_quote_ticks(self.spx_instrument_id)
+            self.spx_subscribed = True
+            
+            # Notify strategy that SPX is ready
+            try:
+                self.on_spx_ready()
+            except Exception as e:
+                self.on_unexpected_error(e)
+        
+        # Handle options for premium search
+        self._handle_option_for_premium_search(instrument)
     
     # =========================================================================
     # ABSTRACT METHODS - Must be implemented by strategies
