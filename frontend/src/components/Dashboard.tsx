@@ -80,8 +80,7 @@ export default function Dashboard() {
         day_realized_pnl: "0.0 USD",
         recent_trades: []
     });
-    const [spxPrice, setSpxPrice] = useState(0);
-    const [spxLogs, setSpxLogs] = useState<any[]>([]);
+
 
     //const [activeNav, setActiveNav] = useState('logs');
     const [activeNav, setActiveNav] = useState('dashboard');
@@ -120,11 +119,8 @@ export default function Dashboard() {
                 if (data.type === 'system_status' || !data.type) {
                     // Default assumption for now if type missing, or explicit system_status
                     setStatus(prev => ({ ...prev, ...data }));
-                } else if (data.type === 'spx_price') {
-                    setSpxPrice(data.price);
-                } else if (data.type === 'spx_log') {
-                    setSpxLogs(prev => [data, ...prev].slice(0, 100));
                 }
+                // SPX price and log handlers removed - not used in Dashboard
             } catch (e) {
                 console.error("Parse error", e);
             }
@@ -175,7 +171,7 @@ export default function Dashboard() {
         }
     ];
 
-    const isSpxStreaming = status.strategies?.some(s => s.id === 'spx-streamer-01' && s.running) || false;
+
 
     return (
         <div className="min-h-screen bg-background">
@@ -226,7 +222,7 @@ export default function Dashboard() {
                     {activeNav === 'strategies' ? (
                         <Strategies />
                     ) : activeNav === 'analytics' ? (
-                        <Analytics spxPrice={spxPrice} spxLogs={spxLogs} isStreaming={isSpxStreaming} />
+                        <Analytics />
                     ) : activeNav === 'logs' ? (
                         <LogViewer />
                     ) : (

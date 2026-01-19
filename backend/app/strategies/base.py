@@ -615,6 +615,7 @@ class BaseStrategy(Strategy):
     async def _start_trade_record_async(self, event):
         """Async handler for starting trade record."""
         if not self._integration_manager:
+            self.logger.warning("No integration manager available to start trade record")
             return
         
         try:
@@ -623,6 +624,7 @@ class BaseStrategy(Strategy):
                 direction = "LONG" if event.order_side == OrderSide.BUY else "SHORT"
                 commission = float(event.commission) if hasattr(event, 'commission') else 0.0
                 
+                self.logger.info(f"Initiating trade record for {self.strategy_id} ({direction})")
                 self.active_trade_id = await recorder.start_trade(
                     strategy_id=self.strategy_id,
                     instrument_id=str(self.instrument_id),
@@ -635,13 +637,20 @@ class BaseStrategy(Strategy):
                     trade_type="DAYTRADE"
                 )
                 self.save_state()
-                self.logger.info(f"Trade record started: {self.active_trade_id}")
+                self.logger.info(f"Trade record started: ID={self.active_trade_id}")
+            else:
+                self.logger.warning("No trade recorder found on integration manager")
         except Exception as e:
-            self.logger.error(f"Failed to start trade record: {e}")
+            self.logger.error(f"Failed to start trade record: {e}", exc_info=True)
 
     async def _close_trade_record_async(self, event):
         """Async handler for closing trade record."""
-        if not self._integration_manager or self.active_trade_id is None:
+        if not self._integration_manager:
+            self.logger.warning("No integration manager available to close trade record")
+            return
+            
+        if self.active_trade_id is None:
+            self.logger.warning("Cannot close trade record: active_trade_id is None")
             return
         
         try:
@@ -663,6 +672,7 @@ class BaseStrategy(Strategy):
                 commission = float(event.commission) if hasattr(event, 'commission') else 0.0
                 exit_reason = getattr(self, '_last_exit_reason', 'UNKNOWN')
                 
+                self.logger.info(f"Closing trade record ID={self.active_trade_id} for {self.strategy_id}")
                 await recorder.close_trade(
                     trade_id=self.active_trade_id,
                     exit_time=self.clock.utc_now().isoformat(),
@@ -673,11 +683,13 @@ class BaseStrategy(Strategy):
                     raw_data=str(event)
                 )
                 
-                self.logger.info(f"Trade record closed: {self.active_trade_id}, PnL: {pnl}")
+                self.logger.info(f"Trade record closed: {self.active_trade_id}, PnL: {pnl:.2f}")
                 self.active_trade_id = None
                 self.save_state()
+            else:
+                self.logger.warning("No trade recorder found on integration manager")
         except Exception as e:
-            self.logger.error(f"Failed to close trade record: {e}")
+            self.logger.error(f"Failed to close trade record: {e}", exc_info=True)
 
     async def _start_trade_record_from_position_async(self, position: Position):
         """Async handler for starting trade record from a reconciled position."""

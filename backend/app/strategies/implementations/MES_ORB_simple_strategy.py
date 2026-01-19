@@ -262,7 +262,7 @@ class MesOrbSimpleStrategy(BaseStrategy):
             quantity=self.instrument.make_qty(self.strategy_config.order_size)
         )
         
-        self.submit_order(order)
+        self.submit_entry_order(order)
         self.logger.info(
             f"Entered {side.name} at {entry_price:.2f}, "
             f"stop at {self.stop_price:.2f} ({self.initial_stop_points} pts)"
