@@ -274,17 +274,16 @@ class BaseStrategy(Strategy):
         Calculates Net Quantity across all venues for the symbol to handle 
         offsetting ghost positions (e.g. LONG on CME-EXTERNAL and SHORT on CME).
         """
-        exact_positions = self.cache.positions_open(instrument_id=self.instrument_id)
-        
-        # Check all positions for this symbol
-        symbol = str(self.instrument_id.symbol)
-        all_positions = self.cache.positions_open()
+        # Symbol to match (e.g., MESH6)
+        target_symbol = str(self.instrument_id.symbol)
+        all_open_positions = self.cache.positions_open()
         
         symbol_positions = []
         net_qty = 0.0
         
-        for pos in all_positions:
-            if str(pos.instrument_id.symbol) == symbol:
+        for pos in all_open_positions:
+            # Check if symbol matches (fuzzy match for venue-specific IDs)
+            if str(pos.instrument_id.symbol) == target_symbol:
                 symbol_positions.append(pos)
                 qty = float(pos.quantity)
                 if pos.side == PositionSide.LONG:
@@ -295,24 +294,27 @@ class BaseStrategy(Strategy):
         if not symbol_positions:
             return None
             
-        # If net quantity is zero, we are effectively flat
-        if abs(net_qty) < 1e-9: # Floating point safety
-            if len(symbol_positions) > 1:
-                self.logger.info(
-                    f"Net position for {symbol} is 0.0 across {len(symbol_positions)} offsetting positions. "
-                    "Treating as FLAT."
+        # If net quantity is effectively zero, we are flat
+        if abs(net_qty) < 1e-6: # Conservative floating point safety
+            if len(symbol_positions) > 0:
+                self.logger.debug(
+                    f"Net position for {target_symbol} is negligible ({net_qty:.8f}) "
+                    f"across {len(symbol_positions)} positions. Treating as FLAT."
                 )
             return None
             
-        # If we have an exact match, prefer returning that one
-        if exact_positions:
-            return exact_positions[0]
+        # We have a non-zero net position. 
+        # Prefer the position that exactly matches our instrument_id if possible
+        exact_match = next((p for p in symbol_positions if p.instrument_id == self.instrument_id), None)
+        if exact_match:
+            return exact_match
             
-        # Otherwise return the first fuzzy match (which we now know has non-zero net)
-        pos = symbol_positions[0]
+        # Otherwise return the largest matching position as a proxy
+        sorted_pos = sorted(symbol_positions, key=lambda x: float(x.quantity), reverse=True)
+        pos = sorted_pos[0]
         self.logger.info(
             f"Fuzzy matched position {pos.instrument_id} for strategy instrument {self.instrument_id} "
-            f"(Net Symbol Qty: {net_qty})"
+            f"(Net Symbol Qty: {net_qty:.4f})"
         )
         return pos
 

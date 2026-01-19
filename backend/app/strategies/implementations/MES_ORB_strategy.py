@@ -154,19 +154,19 @@ class MesOrbStrategy(BaseStrategy):
             self._calculate_opening_range()
         
         # Check for entry if OR is complete and no trade today
-        if self.or_complete and not self.traded_today and not self._has_open_position:
+        if self.or_complete and not self.traded_today and not self._has_open_position():
             self._check_entry(bar)
         
         # SOFTWARE STOP: Check if stop is triggered
-        if self._has_open_position and self.stop_price is not None:
+        if self._has_open_position() and self.stop_price is not None:
             self._check_stop_triggered(bar)
         
         # Update trailing stop level (just the price, no orders)
-        if self._has_open_position and self.stop_price is not None:
+        if self._has_open_position() and self.stop_price is not None:
             self._update_trailing_stop_level(bar)
         
         # Force exit at 15:55 if day trade
-        if bar_time_et >= self.exit_time and self._has_open_position and not self.is_overnight_hold:
+        if bar_time_et >= self.exit_time and self._has_open_position() and not self.is_overnight_hold:
             self.logger.info("Forcing exit at 15:55 ET (day trade)")
             self._exit_position("END_OF_DAY")
     
@@ -181,7 +181,7 @@ class MesOrbStrategy(BaseStrategy):
         self.current_trade_date = trade_date
         
         # If holding overnight position, exit at open
-        if self.is_overnight_hold and self._has_open_position:
+        if self.is_overnight_hold and self._has_open_position():
             self.logger.info("Exiting overnight position at market open")
             self._exit_position("OVERNIGHT_CLOSE")
             self.is_overnight_hold = False
@@ -376,17 +376,6 @@ class MesOrbStrategy(BaseStrategy):
             return price_above_ema and adx_strong
         
         return False
-    
-    @property
-    def _has_open_position(self) -> bool:
-        """Check if strategy has an open position."""
-        position = self._get_open_position()
-        return position is not None and not position.is_closed
-    
-    def _get_open_position(self) -> Optional[Position]:
-        """Get current open position for this instrument."""
-        positions = self.cache.positions_open(instrument_id=self.instrument_id)
-        return positions[0] if positions else None
     
     def on_order_filled(self, event):
         """Handle order fills - sync position side from actual fill."""

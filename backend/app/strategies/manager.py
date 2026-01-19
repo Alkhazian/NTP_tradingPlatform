@@ -283,6 +283,14 @@ class StrategyManager:
             if not pos:
                 return []
             
+            # DEFENSIVE: If the strategy doesn't think it has an active trade, 
+            # and it's not currently in the middle of a transition (pending orders),
+            # then the position might belong to another strategy sharing the instrument.
+            if not strategy.active_trade_id and not strategy._pending_entry_orders and not strategy._pending_exit_orders:
+                # We log this at debug level to avoid spamming, but it indicates the "leak" prevention working
+                logger.debug(f"Strategy {strategy.strategy_id} 'sees' position for {pos.instrument_id} but has no active trade record. Filtering out.")
+                return []
+
             # Extract basic data
             # Determine side symbol explicitly as string for safety
             side_str = "LONG" if pos.side.value == "LONG" else "SHORT"
