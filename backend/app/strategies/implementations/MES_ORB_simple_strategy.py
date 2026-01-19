@@ -133,17 +133,17 @@ class MesOrbSimpleStrategy(BaseStrategy):
         # During trading window (9:50 - 15:45)
         if self.or_complete and self.trade_start_time <= bar_time_et < self.exit_time:
             # Track breakouts and retests
-            if not self.traded_today and not self._has_open_position():
+            if not self.traded_today and not self._is_position_owned():
                 self._track_breakout_retest(bar)
                 self._check_entry(bar)
             
             # Manage stops if in position
-            if self._has_open_position() and self.stop_price is not None:
+            if self._is_position_owned() and self.stop_price is not None:
                 self._check_stop_triggered(bar)
                 self._update_trailing_stop(bar)
         
         # Force exit at 15:45
-        if bar_time_et >= self.exit_time and self._has_open_position():
+        if bar_time_et >= self.exit_time and self._is_position_owned():
             self.logger.info("Forcing exit at 15:45 ET")
             self._exit_position("END_OF_DAY")
     

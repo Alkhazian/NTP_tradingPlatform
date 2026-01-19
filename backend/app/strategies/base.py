@@ -684,6 +684,14 @@ class BaseStrategy(Strategy):
         """Check if there's an open position (source of truth: portfolio)."""
         return self._get_open_position() is not None
 
+    def _is_position_owned(self) -> bool:
+        """
+        Check if the strategy currently owns a trade record.
+        This is the preferred way to check for position status when multiple 
+        strategies share the same instrument.
+        """
+        return self.active_trade_id is not None
+
     def _get_open_position(self) -> Optional[Position]:
         """
         Get the open position if it exists.
