@@ -109,8 +109,8 @@ class MesOrbStrategy(BaseStrategy):
             return
         
         # Create bar types
-        self.bar_type_1min = BarType.from_str(f"{self.instrument_id}-1-MINUTE-LAST-INTERNAL")
-        self.bar_type_30min = BarType.from_str(f"{self.instrument_id}-30-MINUTE-LAST-INTERNAL")
+        self.bar_type_1min = BarType.from_str(f"{self.instrument_id}-1-MINUTE-LAST-EXTERNAL")
+        self.bar_type_30min = BarType.from_str(f"{self.instrument_id}-30-MINUTE-LAST-EXTERNAL")
         
         # Initialize indicators
         self.atr = AverageTrueRange(self.atr_period)

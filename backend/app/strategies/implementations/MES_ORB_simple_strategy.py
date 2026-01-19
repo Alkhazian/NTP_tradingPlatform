@@ -94,7 +94,7 @@ class MesOrbSimpleStrategy(BaseStrategy):
             return
         
         # Create bar type
-        self.bar_type_1min = BarType.from_str(f"{self.instrument_id}-1-MINUTE-LAST-INTERNAL")
+        self.bar_type_1min = BarType.from_str(f"{self.instrument_id}-1-MINUTE-LAST-EXTERNAL")
         
         # Subscribe to bars
         self.subscribe_bars(self.bar_type_1min)
