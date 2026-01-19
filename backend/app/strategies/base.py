@@ -10,7 +10,7 @@ Phase 1: Enhanced Base Strategy - Maximum Nautilus Integration
 """
 
 from abc import abstractmethod
-from typing import Dict, Any, Optional, Set
+from typing import Dict, Any, Optional, Set, List, Tuple
 from datetime import datetime, timedelta
 import traceback
 import logging
@@ -18,7 +18,8 @@ import logging
 from nautilus_trader.trading.strategy import Strategy
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.model.identifiers import ClientOrderId, InstrumentId, Venue
-from nautilus_trader.model.enums import OrderSide, PositionSide, OrderStatus
+from nautilus_trader.model.enums import OrderSide, PositionSide, OrderStatus, TimeInForce
+from nautilus_trader.model.objects import Quantity
 from nautilus_trader.model.orders import Order
 from nautilus_trader.model.position import Position
 from nautilus_trader.common.enums import ComponentState
@@ -85,6 +86,12 @@ class BaseStrategy(Strategy):
         self._last_entry_price: Optional[float] = None
         self._last_entry_qty: Optional[float] = None
         
+        # Spread support
+        self.spread_id: Optional[InstrumentId] = None
+        self.spread_instrument: Optional[Instrument] = None
+        self._spread_legs: List[Tuple[InstrumentId, int]] = []
+        self._waiting_for_spread: bool = False
+        
         # Trade persistence
         self.active_trade_id: Optional[int] = None
 
@@ -131,11 +138,24 @@ class BaseStrategy(Strategy):
             )
 
     def on_instrument(self, instrument: Instrument):
-        """Called when instrument data is received."""
+        """Called when instrument data is received (including spreads)."""
+        # Check if this is our primary instrument
         if instrument.id == self.instrument_id:
             self.logger.info(f"Instrument received: {instrument.id}")
             self.instrument = instrument
             self._on_instrument_ready()
+        
+        # Check if this is our spread instrument
+        elif self._waiting_for_spread and self.spread_id and instrument.id == self.spread_id:
+            self.spread_instrument = instrument
+            self._waiting_for_spread = False
+            self.logger.info(f"Spread instrument loaded successfully: {instrument.id}")
+            
+            # Subscribe to spread quotes (spreads often only have Bid/Ask, not trades)
+            self.subscribe_quote_ticks(instrument.id)
+            
+            # Call hook for derived strategies
+            self.on_spread_ready(instrument)
 
     def _on_instrument_ready(self):
         """Called when instrument is confirmed available."""
@@ -226,6 +246,207 @@ class BaseStrategy(Strategy):
             self.on_resume_safe()
         except Exception as e:
             self.on_unexpected_error(e)
+
+    # =========================================================================
+    # SPREAD MANAGEMENT (Option Spreads / Combos)
+    # =========================================================================
+
+    def create_and_request_spread(
+        self, 
+        legs_config: List[Tuple[str, int]], 
+        timeout_seconds: int = 30
+    ) -> Optional[InstrumentId]:
+        """
+        Create a spread identifier and request it from the data provider/broker.
+        
+        This method generates a deterministic spread ID from the leg configuration
+        and requests the spread instrument from the broker (e.g., IBKR will create
+        a SecurityType.BAG combo contract).
+        
+        Args:
+            legs_config: List of tuples (InstrumentId string, ratio).
+                         Positive ratio = buy leg on spread buy
+                         Negative ratio = sell leg on spread buy
+                         Example: [("SPY C400.SMART", 1), ("SPY P390.SMART", -1)]
+            timeout_seconds: Timeout for waiting for the spread instrument.
+            
+        Returns:
+            The generated spread InstrumentId, or None if creation failed.
+            
+        Note:
+            The spread instrument is not immediately available. Listen for
+            `on_spread_ready(instrument)` callback to know when it's ready.
+        """
+        try:
+            # Import the spread ID generator
+            from nautilus_trader.model.identifiers import new_generic_spread_id
+            
+            # Convert string leg IDs to InstrumentId objects with ratios
+            self._spread_legs = [
+                (InstrumentId.from_str(leg_id_str), ratio) 
+                for leg_id_str, ratio in legs_config
+            ]
+            
+            # Generate deterministic spread ID from legs
+            self.spread_id = new_generic_spread_id(self._spread_legs)
+            self._waiting_for_spread = True
+            
+            self.logger.info(
+                f"Generated Spread ID: {self.spread_id} "
+                f"with {len(self._spread_legs)} legs"
+            )
+            
+            # Log leg details
+            for leg_id, ratio in self._spread_legs:
+                action = "BUY" if ratio > 0 else "SELL"
+                self.logger.info(f"  Leg: {leg_id} -> {action} x{abs(ratio)}")
+            
+            # Request the spread instrument from the broker (async)
+            # For IBKR, this triggers creation of a BAG (combo) contract
+            self.request_instrument(self.spread_id)
+            
+            # Set timeout for spread availability
+            self.clock.set_time_alert(
+                name=f"{self.id}.spread_timeout",
+                alert_time=self.clock.utc_now() + timedelta(seconds=timeout_seconds),
+                callback=self._on_spread_timeout
+            )
+            
+            return self.spread_id
+            
+        except Exception as e:
+            self.logger.error(f"Error creating spread: {e}")
+            self._waiting_for_spread = False
+            return None
+
+    def _on_spread_timeout(self, alert):
+        """Handle spread instrument request timeout."""
+        if self._waiting_for_spread and self.spread_id:
+            self._waiting_for_spread = False
+            self.logger.error(
+                f"Timeout waiting for spread instrument {self.spread_id}. "
+                "Spread trading will not be available."
+            )
+
+    def on_spread_ready(self, instrument: Instrument):
+        """
+        Called when the spread instrument is confirmed available.
+        Override in derived strategies to implement spread trading logic.
+        
+        Args:
+            instrument: The loaded spread instrument with all contract details.
+        """
+        pass
+
+    def open_spread_position(
+        self, 
+        quantity: float, 
+        is_buy: bool = True,
+        limit_price: Optional[float] = None,
+        time_in_force: TimeInForce = TimeInForce.DAY
+    ) -> bool:
+        """
+        Open a position on the spread as a single atomic trade.
+        
+        This submits an order for the entire spread, not individual legs.
+        The broker (e.g., IBKR) guarantees atomic execution - all legs fill
+        together or none do, eliminating leg risk.
+        
+        Args:
+            quantity: Number of spread units to trade.
+            is_buy: True for buy spread, False for sell spread.
+            limit_price: Optional limit price. Recommended for spreads
+                        as market orders may get poor fills.
+            time_in_force: Order time in force (default: DAY).
+            
+        Returns:
+            True if order was submitted, False otherwise.
+            
+        Note:
+            For spreads, LIMIT orders are strongly recommended over MARKET
+            orders to avoid poor execution on illiquid combinations.
+        """
+        if not self.spread_instrument:
+            self.logger.error("Cannot trade spread: instrument not loaded yet.")
+            return False
+            
+        if not self._functional_ready:
+            self.logger.error("Cannot trade spread: strategy not ready.")
+            return False
+
+        side = OrderSide.BUY if is_buy else OrderSide.SELL
+        
+        # Create proper Quantity using instrument specs (precision, lot size)
+        qty = self.spread_instrument.make_qty(quantity)
+
+        # Create order - prefer LIMIT for spreads
+        if limit_price is not None:
+            price = self.spread_instrument.make_price(limit_price)
+            order = self.order_factory.limit(
+                instrument_id=self.spread_instrument.id,
+                order_side=side,
+                quantity=qty,
+                price=price,
+                time_in_force=time_in_force,
+            )
+            order_type = f"LIMIT @ {limit_price}"
+        else:
+            # Market order (use with caution for spreads)
+            order = self.order_factory.market(
+                instrument_id=self.spread_instrument.id,
+                order_side=side,
+                quantity=qty,
+                time_in_force=time_in_force,
+            )
+            order_type = "MARKET"
+            self.logger.warning(
+                "Using MARKET order for spread. Consider LIMIT order for better execution."
+            )
+        
+        self.submit_order(order)
+        self.logger.info(
+            f"Spread order submitted: {side.name} {qty} {self.spread_instrument.id} ({order_type})"
+        )
+        
+        return True
+
+    def close_spread_position(self) -> bool:
+        """
+        Close all positions on the spread.
+        
+        Uses Nautilus close_all_positions which will submit an offsetting
+        order for the entire spread position.
+        
+        Returns:
+            True if close was initiated, False if no spread position exists.
+        """
+        if not self.spread_id:
+            self.logger.warning("No spread ID configured, nothing to close.")
+            return False
+        
+        # Check if we have an open position on the spread
+        positions = self.cache.positions_open(instrument_id=self.spread_id)
+        if not positions:
+            self.logger.info("No open spread positions to close.")
+            return False
+        
+        self.close_all_positions(self.spread_id)
+        self.logger.info(f"Closing all positions on spread {self.spread_id}")
+        
+        return True
+
+    def get_spread_position(self) -> Optional[Position]:
+        """
+        Get the current open position for the spread if it exists.
+        
+        Returns:
+            The Position object, or None if no spread position.
+        """
+        if not self.spread_id:
+            return None
+            
+        positions = self.cache.positions_open(instrument_id=self.spread_id)
+        return positions[0] if positions else None
 
     # =========================================================================
     # POSITION MANAGEMENT
@@ -721,6 +942,17 @@ class BaseStrategy(Strategy):
         except Exception as e:
             self.on_unexpected_error(e)
 
+    def on_quote_tick(self, tick):
+        """
+        Handle quote tick event.
+        Important for spread trading - spreads typically only provide Bid/Ask quotes,
+        not trade ticks (TradeTicks).
+        """
+        try:
+            self.on_quote_tick_safe(tick)
+        except Exception as e:
+            self.on_unexpected_error(e)
+
     # =========================================================================
     # STATE PERSISTENCE
     # =========================================================================
@@ -787,6 +1019,9 @@ class BaseStrategy(Strategy):
     def on_order_expired_safe(self, event): pass
     def on_order_filled_safe(self, event): pass
     def on_bar_safe(self, bar): pass
+    def on_quote_tick_safe(self, tick): 
+        """Called when a quote tick is received (important for spread trading)."""
+        pass
 
     def on_unexpected_error(self, error: Exception):
         """Called when an unhandled exception occurs."""
