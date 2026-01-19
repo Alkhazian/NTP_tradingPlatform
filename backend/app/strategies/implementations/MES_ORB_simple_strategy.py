@@ -94,7 +94,7 @@ class MesOrbSimpleStrategy(BaseStrategy):
             return
         
         # Create bar type
-        self.bar_type_1min = BarType.from_str(f"{self.instrument_id}-1-MINUTE-LAST-INTERNAL")
+        self.bar_type_1min = BarType.from_str(f"{self.instrument_id}-1-MINUTE-LAST-EXTERNAL")
         
         # Subscribe to bars
         self.subscribe_bars(self.bar_type_1min)
@@ -133,17 +133,17 @@ class MesOrbSimpleStrategy(BaseStrategy):
         # During trading window (9:50 - 15:45)
         if self.or_complete and self.trade_start_time <= bar_time_et < self.exit_time:
             # Track breakouts and retests
-            if not self.traded_today and not self._has_open_position:
+            if not self.traded_today and not self._has_open_position():
                 self._track_breakout_retest(bar)
                 self._check_entry(bar)
             
             # Manage stops if in position
-            if self._has_open_position and self.stop_price is not None:
+            if self._has_open_position() and self.stop_price is not None:
                 self._check_stop_triggered(bar)
                 self._update_trailing_stop(bar)
         
         # Force exit at 15:45
-        if bar_time_et >= self.exit_time and self._has_open_position:
+        if bar_time_et >= self.exit_time and self._has_open_position():
             self.logger.info("Forcing exit at 15:45 ET")
             self._exit_position("END_OF_DAY")
     
@@ -262,7 +262,7 @@ class MesOrbSimpleStrategy(BaseStrategy):
             quantity=self.instrument.make_qty(self.strategy_config.order_size)
         )
         
-        self.submit_order(order)
+        self.submit_entry_order(order)
         self.logger.info(
             f"Entered {side.name} at {entry_price:.2f}, "
             f"stop at {self.stop_price:.2f} ({self.initial_stop_points} pts)"
@@ -352,17 +352,7 @@ class MesOrbSimpleStrategy(BaseStrategy):
         self.entry_price = None
         self.trailing_active = False
     
-    @property
-    def _has_open_position(self) -> bool:
-        """Check if strategy has an open position."""
-        position = self._get_open_position()
-        return position is not None and not position.is_closed
-    
-    def _get_open_position(self) -> Optional[Position]:
-        """Get current open position for this instrument."""
-        positions = self.cache.positions_open(instrument_id=self.instrument_id)
-        return positions[0] if positions else None
-    
+    # Handle order fills
     def on_order_filled(self, event):
         """Handle order fills."""
         # Check if position closed

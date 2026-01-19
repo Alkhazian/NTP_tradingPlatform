@@ -275,14 +275,29 @@ class StrategyManager:
     def _get_strategy_positions(self, strategy: BaseStrategy) -> list:
         """
         Get detailed position info for a strategy including manual PnL.
+        Only returns positions that this strategy actually owns (has active_trade_id).
         """
         try:
-            # Strategies in current codebase use _get_open_position() for checks
-            # This logic mimics BaseStrategy._get_open_position but returns list format
-            pos = strategy._get_open_position()
-            if not pos:
+            # First check if this strategy has ownership (active_trade_id)
+            # This is the primary check to prevent showing other strategies' positions
+            has_ownership = bool(strategy.active_trade_id)
+            has_pending_orders = bool(strategy._pending_entry_orders or strategy._pending_exit_orders)
+            
+            if not has_ownership and not has_pending_orders:
+                # This strategy doesn't own any position - don't even check cache
                 return []
             
+            # Now check if there's actually a position in the cache
+            pos = strategy._get_open_position()
+            if not pos:
+                # Strategy thinks it has a trade but position is gone - stale state
+                if has_ownership:
+                    logger.warning(
+                        f"Strategy {strategy.strategy_id} has active_trade_id={strategy.active_trade_id} "
+                        f"but no position found in cache. Position may have been closed externally."
+                    )
+                return []
+
             # Extract basic data
             # Determine side symbol explicitly as string for safety
             side_str = "LONG" if pos.side.value == "LONG" else "SHORT"
@@ -314,18 +329,13 @@ class StrategyManager:
             if last_trade:
                 current_price = float(last_trade.price)
             else:
-                # 2. Try Last Bar
-                last_bar = strategy.cache.bar(ticker)
-                if last_bar:
-                     current_price = float(last_bar.close)
-                else:
-                    # 3. Try Quote Mid
-                    quote = strategy.cache.quote_tick(ticker)
-                    if quote:
-                         bid = float(quote.bid_price)
-                         ask = float(quote.ask_price)
-                         if bid > 0 and ask > 0:
-                             current_price = (bid + ask) / 2.0
+                # 2. Try Quote Mid
+                quote = strategy.cache.quote_tick(ticker)
+                if quote:
+                    bid = float(quote.bid_price)
+                    ask = float(quote.ask_price)
+                    if bid > 0 and ask > 0:
+                        current_price = (bid + ask) / 2.0
             
             # Calculate Unrealized PnL
             unrealized_pnl = 0.0

@@ -346,6 +346,9 @@ export default function Analytics() {
                                     <th className="px-4 py-3 text-right cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('net_pnl')}>
                                         <div className="flex items-center justify-end gap-1">PnL (Net) {sortConfig.key === 'net_pnl' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
                                     </th>
+                                    <th className="px-4 py-3 cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('exit_reason')}>
+                                        <div className="flex items-center gap-1">Exit Reason {sortConfig.key === 'exit_reason' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
+                                    </th>
                                     <th className="px-4 py-3 text-center cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('result')}>
                                         <div className="flex items-center justify-center gap-1">Result {sortConfig.key === 'result' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
                                     </th>
@@ -385,6 +388,15 @@ export default function Analytics() {
                                                 }`}>
                                                 {netPnl !== 0 ? (isWin ? '+' : '') + formatCurrency(netPnl) : '-'}
                                             </td>
+                                            <td className="px-4 py-3">
+                                                {trade.exit_reason ? (
+                                                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-white/5 text-white/80">
+                                                        {trade.exit_reason}
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-white/20">-</span>
+                                                )}
+                                            </td>
                                             <td className="px-4 py-3 text-center">
                                                 {trade.result ? (
                                                     <span className={`inline-flex items-center gap-1 text-xs ${trade.result === 'WIN' ? 'text-emerald-400' :
@@ -403,7 +415,7 @@ export default function Analytics() {
                                 })}
                                 {sortedTrades.length === 0 && (
                                     <tr>
-                                        <td colSpan={7} className="px-4 py-8 text-center text-muted-foreground italic">
+                                        <td colSpan={8} className="px-4 py-8 text-center text-muted-foreground italic">
                                             No trades found for this strategy.
                                         </td>
                                     </tr>

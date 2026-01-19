@@ -635,12 +635,30 @@ class BaseStrategy(Strategy):
     # =========================================================================
 
     def _reconcile_positions(self):
-        """Reconcile internal state with actual portfolio positions (using net position logic)."""
+        """
+        Reconcile internal state with actual portfolio positions.
+        
+        IMPORTANT: To support multiple strategies on the same instrument,
+        we ONLY reconcile if we have an active_trade_id from a previous session.
+        This means we only adopt positions we actually opened.
+        """
         pos = self._get_open_position()
         
         if pos:
-            self.logger.info(f"Reconciling: found open position ({pos.instrument_id})")
-            self._on_position_reconciled(pos)
+            # CRITICAL: Only reconcile if we have proof of ownership (active_trade_id)
+            # This prevents "stealing" positions opened by other strategies
+            if self.active_trade_id is not None:
+                self.logger.info(
+                    f"Resuming ownership of position ({pos.instrument_id}) "
+                    f"with trade_id={self.active_trade_id}"
+                )
+                self._on_position_reconciled(pos)
+            else:
+                # Position exists but we don't own it - likely another strategy's trade
+                self.logger.info(
+                    f"Position exists for {pos.instrument_id} but no active_trade_id - "
+                    f"not claiming (may belong to another strategy)"
+                )
         else:
             self.logger.info("Reconciliation: no open positions (net is 0)")
             # Clear any stale internal state
@@ -659,13 +677,8 @@ class BaseStrategy(Strategy):
         )
         self._last_entry_price = float(position.avg_px_open)
         self._last_entry_qty = float(position.quantity)
-        
-        # If no active trade record, start one for the reconciled position
-        if self.active_trade_id is None:
-            self.logger.info("Starting trade record for reconciled position")
-            self._schedule_async_task(
-                self._start_trade_record_from_position_async(position)
-            )
+        # Note: We do NOT create a new trade record here anymore since we 
+        # only reconcile when active_trade_id already exists
 
     def _has_open_position(self) -> bool:
         """Check if there's an open position (source of truth: portfolio)."""
@@ -677,17 +690,16 @@ class BaseStrategy(Strategy):
         Calculates Net Quantity across all venues for the symbol to handle 
         offsetting ghost positions (e.g. LONG on CME-EXTERNAL and SHORT on CME).
         """
-        exact_positions = self.cache.positions_open(instrument_id=self.instrument_id)
-        
-        # Check all positions for this symbol
-        symbol = str(self.instrument_id.symbol)
-        all_positions = self.cache.positions_open()
+        # Symbol to match (e.g., MESH6)
+        target_symbol = str(self.instrument_id.symbol)
+        all_open_positions = self.cache.positions_open()
         
         symbol_positions = []
         net_qty = 0.0
         
-        for pos in all_positions:
-            if str(pos.instrument_id.symbol) == symbol:
+        for pos in all_open_positions:
+            # Check if symbol matches (fuzzy match for venue-specific IDs)
+            if str(pos.instrument_id.symbol) == target_symbol:
                 symbol_positions.append(pos)
                 qty = float(pos.quantity)
                 if pos.side == PositionSide.LONG:
@@ -698,24 +710,27 @@ class BaseStrategy(Strategy):
         if not symbol_positions:
             return None
             
-        # If net quantity is zero, we are effectively flat
-        if abs(net_qty) < 1e-9: # Floating point safety
-            if len(symbol_positions) > 1:
-                self.logger.info(
-                    f"Net position for {symbol} is 0.0 across {len(symbol_positions)} offsetting positions. "
-                    "Treating as FLAT."
+        # If net quantity is effectively zero, we are flat
+        if abs(net_qty) < 1e-6: # Conservative floating point safety
+            if len(symbol_positions) > 0:
+                self.logger.debug(
+                    f"Net position for {target_symbol} is negligible ({net_qty:.8f}) "
+                    f"across {len(symbol_positions)} positions. Treating as FLAT."
                 )
             return None
             
-        # If we have an exact match, prefer returning that one
-        if exact_positions:
-            return exact_positions[0]
+        # We have a non-zero net position. 
+        # Prefer the position that exactly matches our instrument_id if possible
+        exact_match = next((p for p in symbol_positions if p.instrument_id == self.instrument_id), None)
+        if exact_match:
+            return exact_match
             
-        # Otherwise return the first fuzzy match (which we now know has non-zero net)
-        pos = symbol_positions[0]
+        # Otherwise return the largest matching position as a proxy
+        sorted_pos = sorted(symbol_positions, key=lambda x: float(x.quantity), reverse=True)
+        pos = sorted_pos[0]
         self.logger.info(
             f"Fuzzy matched position {pos.instrument_id} for strategy instrument {self.instrument_id} "
-            f"(Net Symbol Qty: {net_qty})"
+            f"(Net Symbol Qty: {net_qty:.4f})"
         )
         return pos
 
@@ -1018,6 +1033,7 @@ class BaseStrategy(Strategy):
     async def _start_trade_record_async(self, event):
         """Async handler for starting trade record."""
         if not self._integration_manager:
+            self.logger.warning("No integration manager available to start trade record")
             return
         
         try:
@@ -1026,6 +1042,7 @@ class BaseStrategy(Strategy):
                 direction = "LONG" if event.order_side == OrderSide.BUY else "SHORT"
                 commission = float(event.commission) if hasattr(event, 'commission') else 0.0
                 
+                self.logger.info(f"Initiating trade record for {self.strategy_id} ({direction})")
                 self.active_trade_id = await recorder.start_trade(
                     strategy_id=self.strategy_id,
                     instrument_id=str(self.instrument_id),
@@ -1038,13 +1055,20 @@ class BaseStrategy(Strategy):
                     trade_type="DAYTRADE"
                 )
                 self.save_state()
-                self.logger.info(f"Trade record started: {self.active_trade_id}")
+                self.logger.info(f"Trade record started: ID={self.active_trade_id}")
+            else:
+                self.logger.warning("No trade recorder found on integration manager")
         except Exception as e:
-            self.logger.error(f"Failed to start trade record: {e}")
+            self.logger.error(f"Failed to start trade record: {e}", exc_info=True)
 
     async def _close_trade_record_async(self, event):
         """Async handler for closing trade record."""
-        if not self._integration_manager or self.active_trade_id is None:
+        if not self._integration_manager:
+            self.logger.warning("No integration manager available to close trade record")
+            return
+            
+        if self.active_trade_id is None:
+            self.logger.warning("Cannot close trade record: active_trade_id is None")
             return
         
         try:
@@ -1066,6 +1090,7 @@ class BaseStrategy(Strategy):
                 commission = float(event.commission) if hasattr(event, 'commission') else 0.0
                 exit_reason = getattr(self, '_last_exit_reason', 'UNKNOWN')
                 
+                self.logger.info(f"Closing trade record ID={self.active_trade_id} for {self.strategy_id}")
                 await recorder.close_trade(
                     trade_id=self.active_trade_id,
                     exit_time=self.clock.utc_now().isoformat(),
@@ -1076,11 +1101,13 @@ class BaseStrategy(Strategy):
                     raw_data=str(event)
                 )
                 
-                self.logger.info(f"Trade record closed: {self.active_trade_id}, PnL: {pnl}")
+                self.logger.info(f"Trade record closed: {self.active_trade_id}, PnL: {pnl:.2f}")
                 self.active_trade_id = None
                 self.save_state()
+            else:
+                self.logger.warning("No trade recorder found on integration manager")
         except Exception as e:
-            self.logger.error(f"Failed to close trade record: {e}")
+            self.logger.error(f"Failed to close trade record: {e}", exc_info=True)
 
     async def _start_trade_record_from_position_async(self, position: Position):
         """Async handler for starting trade record from a reconciled position."""
