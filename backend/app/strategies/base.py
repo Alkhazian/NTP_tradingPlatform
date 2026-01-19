@@ -253,7 +253,7 @@ class BaseStrategy(Strategy):
 
     def create_and_request_spread(
         self, 
-        legs_config: List[Tuple[str, int]], 
+        legs_config: List[Tuple["str | InstrumentId", int]], 
         timeout_seconds: int = 30
     ) -> Optional[InstrumentId]:
         """
@@ -264,10 +264,12 @@ class BaseStrategy(Strategy):
         a SecurityType.BAG combo contract).
         
         Args:
-            legs_config: List of tuples (InstrumentId string, ratio).
+            legs_config: List of tuples (InstrumentId or string, ratio).
+                         Can pass either InstrumentId objects or string IDs.
                          Positive ratio = buy leg on spread buy
                          Negative ratio = sell leg on spread buy
-                         Example: [("SPY C400.SMART", 1), ("SPY P390.SMART", -1)]
+                         Example with strings: [("SPY C400.SMART", 1), ("SPY P390.SMART", -1)]
+                         Example with IDs: [(call_option_id, 1), (put_option_id, -1)]
             timeout_seconds: Timeout for waiting for the spread instrument.
             
         Returns:
@@ -281,11 +283,14 @@ class BaseStrategy(Strategy):
             # Import the spread ID generator
             from nautilus_trader.model.identifiers import new_generic_spread_id
             
-            # Convert string leg IDs to InstrumentId objects with ratios
-            self._spread_legs = [
-                (InstrumentId.from_str(leg_id_str), ratio) 
-                for leg_id_str, ratio in legs_config
-            ]
+            # Convert leg IDs to InstrumentId objects (handles both str and InstrumentId)
+            self._spread_legs = []
+            for leg_id, ratio in legs_config:
+                if isinstance(leg_id, str):
+                    instrument_id = InstrumentId.from_str(leg_id)
+                else:
+                    instrument_id = leg_id  # Already an InstrumentId
+                self._spread_legs.append((instrument_id, ratio))
             
             # Generate deterministic spread ID from legs
             self.spread_id = new_generic_spread_id(self._spread_legs)
