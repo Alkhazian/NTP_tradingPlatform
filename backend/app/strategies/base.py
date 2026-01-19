@@ -85,6 +85,7 @@ class BaseStrategy(Strategy):
         # Position tracking
         self._last_entry_price: Optional[float] = None
         self._last_entry_qty: Optional[float] = None
+        self.signed_inventory: float = 0.0  # + for Long, - for Short, 0 for Flat
         
         # Spread support
         self.spread_id: Optional[InstrumentId] = None
@@ -94,6 +95,7 @@ class BaseStrategy(Strategy):
         
         # Trade persistence
         self.active_trade_id: Optional[int] = None
+
 
     # =========================================================================
     # LIFECYCLE MANAGEMENT (Using Nautilus ComponentState)
@@ -888,9 +890,16 @@ class BaseStrategy(Strategy):
         side = OrderSide.SELL if pos.side == PositionSide.LONG else OrderSide.BUY
         p_account = pos.account_id
         
+        # QUANTITY SAFETY: Use our tracked inventory if available, otherwise fallback to pos.quantity
+        # This prevents closing other strategies' positions on the same instrument
+        close_qty = abs(self.signed_inventory)
+        if close_qty == 0:
+            self.logger.warning("Signed inventory is 0 but position exists. Falling back to broker position quantity.")
+            close_qty = pos.quantity
+        
         self.logger.info(
             f"Closing position {pos.instrument_id} (Side: {pos.side.name}) on account {p_account} "
-            f"using tradeable instrument {self.instrument_id} (Reason: {reason})"
+            f"Qty: {close_qty} (Inventory: {self.signed_inventory}) Reason: {reason}"
         )
 
         # We manually submit an offsetting order using our tradeable ID and the position's account
@@ -898,7 +907,7 @@ class BaseStrategy(Strategy):
         order = self.order_factory.market(
             instrument_id=self.instrument_id,
             order_side=side,
-            quantity=pos.quantity,
+            quantity=self.instrument.make_qty(close_qty),
             # account_id=p_account # Nautilus usually uses the strategy's account_id unless specified
         )
         
@@ -910,6 +919,12 @@ class BaseStrategy(Strategy):
         self._pending_exit_orders.add(order.client_order_id)
         
         self.submit_order(order)
+        self.logger.info(
+            f"Exit order submitted: {order.client_order_id} "
+            f"({order.side} {order.quantity} @ {order.order_type})"
+        )
+        
+        return True
 
     # =========================================================================
     # ORDER EVENT HANDLERS (Using Nautilus OrderStatus)
@@ -1024,6 +1039,15 @@ class BaseStrategy(Strategy):
         self._last_entry_price = float(event.last_px)
         self._last_entry_qty = float(event.last_qty)
         
+        # Update inventory
+        qty = float(event.last_qty)
+        if event.order_side == OrderSide.BUY:
+            self.signed_inventory += qty
+        else:
+            self.signed_inventory -= qty
+            
+        self.logger.info(f"Inventory updated: {self.signed_inventory}")
+        
         # Start trade record asynchronously
         self._schedule_async_task(
             self._start_trade_record_async(event)
@@ -1033,10 +1057,21 @@ class BaseStrategy(Strategy):
         """Handle exit fill - close trade record."""
         self.logger.info(f"Exit filled: {event.last_qty} @ {event.last_px}")
         
+        # Update inventory
+        qty = float(event.last_qty)
+        if event.order_side == OrderSide.BUY:
+            self.signed_inventory += qty # Buying back (exit short) adds to inventory
+        else:
+            self.signed_inventory -= qty # Selling (exit long) subtracts
+            
+        self.logger.info(f"Inventory updated: {self.signed_inventory}")
+        
         # Close trade record asynchronously
         self._schedule_async_task(
             self._close_trade_record_async(event)
         )
+
+
 
     async def _start_trade_record_async(self, event):
         """Async handler for starting trade record."""
@@ -1179,6 +1214,7 @@ class BaseStrategy(Strategy):
         if self.persistence:
             state = self.get_state()
             state['active_trade_id'] = self.active_trade_id
+            state['signed_inventory'] = self.signed_inventory
             state['_last_entry_price'] = self._last_entry_price
             state['_last_entry_qty'] = self._last_entry_qty
             state['_pending_entry_orders'] = [str(oid) for oid in self._pending_entry_orders]
@@ -1192,6 +1228,7 @@ class BaseStrategy(Strategy):
             if state:
                 self.logger.info(f"Restoring state for {self.strategy_id}")
                 self.active_trade_id = state.get('active_trade_id')
+                self.signed_inventory = state.get('signed_inventory', 0.0)
                 self._last_entry_price = state.get('_last_entry_price')
                 self._last_entry_qty = state.get('_last_entry_qty')
                 
