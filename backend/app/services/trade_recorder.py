@@ -53,6 +53,19 @@ class TradeRecorder:
                 logger.info("Migrated database: added result column")
             except sqlite3.OperationalError:
                 pass
+            
+            # Migration: Add unique index for one open trade per strategy per instrument
+            # This prevents duplicate trade records when multiple strategies share an instrument
+            try:
+                cursor.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_one_open_trade_per_strategy_instrument 
+                    ON trades (strategy_id, instrument_id) 
+                    WHERE exit_time IS NULL
+                """)
+                logger.info("Migrated database: added unique index for open trades")
+            except sqlite3.OperationalError as e:
+                # Index may already exist or partial indexes not supported
+                logger.debug(f"Unique index migration skipped: {e}")
                 
             conn.commit()
             conn.close()

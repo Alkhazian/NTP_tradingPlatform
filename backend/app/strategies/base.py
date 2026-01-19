@@ -232,12 +232,30 @@ class BaseStrategy(Strategy):
     # =========================================================================
 
     def _reconcile_positions(self):
-        """Reconcile internal state with actual portfolio positions (using net position logic)."""
+        """
+        Reconcile internal state with actual portfolio positions.
+        
+        IMPORTANT: To support multiple strategies on the same instrument,
+        we ONLY reconcile if we have an active_trade_id from a previous session.
+        This means we only adopt positions we actually opened.
+        """
         pos = self._get_open_position()
         
         if pos:
-            self.logger.info(f"Reconciling: found open position ({pos.instrument_id})")
-            self._on_position_reconciled(pos)
+            # CRITICAL: Only reconcile if we have proof of ownership (active_trade_id)
+            # This prevents "stealing" positions opened by other strategies
+            if self.active_trade_id is not None:
+                self.logger.info(
+                    f"Resuming ownership of position ({pos.instrument_id}) "
+                    f"with trade_id={self.active_trade_id}"
+                )
+                self._on_position_reconciled(pos)
+            else:
+                # Position exists but we don't own it - likely another strategy's trade
+                self.logger.info(
+                    f"Position exists for {pos.instrument_id} but no active_trade_id - "
+                    f"not claiming (may belong to another strategy)"
+                )
         else:
             self.logger.info("Reconciliation: no open positions (net is 0)")
             # Clear any stale internal state
@@ -256,13 +274,8 @@ class BaseStrategy(Strategy):
         )
         self._last_entry_price = float(position.avg_px_open)
         self._last_entry_qty = float(position.quantity)
-        
-        # If no active trade record, start one for the reconciled position
-        if self.active_trade_id is None:
-            self.logger.info("Starting trade record for reconciled position")
-            self._schedule_async_task(
-                self._start_trade_record_from_position_async(position)
-            )
+        # Note: We do NOT create a new trade record here anymore since we 
+        # only reconcile when active_trade_id already exists
 
     def _has_open_position(self) -> bool:
         """Check if there's an open position (source of truth: portfolio)."""
