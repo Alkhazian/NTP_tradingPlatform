@@ -250,6 +250,67 @@ class BaseStrategy(Strategy):
     # =========================================================================
     # SPREAD MANAGEMENT (Option Spreads / Combos)
     # =========================================================================
+    #
+    # USAGE GUIDE - Spread Trading Workflow
+    # ======================================
+    #
+    # This section provides methods for trading option spreads (combos) with IBKR
+    # and other brokers that support multi-leg instruments.
+    #
+    # LIFECYCLE:
+    # ----------
+    # 1. CREATE:    create_and_request_spread(legs_config) -> spread_id
+    # 2. WAIT:      Override on_spread_ready(instrument) to be notified
+    # 3. OPEN:      open_spread_position(quantity, is_buy, limit_price)
+    # 4. MONITOR:   get_effective_spread_quantity() -> current position
+    # 5. CLOSE:     close_spread_smart() OR close_spread_position()
+    #
+    # KEY METHODS:
+    # ------------
+    # create_and_request_spread() - Creates spread ID and requests from broker
+    # on_spread_ready()           - Override this callback in your strategy
+    # open_spread_position()      - Opens position (prefer LIMIT orders!)
+    # get_spread_position()       - Gets native combo position only
+    # get_effective_spread_quantity() - Gets position including legged-out!
+    # close_spread_position()     - Closes native combo only
+    # close_spread_smart()        - Closes BOTH native and legged-out positions
+    #
+    # IMPORTANT - TWO POSITION SCENARIOS:
+    # ------------------------------------
+    # 1. NATIVE COMBO (Atomic):
+    #    Broker holds spread as single instrument (best for margin).
+    #    Use: get_spread_position() or close_spread_position()
+    #
+    # 2. LEGGED OUT (Scattered):
+    #    Broker executed spread but reports individual legs in portfolio.
+    #    DANGER: get_spread_position() returns None, but you have risk!
+    #    Use: get_effective_spread_quantity() and close_spread_smart()
+    #
+    # EXAMPLE USAGE:
+    # --------------
+    # class MySpreadStrategy(BaseStrategy):
+    #     def on_start_safe(self):
+    #         # Create a Call Spread: Buy lower strike, Sell higher strike
+    #         self.create_and_request_spread([
+    #             (call_4000_id, 1),   # Buy leg (ratio +1)
+    #             (call_4050_id, -1),  # Sell leg (ratio -1)
+    #         ])
+    #
+    #     def on_spread_ready(self, instrument):
+    #         # Now safe to trade - open 5 spreads
+    #         self.open_spread_position(5, is_buy=True, limit_price=2.50)
+    #
+    #     def check_position(self):
+    #         # ALWAYS use get_effective_spread_quantity() for safety!
+    #         qty = self.get_effective_spread_quantity()
+    #         if abs(qty) > 0:
+    #             self.logger.info(f"Position: {qty} spreads (may be legged)")
+    #
+    #     def close_all(self):
+    #         # ALWAYS use close_spread_smart() for safety!
+    #         self.close_spread_smart()  # Handles both native and legged
+    #
+    # =========================================================================
 
     def create_and_request_spread(
         self, 
@@ -452,6 +513,122 @@ class BaseStrategy(Strategy):
             
         positions = self.cache.positions_open(instrument_id=self.spread_id)
         return positions[0] if positions else None
+
+    # =========================================================================
+    # SPREAD RECONCILIATION & LEGGING HANDLING
+    # =========================================================================
+
+    def get_effective_spread_quantity(self) -> float:
+        """
+        Розраховує реальну позицію по спреду, перевіряючи як сам інструмент спреду,
+        так і його окремі ноги (якщо брокер 'розсипав' позицію).
+        
+        Handles two scenarios:
+        1. Native Combo (Atomic): Broker holds the spread as a single instrument
+        2. Legged Out (Scattered): Broker executed the spread but reports individual legs
+
+        Returns:
+            float: Кількість повних спредів (позитивне = Long, негативне = Short).
+                   Повертає 0.0, якщо позицій немає.
+        """
+        if not self.spread_id or not self._spread_legs:
+            return 0.0
+
+        # 1. Спроба знайти "цілісну" позицію по спреду (Native Combo)
+        direct_positions = self.cache.positions_open(instrument_id=self.spread_id)
+        if direct_positions:
+            pos = direct_positions[0]
+            qty = float(pos.quantity)
+            return qty if pos.side == PositionSide.LONG else -qty
+
+        # 2. Якщо цілісної позиції немає, перевіряємо "синтетичну" через ноги
+        # Логіка: ми шукаємо мінімальну спільну кількість, яку утворюють ноги.
+        
+        potential_spread_qtys = []
+        
+        for leg_id, leg_ratio in self._spread_legs:
+            # Отримуємо всі позиції по цій нозі
+            leg_positions = self.cache.positions_open(instrument_id=leg_id)
+            
+            # Рахуємо чисту позицію (Net Position) по нозі
+            net_leg_qty = 0.0
+            for p in leg_positions:
+                q = float(p.quantity)
+                net_leg_qty += q if p.side == PositionSide.LONG else -q
+            
+            if net_leg_qty == 0:
+                # Якщо хоча б однієї ноги немає -> спреду немає
+                return 0.0
+            
+            # Розраховуємо, скільки спредів утворює ця нога
+            # Spread Qty = Leg Qty / Leg Ratio
+            # Приклад: Leg Qty = -5 (Short), Ratio = -1 (Sell leg) -> Spread = 5 (Long)
+            implied_spread_qty = net_leg_qty / leg_ratio
+            potential_spread_qtys.append(implied_spread_qty)
+
+        if not potential_spread_qtys:
+            return 0.0
+
+        # Перевірка на цілісність ("Broken Spread")
+        # В ідеалі всі ноги повинні давати однакову кількість спредів.
+        # Якщо ні -> у вас "розбитий" спред, беремо мінімальну по модулю, або 0.
+        
+        first_qty = potential_spread_qtys[0]
+        is_broken = not all(abs(q - first_qty) < 1e-9 for q in potential_spread_qtys)
+        
+        if is_broken:
+            self.logger.critical(
+                f"BROKEN SPREAD DETECTED! Leg quantities do not match ratios. "
+                f"Implied quantities per leg: {potential_spread_qtys}"
+            )
+            # Тут рішення залежить від ризик-менеджменту. 
+            # Безпечно повернути мінімальне значення або 0, щоб не закрити зайве.
+            return 0.0 
+
+        return first_qty
+
+    def close_spread_smart(self) -> bool:
+        """
+        Розумне закриття спреду.
+        Визначає, як брокер тримає позицію (цілісно чи ногами) і закриває відповідно.
+        
+        This method:
+        1. First checks for native combo position and closes it atomically
+        2. If no native combo but legs are present (legged out), closes each leg individually
+        
+        Returns:
+            True if close was initiated, False if no position exists.
+        """
+        effective_qty = self.get_effective_spread_quantity()
+        
+        if abs(effective_qty) < 1e-9:
+            self.logger.info("No effective spread position to close.")
+            return False
+
+        # 1. Перевіряємо Native Position
+        native_pos = self.cache.positions_open(instrument_id=self.spread_id)
+        if native_pos:
+            self.logger.info(f"Closing NATIVE spread position: {self.spread_id}")
+            self.close_all_positions(self.spread_id)
+            return True
+
+        # 2. Якщо Native немає, але effective_qty != 0, значить позиція "розсипана" (Legged Out)
+        self.logger.warning(
+            f"Detected LEGGED OUT spread position ({effective_qty} units). "
+            "Closing individual legs manually."
+        )
+        
+        # Закриваємо кожну ногу окремо
+        for leg_id, ratio in self._spread_legs:
+            # Перевіряємо, чи є відкрита позиція по цій нозі
+            leg_positions = self.cache.positions_open(instrument_id=leg_id)
+            if leg_positions:
+                self.logger.info(f"Closing leg: {leg_id}")
+                self.close_all_positions(leg_id)
+            else:
+                self.logger.debug(f"No position on leg {leg_id}, skipping.")
+        
+        return True
 
     # =========================================================================
     # POSITION MANAGEMENT
