@@ -76,6 +76,8 @@ class Orb15MinLongCallDeltaStrategy(BaseStrategy):
         self.or_calculated = False
         self.or_bars = []
         self.last_or_calculation_date = None
+        self.last_reset_date = None
+
         
         # SPX price tracking
         self.current_spx_price = 0.0
@@ -186,9 +188,10 @@ class Orb15MinLongCallDeltaStrategy(BaseStrategy):
         now = self._get_eastern_now()
         today = now.date()
         
-        if self.last_or_calculation_date != today:
+        if self.last_reset_date != today:
             return True
         return False
+
 
     # =========================================================================
     # OPENING RANGE CALCULATION
@@ -248,6 +251,11 @@ class Orb15MinLongCallDeltaStrategy(BaseStrategy):
     def _reset_daily_state(self):
         """Reset all daily state for new trading day."""
         self.logger.info("Resetting daily state for new trading day")
+        
+        # Update reset date tracking
+        now = self._get_eastern_now()
+        self.last_reset_date = now.date()
+        
         
         self.or_high = None
         self.or_low = None
@@ -740,7 +748,9 @@ class Orb15MinLongCallDeltaStrategy(BaseStrategy):
             "or_low": self.or_low,
             "or_calculated": self.or_calculated,
             "last_or_calculation_date": str(self.last_or_calculation_date) if self.last_or_calculation_date else None,
+            "last_reset_date": str(self.last_reset_date) if self.last_reset_date else None,
             "current_spx_high": self.current_spx_high,
+
             "breakout_detected": self.breakout_detected,
             "entry_attempted_today": self.entry_attempted_today,
             "active_option_id": str(self.active_option_id) if self.active_option_id else None,
@@ -757,10 +767,15 @@ class Orb15MinLongCallDeltaStrategy(BaseStrategy):
         self.or_low = state.get("or_low")
         self.or_calculated = state.get("or_calculated", False)
         
-        date_str = state.get("last_or_calculation_date")
         if date_str:
             from datetime import datetime
             self.last_or_calculation_date = datetime.fromisoformat(date_str).date()
+            
+        reset_date_str = state.get("last_reset_date")
+        if reset_date_str:
+            from datetime import datetime
+            self.last_reset_date = datetime.fromisoformat(reset_date_str).date()
+
         
         self.current_spx_high = state.get("current_spx_high", 0.0)
         self.breakout_detected = state.get("breakout_detected", False)
