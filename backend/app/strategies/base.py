@@ -93,6 +93,9 @@ class BaseStrategy(Strategy):
         self._spread_legs: List[Tuple[InstrumentId, int]] = []
         self._waiting_for_spread: bool = False
         
+        # Spread order tracking for logging
+        self._pending_spread_orders: Set[ClientOrderId] = set()
+        
         # Trade persistence
         self.active_trade_id: Optional[int] = None
         
@@ -442,11 +445,26 @@ class BaseStrategy(Strategy):
             orders to avoid poor execution on illiquid combinations.
         """
         if not self.spread_instrument:
-            self.logger.error("Cannot trade spread: instrument not loaded yet.")
+            self.logger.error(
+                f"═══════════════════════════════════════════════════════════════\n"
+                f"❌ SPREAD ORDER FAILED - Instrument Not Loaded\n"
+                f"═══════════════════════════════════════════════════════════════\n"
+                f"   Spread ID: {self.spread_id}\n"
+                f"   Reason: spread_instrument is None\n"
+                f"   Action: Wait for on_spread_ready() callback\n"
+                f"═══════════════════════════════════════════════════════════════"
+            )
             return False
             
         if not self._functional_ready:
-            self.logger.error("Cannot trade spread: strategy not ready.")
+            self.logger.error(
+                f"═══════════════════════════════════════════════════════════════\n"
+                f"❌ SPREAD ORDER FAILED - Strategy Not Ready\n"
+                f"═══════════════════════════════════════════════════════════════\n"
+                f"   Spread ID: {self.spread_id}\n"
+                f"   Reason: _functional_ready is False\n"
+                f"═══════════════════════════════════════════════════════════════"
+            )
             return False
 
         side = OrderSide.BUY if is_buy else OrderSide.SELL
@@ -464,7 +482,8 @@ class BaseStrategy(Strategy):
                 price=price,
                 time_in_force=time_in_force,
             )
-            order_type = f"LIMIT @ {limit_price}"
+            order_type = "LIMIT"
+            price_str = f"{limit_price:.4f}"
         else:
             # Market order (use with caution for spreads)
             order = self.order_factory.market(
@@ -474,13 +493,33 @@ class BaseStrategy(Strategy):
                 time_in_force=time_in_force,
             )
             order_type = "MARKET"
+            price_str = "N/A"
             self.logger.warning(
-                "Using MARKET order for spread. Consider LIMIT order for better execution."
+                "⚠️ Using MARKET order for spread. Consider LIMIT order for better execution."
             )
         
+        # Track this as a spread order
+        self._pending_spread_orders.add(order.client_order_id)
+        
+        # Submit order
         self.submit_order(order)
+        
+        # Log detailed order info
         self.logger.info(
-            f"Spread order submitted: {side.name} {qty} {self.spread_instrument.id} ({order_type})"
+            f"═══════════════════════════════════════════════════════════════\n"
+            f"📤 SPREAD ORDER SUBMITTED TO BROKER\n"
+            f"═══════════════════════════════════════════════════════════════\n"
+            f"   Order ID: {order.client_order_id}\n"
+            f"   Instrument: {self.spread_instrument.id}\n"
+            f"   Side: {side.name}\n"
+            f"   Quantity: {qty}\n"
+            f"   Order Type: {order_type}\n"
+            f"   Price: {price_str}\n"
+            f"   Time in Force: {time_in_force.name}\n"
+            f"   Legs:\n"
+            + "\n".join([f"      • {leg_id} x{ratio}" for leg_id, ratio in self._spread_legs]) + "\n"
+            f"   Status: PENDING (waiting for broker confirmation)\n"
+            f"═══════════════════════════════════════════════════════════════"
         )
         
         return True
@@ -505,9 +544,23 @@ class BaseStrategy(Strategy):
             self.logger.info("No open spread positions to close.")
             return False
         
-        self.close_all_positions(self.spread_id)
-        self.logger.info(f"Closing all positions on spread {self.spread_id}")
+        pos = positions[0]
+        pos_qty = float(pos.quantity)
+        pos_side = pos.side.name
         
+        self.logger.info(
+            f"═══════════════════════════════════════════════════════════════\n"
+            f"📤 CLOSING SPREAD POSITION (Native Combo)\n"
+            f"═══════════════════════════════════════════════════════════════\n"
+            f"   Spread ID: {self.spread_id}\n"
+            f"   Position: {pos_qty} {pos_side}\n"
+            f"   Avg Entry: {pos.avg_px_open}\n"
+            f"   Method: close_all_positions()\n"
+            f"   Status: PENDING (waiting for broker confirmation)\n"
+            f"═══════════════════════════════════════════════════════════════"
+        )
+        
+        self.close_all_positions(self.spread_id)
         return True
 
     def get_spread_position(self) -> Optional[Position]:
@@ -617,26 +670,50 @@ class BaseStrategy(Strategy):
         # 1. Перевіряємо Native Position
         native_pos = self.cache.positions_open(instrument_id=self.spread_id)
         if native_pos:
-            self.logger.info(f"Closing NATIVE spread position: {self.spread_id}")
+            pos = native_pos[0]
+            self.logger.info(
+                f"═══════════════════════════════════════════════════════════════\n"
+                f"📤 CLOSING SPREAD (Smart - Native Combo)\n"
+                f"═══════════════════════════════════════════════════════════════\n"
+                f"   Spread ID: {self.spread_id}\n"
+                f"   Position: {pos.quantity} {pos.side.name}\n"
+                f"   Avg Entry: {pos.avg_px_open}\n"
+                f"   Mode: NATIVE COMBO (atomic close)\n"
+                f"   Status: PENDING\n"
+                f"═══════════════════════════════════════════════════════════════"
+            )
             self.close_all_positions(self.spread_id)
             return True
 
         # 2. Якщо Native немає, але effective_qty != 0, значить позиція "розсипана" (Legged Out)
         self.logger.warning(
-            f"Detected LEGGED OUT spread position ({effective_qty} units). "
-            "Closing individual legs manually."
+            f"═══════════════════════════════════════════════════════════════\n"
+            f"⚠️ CLOSING SPREAD (Smart - Legged Out)\n"
+            f"═══════════════════════════════════════════════════════════════\n"
+            f"   Spread ID: {self.spread_id}\n"
+            f"   Effective Qty: {effective_qty}\n"
+            f"   Mode: LEGGED OUT (closing individual legs)\n"
+            f"   Warning: Broker has scattered the combo into separate legs!\n"
+            f"═══════════════════════════════════════════════════════════════"
         )
         
         # Закриваємо кожну ногу окремо
+        legs_closed = 0
         for leg_id, ratio in self._spread_legs:
-            # Перевіряємо, чи є відкрита позиція по цій нозі
             leg_positions = self.cache.positions_open(instrument_id=leg_id)
             if leg_positions:
-                self.logger.info(f"Closing leg: {leg_id}")
+                pos = leg_positions[0]
+                self.logger.info(
+                    f"   → Closing leg: {leg_id}\n"
+                    f"      Position: {pos.quantity} {pos.side.name}\n"
+                    f"      Ratio: {ratio}"
+                )
                 self.close_all_positions(leg_id)
+                legs_closed += 1
             else:
-                self.logger.debug(f"No position on leg {leg_id}, skipping.")
+                self.logger.debug(f"   → No position on leg {leg_id}, skipping.")
         
+        self.logger.info(f"   Total legs closed: {legs_closed}/{len(self._spread_legs)}")
         return True
 
     # =========================================================================
@@ -1064,12 +1141,23 @@ class BaseStrategy(Strategy):
     def on_order_submitted(self, event):
         """Order submitted event."""
         try:
-            order = self.cache.order(event.client_order_id)
+            order_id = event.client_order_id
+            order = self.cache.order(order_id)
+            is_spread_order = order_id in self._pending_spread_orders
+            
             if order:
-                self.logger.debug(
-                    f"Order submitted: {event.client_order_id} "
-                    f"(status: {order.status.name})"
-                )
+                if is_spread_order:
+                    self.logger.info(
+                        f"📨 SPREAD ORDER ACCEPTED BY BROKER\n"
+                        f"   Order ID: {order_id}\n"
+                        f"   Instrument: {order.instrument_id}\n"
+                        f"   Status: {order.status.name}\n"
+                        f"   Waiting for fill..."
+                    )
+                else:
+                    self.logger.debug(
+                        f"Order submitted: {order_id} (status: {order.status.name})"
+                    )
             self.on_order_submitted_safe(event)
         except Exception as e:
             self.on_unexpected_error(e)
@@ -1078,14 +1166,28 @@ class BaseStrategy(Strategy):
         """Handle order rejection - clear pending state."""
         try:
             order_id = event.client_order_id
+            is_spread_order = order_id in self._pending_spread_orders
             
             # Remove from pending sets
             self._pending_entry_orders.discard(order_id)
             self._pending_exit_orders.discard(order_id)
+            self._pending_spread_orders.discard(order_id)
             
             # Get order from cache to check status
             order = self.cache.order(order_id)
-            if order:
+            
+            if is_spread_order:
+                self.logger.error(
+                    f"═══════════════════════════════════════════════════════════════\n"
+                    f"❌ SPREAD ORDER REJECTED BY BROKER\n"
+                    f"═══════════════════════════════════════════════════════════════\n"
+                    f"   Order ID: {order_id}\n"
+                    f"   Instrument: {order.instrument_id if order else 'N/A'}\n"
+                    f"   Reason: {event.reason}\n"
+                    f"   Action Required: Check order parameters or market conditions\n"
+                    f"═══════════════════════════════════════════════════════════════"
+                )
+            elif order:
                 self.logger.error(
                     f"Order rejected: {order_id} "
                     f"(status: {order.status.name}, reason: {event.reason})"
@@ -1101,12 +1203,22 @@ class BaseStrategy(Strategy):
         """Handle order cancellation - clear pending state."""
         try:
             order_id = event.client_order_id
+            is_spread_order = order_id in self._pending_spread_orders
             
             # Remove from pending sets
             self._pending_entry_orders.discard(order_id)
             self._pending_exit_orders.discard(order_id)
+            self._pending_spread_orders.discard(order_id)
             
-            self.logger.warning(f"Order cancelled: {order_id}")
+            if is_spread_order:
+                self.logger.warning(
+                    f"⚠️ SPREAD ORDER CANCELLED\n"
+                    f"   Order ID: {order_id}\n"
+                    f"   No fill received."
+                )
+            else:
+                self.logger.warning(f"Order cancelled: {order_id}")
+            
             self.on_order_canceled_safe(event)
         except Exception as e:
             self.on_unexpected_error(e)
@@ -1115,12 +1227,22 @@ class BaseStrategy(Strategy):
         """Handle order expiration - clear pending state."""
         try:
             order_id = event.client_order_id
+            is_spread_order = order_id in self._pending_spread_orders
             
             # Remove from pending sets
             self._pending_entry_orders.discard(order_id)
             self._pending_exit_orders.discard(order_id)
+            self._pending_spread_orders.discard(order_id)
             
-            self.logger.warning(f"Order expired: {order_id}")
+            if is_spread_order:
+                self.logger.warning(
+                    f"⏰ SPREAD ORDER EXPIRED\n"
+                    f"   Order ID: {order_id}\n"
+                    f"   Time in Force reached - no fill."
+                )
+            else:
+                self.logger.warning(f"Order expired: {order_id}")
+            
             self.on_order_expired_safe(event)
         except Exception as e:
             self.on_unexpected_error(e)
@@ -1129,6 +1251,7 @@ class BaseStrategy(Strategy):
         """Handle order fill - update tracking and record trade."""
         try:
             order_id = event.client_order_id
+            is_spread_order = order_id in self._pending_spread_orders
             
             # Determine if entry or exit based on our tracking
             is_entry = order_id in self._pending_entry_orders
@@ -1137,15 +1260,31 @@ class BaseStrategy(Strategy):
             # Remove from pending
             self._pending_entry_orders.discard(order_id)
             self._pending_exit_orders.discard(order_id)
+            self._pending_spread_orders.discard(order_id)
             
             # Get order from cache to verify status
             order = self.cache.order(order_id)
-            if order:
+            
+            if is_spread_order and order:
+                fill_value = float(event.last_qty) * float(event.last_px) * 100  # Options multiplier
+                self.logger.info(
+                    f"═══════════════════════════════════════════════════════════════\n"
+                    f"✅ SPREAD ORDER FILLED BY BROKER\n"
+                    f"═══════════════════════════════════════════════════════════════\n"
+                    f"   Order ID: {order_id}\n"
+                    f"   Instrument: {order.instrument_id}\n"
+                    f"   Side: {order.side.name}\n"
+                    f"   Filled Qty: {event.last_qty}\n"
+                    f"   Fill Price: {event.last_px}\n"
+                    f"   Fill Value: ${abs(fill_value):.2f}\n"
+                    f"   Order Status: {order.status.name}\n"
+                    f"   Execution confirmed by IB ✓\n"
+                    f"═══════════════════════════════════════════════════════════════"
+                )
+            elif order:
                 self.logger.info(
                     f"Order filled: {order_id} "
-                    f"(status: {order.status.name}, "
-                    f"qty: {event.last_qty}, "
-                    f"price: {event.last_px})"
+                    f"(status: {order.status.name}, qty: {event.last_qty}, price: {event.last_px})"
                 )
             
             if is_entry:
