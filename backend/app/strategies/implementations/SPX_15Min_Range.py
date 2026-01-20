@@ -135,11 +135,19 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._range_tick_count: int = 0
         self._last_log_minute: int = -1
         
+        # Calculate range end time for logging
+        end_minute = self.start_time.minute + self.window_minutes
+        end_hour = self.start_time.hour + (1 if end_minute >= 60 else 0)
+        end_minute = end_minute % 60
+        range_end_time = time(end_hour, end_minute, 0)
+        
         self.logger.info(
             f"═══════════════════════════════════════════════════════════════\n"
             f"SPX15MinRangeStrategy INITIALIZED\n"
             f"═══════════════════════════════════════════════════════════════\n"
-            f"  📅 Range Window: {self.start_time} + {self.window_minutes} min\n"
+            f"  🌍 Timezone: {self.tz}\n"
+            f"  📈 Instrument: {config.instrument_id}\n"
+            f"  📅 Range Window: {self.start_time} - {range_end_time} ({self.window_minutes} min)\n"
             f"  ⏰ Entry Cutoff: {self.entry_cutoff_time} (no entries after)\n"
             f"  💰 Min Credit: ${self.min_credit_amount:.2f}\n"
             f"  📏 Strike Width: {self.strike_width} pts\n"
