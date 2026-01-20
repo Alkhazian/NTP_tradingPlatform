@@ -1,7 +1,7 @@
 {
     "id": "orb_15min_call_delta",
     "name": "ORB 15-Min Long Call Delta",
-    "enabled": false,
+    "enabled": true,
     "instrument_id": "^SPX.CBOE",
     "strategy_type": "Orb15MinLongCallDeltaStrategy",
     "order_size": 1.0,

@@ -44,5 +44,10 @@
         "strategy_type": "Orb15MinLongPutV2Strategy",
         "module": "app.strategies.implementations.ORB_15_Long_Put_v2",
         "class_name": "Orb15MinLongPutV2Strategy"
+    },
+    {
+        "strategy_type": "SPX15MinRangeStrategy",
+        "module": "app.strategies.implementations.SPX_15Min_Range",
+        "class_name": "SPX15MinRangeStrategy"
     }
 ]
