@@ -1,7 +1,7 @@
 {
     "id": "spx_15min_range",
     "name": "SPX 15-Min Range Credit Spread",
-    "enabled": false,
+    "enabled": true,
     "instrument_id": "^SPX.CBOE",
     "strategy_type": "SPX15MinRangeStrategy",
     "order_size": 2.0,
@@ -9,6 +9,7 @@
         "timezone": "US/Eastern",
         "start_time_str": "09:30:00",
         "window_minutes": 15,
+        "entry_cutoff_time_str": "13:00:00",
         "min_credit_amount": 50,
         "quantity": 2,
         "strike_width": 5,

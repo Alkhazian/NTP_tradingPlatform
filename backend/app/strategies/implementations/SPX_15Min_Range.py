@@ -52,6 +52,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
     - timezone: str (default "US/Eastern")
     - start_time_str: str (default "09:30:00")
     - window_minutes: int (default 15)
+    - entry_cutoff_time_str: str (default "12:00:00") - no entries after this time
     - min_credit_amount: float (default 50.0) - minimum credit in dollars
     - quantity: int (default 2) - number of spreads
     - strike_width: int (default 5) - width between strikes
@@ -81,6 +82,10 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         t = datetime.strptime(start_time_str, "%H:%M:%S").time()
         self.start_time = t
         self.window_minutes = params.get("window_minutes", 15)
+        
+        # Entry cutoff time - no entries after this time
+        entry_cutoff_str = params.get("entry_cutoff_time_str", "12:00:00")
+        self.entry_cutoff_time = datetime.strptime(entry_cutoff_str, "%H:%M:%S").time()
         
         # Entry parameters
         self.min_credit_amount = params.get("min_credit_amount", 50.0)
@@ -135,6 +140,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             f"SPX15MinRangeStrategy INITIALIZED\n"
             f"═══════════════════════════════════════════════════════════════\n"
             f"  📅 Range Window: {self.start_time} + {self.window_minutes} min\n"
+            f"  ⏰ Entry Cutoff: {self.entry_cutoff_time} (no entries after)\n"
             f"  💰 Min Credit: ${self.min_credit_amount:.2f}\n"
             f"  📏 Strike Width: {self.strike_width} pts\n"
             f"  🛡️ Strike Step: {self.strike_step} pts\n"
@@ -322,6 +328,15 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             return
         if self.entry_in_progress:
             self.logger.debug(f"Entry already in progress. Skipping signal check.")
+            return
+        
+        # Skip if past entry cutoff time
+        current_time = et_now.time()
+        if current_time >= self.entry_cutoff_time:
+            self.logger.debug(
+                f"Past entry cutoff time ({self.entry_cutoff_time}). "
+                f"Current time: {current_time}. Skipping signal check."
+            )
             return
 
         # 2. Check BEARISH entry (close below Low, High not breached first)
