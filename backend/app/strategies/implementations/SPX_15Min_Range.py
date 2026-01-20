@@ -272,8 +272,10 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 self.logger.error(
                     f"❌ RANGE LOCK FAILED at {current_time.strftime('%H:%M:%S')}: "
                     f"High={self.daily_high}, Low={self.daily_low}. "
-                    f"Insufficient data during range window!"
+                    f"Insufficient data during range window! No trading possible today."
                 )
+                # Mark as calculated (failed) to prevent repeated error logs
+                self.range_calculated = True
 
     def _on_minute_closed(self, close_price: float):
         """
@@ -283,6 +285,11 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         """
         if not self.range_calculated:
             self.logger.debug(f"Minute closed at {close_price:.2f} but range not yet calculated. Skipping.")
+            return
+        
+        # Guard against range lock failure (daily_high/low are None)
+        if self.daily_high is None or self.daily_low is None:
+            self.logger.debug(f"Minute closed at {close_price:.2f} but range is invalid (None). Skipping.")
             return
 
         et_now = self.clock.utc_now().astimezone(self.tz)
