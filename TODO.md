@@ -1,10 +1,10 @@
 # TODO
 
 ## New strategies
-- [ ] [Options] SPX ORB 15 min 5 size with vertical credit spreads (call credit and put credit)
 - [x] [Options] SPX ORB 15 min long call - search strike using delta value
 - [x] [Options] SPX ORB 15 min long call - search strike using $ value 
 - [x] [Options] SPX ORB 15 min long put - search strike using $ value
+- [ ] [Options] SPX ORB 15 min 5 size with vertical credit spreads (call credit and put credit)
 - [ ] [Options] SPX ORB 60 min 10 size with vertical credit spreads §(call credit and put credit)
 - [ ] [Futures] MNQ ORB 5 min + Fair Value Gap (FVG)
 
@@ -12,6 +12,8 @@
 ## Strategies enhancements
 - [x] Get first SPX option trade working
 - [x] [Options] - check bid/ask spread before posting an order, add a condition for the spread size.
+- [ ] Refactor trades storage to separate transation part (orders DB) and view part (trades).
+- [ ] Manage open position handling for strategies that trade the same instrument.
 - [ ] [Options] - for option spread instruments implement a limit order exit, instead of market order. E.g. post the order with mid-price as limit price and then increase steadily the limit price until the order is filled
 - [ ] Add Risk Management
     - [ ] Create RiskManager class
@@ -49,6 +51,7 @@
 ## System
 - [ ] Fix UI status of IB connection. As of now it in not taken into account 
 - [ ] [Logging] Log more nautilus trader events in app.log. For example, issues with IBKR connection are not logged to the app.log
+- [ ] [Logging] Re-do logging on UI to use API and lazy-loading to search fot the full history. Implement DB storage of logs.
 - [ ] Integrate with exchange_calendars library or maintain a holiday list. Update strategy logic to account for holidays
 - [ ] [Logging] ? Remove custom logger (use inherited Nautilus logger)
 - [ ] Enhanced Configuration
@@ -59,7 +62,6 @@
 
 ## Monitoring & Observability
 - [ ] Add performance metrics collection
-- [ ] Emit strategy events for external monitoring
 - [ ] Add health check endpoint
 - [ ] Log all order flow with correlation IDs
 
