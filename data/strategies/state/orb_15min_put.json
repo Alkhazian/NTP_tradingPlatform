@@ -1,0 +1,23 @@
+{
+    "or_high": null,
+    "or_low": null,
+    "or_calculated": false,
+    "last_or_calculation_date": null,
+    "last_reset_date": "2026-01-20",
+    "current_spx_low": 6803.99,
+    "breakout_detected": false,
+    "entry_attempted_today": false,
+    "active_option_id": null,
+    "entry_price": null,
+    "stop_loss_price": null,
+    "take_profit_price": null,
+    "options_requested": false,
+    "requested_strikes": [],
+    "active_trade_id": null,
+    "signed_inventory": 0.0,
+    "_last_entry_price": null,
+    "_last_entry_qty": null,
+    "_pending_entry_orders": [],
+    "_pending_exit_orders": [],
+    "_last_updated": "2026-01-20T18:55:33.923751"
+}

@@ -1,7 +1,7 @@
 {
     "id": "mes-orb-simple-01",
     "name": "MES ORB Simple (Retest Entry)",
-    "enabled": false,
+    "enabled": true,
     "instrument_id": "MESH6.CME",
     "strategy_type": "MesOrbSimpleStrategy",
     "order_size": 1.0,

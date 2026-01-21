@@ -92,6 +92,14 @@ class StrategyManager:
         try:
             # infer class from type name
             strategy_type = config.strategy_type
+            
+            # Diagnostic: Check for existing instances
+            if config.id in self.strategies:
+                logger.warning(
+                    f"⚠️ Strategy {config.id} is already in the manager! "
+                    f"Existing object: {hex(id(self.strategies[config.id]))}"
+                )
+            
             strategy_class = self._strategy_classes.get(strategy_type)
             
             if not strategy_class:
