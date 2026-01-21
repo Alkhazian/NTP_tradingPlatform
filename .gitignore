@@ -39,10 +39,8 @@ Thumbs.db
 *.bak
 *.tmp
 trades.db
-#data/strategies/config/spx-streamer-01.json
-#data/strategies/state/spx-streamer-01.json
-#data/strategies/config/MES-Interval-Default.json
-#data/strategies/state/MES-Interval-Default.json
+
+# Data
 data/historical_data
 data/catalog
 data/strategies/state
