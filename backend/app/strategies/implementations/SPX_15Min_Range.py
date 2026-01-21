@@ -71,33 +71,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
     ):
         super().__init__(config, integration_manager, persistence_manager)
         
-        # Load parameters from config
-        params = config.parameters
-        
-        # Strategy-specific time settings
-        start_time_str = params.get("start_time_str", "09:30:00")
-        t = datetime.strptime(start_time_str, "%H:%M:%S").time()
-        self.start_time = t
-        
-        # Entry cutoff time - no entries after this time
-        entry_cutoff_str = params.get("entry_cutoff_time_str", "12:00:00")
-        self.entry_cutoff_time = datetime.strptime(entry_cutoff_str, "%H:%M:%S").time()
-        
-        # Entry parameters
-        self.min_credit_amount = params.get("min_credit_amount", 50.0)
-        self.config_quantity = params.get("quantity", 2)
-        self.strike_width = params.get("strike_width", 5)
-        
-        # Risk management
-        self.stop_loss_multiplier = params.get("stop_loss_multiplier", 2.0)
-        self.take_profit_amount = params.get("take_profit_amount", 50.0)
-        
-        # Strike parameters
-        self.strike_step = params.get("strike_step", 5)
-        
         # Signal validation
-        self.signal_max_age_seconds = params.get("signal_max_age_seconds", 5)
-        self.max_price_deviation = params.get("max_price_deviation", 10.0)
+        self.signal_max_age_seconds = 5
+        self.max_price_deviation = 10.0
         
         # Trading state - bidirectional breach tracking
         self.high_breached: bool = False
@@ -115,12 +91,50 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         # Calculate range end time for logging
         range_end_time = "Range Close" # Will be calculated/logged by base
         
+
+    # =========================================================================
+    # LIFECYCLE
+    # =========================================================================
+
+    def on_start_safe(self):
+        """Initialize strategy after base class setup."""
+        super().on_start_safe()
+        
+        # Load parameters from config
+        params = self.strategy_config.parameters
+        
+        # Strategy-specific time settings
+        start_time_str = params.get("start_time_str", "09:30:00")
+        t = datetime.strptime(start_time_str, "%H:%M:%S").time()
+        self.start_time = t
+        
+        # Entry cutoff time
+        entry_cutoff_str = params.get("entry_cutoff_time_str", "12:00:00")
+        self.entry_cutoff_time = datetime.strptime(entry_cutoff_str, "%H:%M:%S").time()
+        
+        # Entry parameters
+        self.min_credit_amount = float(params.get("min_credit_amount", 50.0))
+        self.config_quantity = int(params.get("quantity", 2))
+        self.strike_width = int(params.get("strike_width", 5))
+        
+        # Risk management
+        self.stop_loss_multiplier = float(params.get("stop_loss_multiplier", 2.0))
+        self.take_profit_amount = float(params.get("take_profit_amount", 50.0))
+        
+        # Strike parameters
+        self.strike_step = int(params.get("strike_step", 5))
+        
+        # Signal validation
+        self.signal_max_age_seconds = int(params.get("signal_max_age_seconds", 5))
+        self.max_price_deviation = float(params.get("max_price_deviation", 10.0))
+        
+        range_end_time = "Range Close" # Will be calculated/logged by base
+        
         self.logger.info(
             f"═══════════════════════════════════════════════════════════════\n"
-            f"SPX15MinRangeStrategy INITIALIZED\n"
+            f"🚀 SPX15MinRangeStrategy STARTING\n"
             f"═══════════════════════════════════════════════════════════════\n"
             f"  🌍 Timezone: {self.tz}\n"
-            f"  📈 Instrument: {config.instrument_id}\n"
             f"  📅 Range Window: {self.start_time} - {range_end_time} ({self.opening_range_minutes} min)\n"
             f"  ⏰ Entry Cutoff: {self.entry_cutoff_time} (no entries after)\n"
             f"  💰 Min Credit: ${self.min_credit_amount:.2f}\n"
@@ -131,20 +145,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             f"  ⏱️ Signal Max Age: {self.signal_max_age_seconds}s\n"
             f"  📊 Max Price Deviation: {self.max_price_deviation} pts\n"
             f"  📦 Quantity: {self.config_quantity} spreads\n"
+            f"  Mode: Tick-Only with Bidirectional Breakout\n"
+            f"  Waiting for SPX data stream...\n"
             f"═══════════════════════════════════════════════════════════════"
-        )
-
-    # =========================================================================
-    # LIFECYCLE
-    # =========================================================================
-
-    def on_start_safe(self):
-        """Initialize strategy after base class setup."""
-        super().on_start_safe()
-        self.logger.info(
-            f"🚀 SPX15MinRangeStrategy STARTED\n"
-            f"   Mode: Tick-Only with Bidirectional Breakout\n"
-            f"   Waiting for SPX data stream..."
         )
 
     def on_spx_ready(self):
