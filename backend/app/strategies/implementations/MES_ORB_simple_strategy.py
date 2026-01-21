@@ -57,6 +57,14 @@ class MesOrbSimpleStrategy(BaseStrategy):
         self.trade_start_time = time(9, 50)  # 09:50 ET - start looking for entries
         self.exit_time = time(15, 45)      # 15:45 ET - forced flat
         
+        # Entry cutoff (configurable)
+        cutoff_str = params.get("entry_cutoff_time", "13:00:00")
+        try:
+            self.entry_cutoff_time = time.fromisoformat(cutoff_str)
+        except ValueError:
+            self.logger.warning(f"Invalid entry_cutoff_time format: {cutoff_str}. Defaulting to 13:00:00")
+            self.entry_cutoff_time = time(15, 0)
+        
         # Bar type
         self.bar_type_1min = None
         
@@ -71,6 +79,10 @@ class MesOrbSimpleStrategy(BaseStrategy):
         self.low_broken = False   # OR low was broken
         self.high_retested = False  # Price came back to OR high after breaking
         self.low_retested = False   # Price came back to OR low after breaking
+        
+        # Failure tracking (One attempt only)
+        self.high_failed = False  # Set to True if price re-enters OR after break
+        self.low_failed = False   # Set to True if price re-enters OR after break
         
         # Trade tracking
         self.traded_today = False
@@ -100,7 +112,7 @@ class MesOrbSimpleStrategy(BaseStrategy):
         self.subscribe_bars(self.bar_type_1min)
         
         self.logger.info(
-            f"MES ORB Simple Strategy started: "
+            f"✅ MES ORB Simple Strategy started: "
             f"Stop={self.initial_stop_points}pts, Trail={self.trailing_stop_points}pts, "
             f"Offset={self.trail_offset_points}pts"
         )
@@ -162,6 +174,8 @@ class MesOrbSimpleStrategy(BaseStrategy):
         self.low_broken = False
         self.high_retested = False
         self.low_retested = False
+        self.high_failed = False
+        self.low_failed = False
         
         # Clear trade tracking
         self.traded_today = False
@@ -181,7 +195,7 @@ class MesOrbSimpleStrategy(BaseStrategy):
         
         self.or_complete = True
         self.logger.info(
-            f"OR calculated: High={self.or_high:.2f}, Low={self.or_low:.2f}, "
+            f"📈 OR calculated: High={self.or_high:.2f}, Low={self.or_low:.2f}, "
             f"Width={or_width:.2f} pts"
         )
     
@@ -193,49 +207,97 @@ class MesOrbSimpleStrategy(BaseStrategy):
         
         # Track high breakout
         if not self.high_broken and high > self.or_high:
-            self.high_broken = True
-            self.logger.info(f"OR HIGH broken: {high:.2f} > {self.or_high:.2f}")
+            # Mutual invalidation: only break high if low hasn't broken
+            if not self.low_broken:
+                self.high_broken = True
+                self.logger.info(f"🔥 OR HIGH broken: {high:.2f} > {self.or_high:.2f}")
+            else:
+                self.logger.info(f"⚠️ OR HIGH touched ({high:.2f}) but LOW already broken. Ignoring.")
+        
+        # Check for failure (re-entry into range)
+        if self.high_broken and not self.high_failed and not self._is_position_owned() and not self.traded_today:
+            if close < self.or_high:
+                self.high_failed = True
+                self.logger.warning(
+                    f"🛑 HIGH BREAK FAILURE: Close {close:.2f} < OR High {self.or_high:.2f}. "
+                    f"Entry invalidated for today."
+                )
         
         # Track high retest (price comes back to touch OR high after breaking)
-        if self.high_broken and not self.high_retested:
+        if self.high_broken and not self.high_retested and not self.high_failed:
             if low <= self.or_high:
                 self.high_retested = True
-                self.logger.info(f"OR HIGH retested: low={low:.2f} touched {self.or_high:.2f}")
+                self.logger.info(f"🔥 OR HIGH retested: low={low:.2f} touched {self.or_high:.2f}")
         
         # Track low breakout
         if not self.low_broken and low < self.or_low:
-            self.low_broken = True
-            self.logger.info(f"OR LOW broken: {low:.2f} < {self.or_low:.2f}")
+            # Mutual invalidation: only break low if high hasn't broken
+            if not self.high_broken:
+                self.low_broken = True
+                self.logger.info(f"🔥 OR LOW broken: {low:.2f} < {self.or_low:.2f}")
+            else:
+                self.logger.info(f"⚠️ OR LOW touched ({low:.2f}) but HIGH already broken. Ignoring.")
+        
+        # Check for failure (re-entry into range)
+        if self.low_broken and not self.low_failed and not self._is_position_owned() and not self.traded_today:
+            if close > self.or_low:
+                self.low_failed = True
+                self.logger.warning(
+                    f"🛑 LOW BREAK FAILURE: Close {close:.2f} > OR Low {self.or_low:.2f}. "
+                    f"Entry invalidated for today."
+                )
         
         # Track low retest (price comes back to touch OR low after breaking)
-        if self.low_broken and not self.low_retested:
+        if self.low_broken and not self.low_retested and not self.low_failed:
             if high >= self.or_low:
                 self.low_retested = True
-                self.logger.info(f"OR LOW retested: high={high:.2f} touched {self.or_low:.2f}")
+                self.logger.info(f"🔥 OR LOW retested: high={high:.2f} touched {self.or_low:.2f}")
     
     def _check_entry(self, bar: Bar):
         """Check for entry signals after breakout + retest."""
         close = float(bar.close)
+        open_p = float(bar.open)
         
-        # Long entry: OR high broken + retested + close above OR high
-        if self.high_broken and self.high_retested and close > self.or_high:
-            # Make sure we haven't also triggered short conditions
-            if not (self.low_broken and self.low_retested):
+        # Get current ET time for cutoff check
+        dt_utc = datetime.fromtimestamp(bar.ts_event / 1_000_000_000, tz=timezone.utc)
+        current_time_et = dt_utc.astimezone(self.et_tz).time()
+        
+        if current_time_et >= self.entry_cutoff_time:
+            # Optionally log this to alert user why no trade happened
+            if self.high_broken or self.low_broken:
                 self.logger.info(
-                    f"LONG signal: broken + retested + close={close:.2f} > OR_high={self.or_high:.2f}"
+                    f"⏰ Signal ignored: Current time {current_time_et.strftime('%H:%M')} "
+                    f"is past cutoff {self.entry_cutoff_time.strftime('%H:%M')}"
                 )
-                self._enter_position(OrderSide.BUY, close)
-                return
+            return
+            
+        # Long entry: OR high broken + retested + close above OR high
+        # Condition: not low_broken (mutual invalidation)
+        # Condition: not high_failed (stayed outside range)
+        # Condition: green bar (close > open)
+        if (self.high_broken and not self.low_broken and 
+            self.high_retested and not self.high_failed and 
+            close > self.or_high and close > open_p):
+            
+            self.logger.info(
+                f"🔥🔥 LONG signal: broken + retested + close={close:.2f} > open={open_p:.2f}"
+            )
+            self._enter_position(OrderSide.BUY, close)
+            return
         
         # Short entry: OR low broken + retested + close below OR low
-        if self.low_broken and self.low_retested and close < self.or_low:
-            # Make sure we haven't also triggered long conditions
-            if not (self.high_broken and self.high_retested):
-                self.logger.info(
-                    f"SHORT signal: broken + retested + close={close:.2f} < OR_low={self.or_low:.2f}"
-                )
-                self._enter_position(OrderSide.SELL, close)
-                return
+        # Condition: not high_broken (mutual invalidation)
+        # Condition: not low_failed (stayed outside range)
+        # Condition: red bar (close < open)
+        if (self.low_broken and not self.high_broken and 
+            self.low_retested and not self.low_failed and 
+            close < self.or_low and close < open_p):
+            
+            self.logger.info(
+                f"🔥🔥 SHORT signal: broken + retested + close={close:.2f} < open={open_p:.2f}"
+            )
+            self._enter_position(OrderSide.SELL, close)
+            return
     
     def _enter_position(self, side: OrderSide, entry_price: float):
         """Enter a position and set initial stop."""
@@ -375,6 +437,8 @@ class MesOrbSimpleStrategy(BaseStrategy):
             "low_broken": self.low_broken,
             "high_retested": self.high_retested,
             "low_retested": self.low_retested,
+            "high_failed": self.high_failed,
+            "low_failed": self.low_failed,
             # Trade state
             "traded_today": self.traded_today,
             "current_trade_date": self.current_trade_date.isoformat() if self.current_trade_date else None,
@@ -399,6 +463,8 @@ class MesOrbSimpleStrategy(BaseStrategy):
         self.low_broken = state.get("low_broken", False)
         self.high_retested = state.get("high_retested", False)
         self.low_retested = state.get("low_retested", False)
+        self.high_failed = state.get("high_failed", False)
+        self.low_failed = state.get("low_failed", False)
         
         # Trade state
         self.traded_today = state.get("traded_today", False)

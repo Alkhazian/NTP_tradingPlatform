@@ -277,7 +277,7 @@ class Orb15MinLongPutV2Strategy(SPXBaseStrategy):
         self.last_or_calculation_date = now.date()
         
         self.logger.info(
-            f"✅ Opening Range calculated ({self.opening_range_minutes}m): "
+            f"📈 Opening Range calculated ({self.opening_range_minutes}m): "
             f"High={self.or_high:.2f}, Low={self.or_low:.2f}, "
             f"Range=${self.or_high - self.or_low:.2f}"
         )

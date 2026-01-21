@@ -246,7 +246,7 @@ class Orb15MinLongPutStrategy(BaseStrategy):
         self.last_or_calculation_date = now.date()
         
         self.logger.info(
-            f"✅ Opening Range calculated ({self.opening_range_minutes}m): "
+            f"📈 Opening Range calculated ({self.opening_range_minutes}m): "
             f"High={self.or_high:.2f}, Low={self.or_low:.2f}, "
             f"Range=${self.or_high - self.or_low:.2f}"
         )
@@ -464,7 +464,7 @@ class Orb15MinLongPutStrategy(BaseStrategy):
                 })
             
             self.request_instruments(
-                venue=Venue("InteractiveBrokers"),
+                venue=Venue("CBOE"),
                 params={"ib_contracts": contracts}
             )
             

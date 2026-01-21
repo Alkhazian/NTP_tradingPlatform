@@ -246,7 +246,7 @@ class Orb15MinLongCallDeltaStrategy(BaseStrategy):
         self.last_or_calculation_date = now.date()
         
         self.logger.info(
-            f"✅ Opening Range calculated ({self.opening_range_minutes}m): "
+            f"📈 Opening Range calculated ({self.opening_range_minutes}m): "
             f"High={self.or_high:.2f}, Low={self.or_low:.2f}, "
             f"Range=${self.or_high - self.or_low:.2f}"
         )
@@ -464,7 +464,7 @@ class Orb15MinLongCallDeltaStrategy(BaseStrategy):
                 })
             
             self.request_instruments(
-                venue=Venue("InteractiveBrokers"),
+                venue=Venue("CBOE"),
                 params={"ib_contracts": contracts}
             )
             
@@ -476,9 +476,20 @@ class Orb15MinLongCallDeltaStrategy(BaseStrategy):
         except Exception as e:
             self.logger.error(f"❌ Failed to request Call options: {e}", exc_info=True)
 
-    def on_instrument(self, instrument):
+    def on_instrument(self, instrument: Instrument):
         """Called when new instrument is added to cache."""
         super().on_instrument(instrument)
+        
+        # Diagnostic: Log every instrument received during selection window
+        if self.options_requested and not self.active_option_id:
+            kind_str = "OTHER"
+            if hasattr(instrument, 'option_kind'):
+                kind_str = "CALL" if instrument.option_kind == OptionKind.CALL else "PUT"
+            
+            self.logger.info(
+                f"📥 Received instrument: {instrument.id} (Kind={kind_str}, "
+                f"Strike={getattr(instrument, 'strike_price', 'N/A')})"
+            )
         
         # Collect all received options for selection
         if (self.options_requested and

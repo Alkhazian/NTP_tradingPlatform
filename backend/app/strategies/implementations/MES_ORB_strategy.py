@@ -206,7 +206,7 @@ class MesOrbStrategy(BaseStrategy):
                 return
         
         self.or_complete = True
-        self.logger.info(f"OR calculated: High={self.or_high:.2f}, Low={self.or_low:.2f}, Width={or_width:.2f}")
+        self.logger.info(f"📈 OR calculated: High={self.or_high:.2f}, Low={self.or_low:.2f}, Width={or_width:.2f}")
     
     def _check_entry(self, bar: Bar):
         """Check for breakout entry."""
@@ -217,12 +217,12 @@ class MesOrbStrategy(BaseStrategy):
         
         # Long entry: close > OR_high
         if close > self.or_high:
-            self.logger.info(f"Long breakout detected: {close:.2f} > {self.or_high:.2f}")
+            self.logger.info(f"🔥 Long breakout detected: {close:.2f} > {self.or_high:.2f}")
             self._enter_position(OrderSide.BUY, close)
         
         # Short entry: close < OR_low
         elif close < self.or_low:
-            self.logger.info(f"Short breakout detected: {close:.2f} < {self.or_low:.2f}")
+            self.logger.info(f"🔥 Short breakout detected: {close:.2f} < {self.or_low:.2f}")
             self._enter_position(OrderSide.SELL, close)
     
     def _enter_position(self, side: OrderSide, entry_price: float):
@@ -254,7 +254,7 @@ class MesOrbStrategy(BaseStrategy):
         
         self.submit_entry_order(order)
         self.logger.info(
-            f"Entered {side.name} at {entry_price:.2f}, "
+            f"✅ Entered {side.name} at {entry_price:.2f}, "
             f"initial stop at {self.stop_price:.2f} (distance: {stop_distance:.2f})"
         )
     
@@ -275,7 +275,7 @@ class MesOrbStrategy(BaseStrategy):
                 triggered = True
                 exit_reason = "TRAILING_STOP" if self._is_trailing_active() else "STOP_LOSS"
                 self.logger.info(
-                    f"Stop triggered (LONG): low={low:.2f} <= stop={self.stop_price:.2f}"
+                    f"🛑 Stop triggered (LONG): low={low:.2f} <= stop={self.stop_price:.2f}"
                 )
         else:  # SHORT
             # Check if high touched stop
@@ -283,7 +283,7 @@ class MesOrbStrategy(BaseStrategy):
                 triggered = True
                 exit_reason = "TRAILING_STOP" if self._is_trailing_active() else "STOP_LOSS"
                 self.logger.info(
-                    f"Stop triggered (SHORT): high={high:.2f} >= stop={self.stop_price:.2f}"
+                    f"🛑 Stop triggered (SHORT): high={high:.2f} >= stop={self.stop_price:.2f}"
                 )
         
         if triggered:

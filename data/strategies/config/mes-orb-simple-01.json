@@ -8,6 +8,7 @@
     "parameters": {
         "initial_stop_points": 15.0,
         "trailing_stop_points": 30.0,
-        "trail_offset_points": 5.0
+        "trail_offset_points": 5.0,
+        "entry_cutoff_time": "13:00:00"
     }
 }
