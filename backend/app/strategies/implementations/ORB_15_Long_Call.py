@@ -22,15 +22,16 @@ from nautilus_trader.model.identifiers import InstrumentId, Venue
 from nautilus_trader.model.objects import Quantity, Price
 from nautilus_trader.model.instruments import Instrument
 
-from app.strategies.base import BaseStrategy
+from app.strategies.base_spx import SPXBaseStrategy
 from app.strategies.config import StrategyConfig
 
 
-class Orb15MinLongCallStrategy(BaseStrategy):
+class Orb15MinLongCallStrategy(SPXBaseStrategy):
     """
     Opening Range Breakout 15-Minute Long Call Strategy.
     
     Trades SPX 0DTE Call options based on opening range breakout.
+    Uses unified tick-based OR calculation from SPXBaseStrategy.
     """
 
     def __init__(
@@ -41,52 +42,8 @@ class Orb15MinLongCallStrategy(BaseStrategy):
     ):
         super().__init__(config, integration_manager, persistence_manager)
         
-        # Strategy parameters
-        self.opening_range_minutes = int(
-            self.strategy_config.parameters.get("opening_range_minutes", 15)
-        )
-        self.target_option_price = float(
-            self.strategy_config.parameters.get("target_option_price", 4.0)
-        )
-        self.stop_loss_percent = float(
-            self.strategy_config.parameters.get("stop_loss_percent", 40.0)
-        )
-        self.take_profit_dollars = float(
-            self.strategy_config.parameters.get("take_profit_dollars", 50.0)
-        )
-        self.max_spread_dollars = float(
-            self.strategy_config.parameters.get("max_spread_dollars", 0.2)
-        )
-        self.cutoff_time_hour = int(
-            self.strategy_config.parameters.get("cutoff_time_hour", 15)  # 3 PM
-        )
-        self.quantity = int(
-            self.strategy_config.parameters.get("quantity", 1)
-        )
-        
         # State tracking for logging
         self._last_price_logged_time = 0
-        
-        # Market hours (Eastern Time)
-        self.eastern_tz = pytz.timezone('US/Eastern')
-        self.market_open_time = time(9, 30)   # 9:30 AM ET
-        self.market_close_time = time(16, 0)  # 4:00 PM ET
-        self.or_end_time = None  # Calculated dynamically each day
-        self.cutoff_time = time(self.cutoff_time_hour, 0)  # Default 3:00 PM ET
-        
-        # Opening Range state
-        self.or_high = None
-        self.or_low = None
-        self.or_calculated = False
-        self.or_bars = []
-        self.last_or_calculation_date = None
-        self.last_reset_date = None
-
-        
-        # SPX price tracking
-        self.current_spx_price = 0.0
-        self.current_spx_high = 0.0  # Today's high
-        self.last_quote_time_ns = 0
         
         # Position management
         self.active_option_id = None
@@ -98,228 +55,86 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         self.breakout_detected = False
         self.entry_attempted_today = False
         
-        # Tracking for option selection
-        self.options_requested = False
-        self.requested_strikes = []
-        self.received_options = []  # Track all received options for selection
+        # Search tracking
+        self._active_search_id: Optional[str] = None
 
     # =========================================================================
     # LIFECYCLE
     # =========================================================================
 
     def on_start_safe(self):
-        """Called after instrument is ready and base setup complete.
+        """Called after instrument is ready and base setup complete."""
+        super().on_start_safe()
         
-        Note: Data subscriptions are handled by _subscribe_data() called from base class.
-        """
+        params = self.strategy_config.parameters
+        self.target_option_price = float(params.get("target_option_price", 4.0))
+        self.stop_loss_percent = float(params.get("stop_loss_percent", 40.0))
+        self.take_profit_dollars = float(params.get("take_profit_dollars", 50.0))
+        self.max_spread_dollars = float(params.get("max_spread_dollars", 0.2))
+        self.cutoff_time_hour = int(params.get("cutoff_time_hour", 15))
+        self.quantity = int(params.get("quantity", 1))
+        
+        self.cutoff_time = time(self.cutoff_time_hour, 0)
+        
         self.logger.info(
-            f"ORB 15-Min Long Call Strategy starting: "
-            f"OR={self.opening_range_minutes}m, "
-            f"Target option price=${self.target_option_price}, "
-            f"SL={self.stop_loss_percent}%, "
-            f"TP=${self.take_profit_dollars} per contract, "
-            f"Max spread=${self.max_spread_dollars}"
+            f"🚀 ORB 15-Min Long Call Strategy STARTING: "
+            f"OR={self.opening_range_minutes}m, Target Price=${self.target_option_price}, "
+            f"SL={self.stop_loss_percent}%, TP=${self.take_profit_dollars}, "
+            f"Quantity={self.quantity}"
         )
 
-    def _subscribe_data(self):
-        """Subscribe to required data feeds."""
-        # Called by BaseStrategy - subscribe to quotes and bars
-        
-        # Subscribe to SPX quotes
-        try:
-            self.subscribe_quote_ticks(self.instrument_id)
-            self.logger.info(f"Subscribed to SPX quotes: {self.instrument_id}")
-        except Exception as e:
-            self.logger.error(f"Failed to subscribe to SPX quotes: {e}", exc_info=True)
-        
-        # Subscribe to 1-minute bars for opening range calculation
-        try:
-            bar_type = BarType(
-                self.instrument_id,
-                BarSpecification.from_str("1-MINUTE-LAST")
+    def on_spx_tick(self, tick: QuoteTick):
+        """Called for each SPX quote tick."""
+        # Periodically log price (every 60s)
+        now_sec = int(self.clock.timestamp_ns() / 1_000_000_000)
+        if now_sec % 60 == 0 and now_sec != self._last_price_logged_time:
+            self._last_price_logged_time = now_sec
+            or_status = f"OR High={self.or_high:.2f}" if self.or_high else "OR pending"
+            self.logger.info(
+                f"SPX: {self.current_spx_price:.2f} | "
+                f"Today High: {self.daily_high:.2f} | "
+                f"{or_status}"
             )
-            self.subscribe_bars(bar_type)
-            self.logger.info(f"Subscribed to 1-minute bars for OR calculation")
-        except Exception as e:
-            self.logger.error(f"Failed to subscribe to bars: {e}", exc_info=True)
+
+        # Check for breakout (tick-by-tick breakout detection)
+        if self.is_opening_range_complete() and not self.breakout_detected:
+            self._check_breakout()
+        
+        # Monitor active position for exit conditions
+        if self.active_option_id:
+            self._check_exit_conditions()
 
 
     # =========================================================================
     # MARKET HOURS & TIMING
     # =========================================================================
 
-    def _get_eastern_now(self) -> datetime:
-        """Get current time in Eastern timezone using strategy clock (backtestable)."""
-        return self.clock.utc_now().astimezone(self.eastern_tz)
+    def on_minute_closed(self, close_price: float):
+        """Called at each minute close."""
+        if self.is_opening_range_complete() and not self.breakout_detected:
+            if close_price > self.or_high:
+                self.logger.info(f"Breakout detected on minute close: {close_price:.2f} > {self.or_high:.2f}")
+                self._check_breakout()
 
-    def is_market_open(self) -> bool:
-        """Check if SPX options market is currently open."""
-        now = self._get_eastern_now()
-        
-        # Weekend check
-        if now.weekday() >= 5:  # Saturday=5, Sunday=6
-            return False
-        
-        # Market hours check
-        current_time = now.time()
-        return self.market_open_time <= current_time <= self.market_close_time
-
-    def is_before_cutoff(self) -> bool:
-        """Check if current time is before entry cutoff (default 3 PM ET)."""
-        now = self._get_eastern_now()
-        return now.time() < self.cutoff_time
-
-    def get_or_end_time(self) -> time:
-        """Calculate opening range end time (9:30 + opening_range_minutes)."""
-        if self.or_end_time is None:
-            # Calculate OR end time
-            market_open = datetime.combine(datetime.today(), self.market_open_time)
-            or_end = market_open + timedelta(minutes=self.opening_range_minutes)
-            self.or_end_time = or_end.time()
-        return self.or_end_time
-
-    def is_in_opening_range_period(self) -> bool:
-        """Check if we're currently in the opening range period."""
-        now = self._get_eastern_now()
-        current_time = now.time()
-        or_end = self.get_or_end_time()
-        
-        return self.market_open_time <= current_time < or_end
-
-    def should_reset_daily_state(self) -> bool:
-        """Check if we need to reset daily state (new trading day)."""
-        now = self._get_eastern_now()
-        today = now.date()
-        
-        if self.last_reset_date != today:
-            return True
-        return False
-
-
-    # =========================================================================
-    # OPENING RANGE CALCULATION
-    # =========================================================================
-
-    def on_bar_safe(self, bar: Bar):
-        """Handle 1-minute bars for opening range calculation."""
-        
-        # Reset daily state if new day
-        if self.should_reset_daily_state():
-            self._reset_daily_state()
-        
-        # Update current high
-        bar_high = bar.high.as_double()
-        if bar_high > self.current_spx_high:
-            self.current_spx_high = bar_high
-        
-        # Collect bars during opening range period
-        if self.is_in_opening_range_period() and not self.or_calculated:
-            self.or_bars.append(bar)
-            self.logger.debug(
-                f"OR bar collected: H={bar.high.as_double():.2f}, "
-                f"L={bar.low.as_double():.2f} "
-                f"({len(self.or_bars)}/{self.opening_range_minutes})"
-            )
-        
-        # Calculate opening range when period ends
-        elif not self.or_calculated and len(self.or_bars) > 0:
-            self._calculate_opening_range()
-        
-        # Check for breakout after OR calculated
-        if self.or_calculated and not self.breakout_detected:
-            self._check_breakout()
-
-    def _calculate_opening_range(self):
-        """Calculate opening range high and low from collected bars."""
-        if not self.or_bars:
-            self.logger.warning("No bars collected for opening range calculation")
-            return
-        
-        highs = [bar.high.as_double() for bar in self.or_bars]
-        lows = [bar.low.as_double() for bar in self.or_bars]
-        
-        self.or_high = max(highs)
-        self.or_low = min(lows)
-        self.or_calculated = True
-        
-        now = self._get_eastern_now()
-        self.last_or_calculation_date = now.date()
-        
-        self.logger.info(
-            f"📈 Opening Range calculated ({self.opening_range_minutes}m): "
-            f"High={self.or_high:.2f}, Low={self.or_low:.2f}, "
-            f"Range=${self.or_high - self.or_low:.2f}"
-        )
-
-    def _reset_daily_state(self):
-        """Reset all daily state for new trading day."""
-        self.logger.info("Resetting daily state for new trading day")
-        
-        # Update reset date tracking
-        now = self._get_eastern_now()
-        self.last_reset_date = now.date()
-        
-        
-        self.or_high = None
-        self.or_low = None
-        self.or_calculated = False
-        self.or_bars = []
-        self.or_end_time = None
-        
-        self.current_spx_high = 0.0
+    def _reset_daily_state(self, current_date):
+        """Reset daily tracking state. Extends base class reset."""
+        super()._reset_daily_state(current_date)
         self.breakout_detected = False
         self.entry_attempted_today = False
-        
-        self.options_requested = False
-        self.requested_strikes = []
-        self.received_options = []  # Clear received options
+        self._active_search_id = None
+        self._last_price_logged_time = 0
+        self.logger.info(f"Daily strategy state reset for {current_date}")
 
     # =========================================================================
     # QUOTE HANDLING & PRICE TRACKING
     # =========================================================================
 
-    def on_quote_tick(self, tick: QuoteTick):
-        """Handle quote ticks - only process SPX quotes for price tracking."""
+    def on_quote_tick_safe(self, tick: QuoteTick):
+        """Handle quote ticks. Routes SPX to base, processes options here."""
+        super().on_quote_tick_safe(tick)
         
-        # Filter: Only process quotes for the primary instrument (SPX)
-        # Option quotes are handled separately for position monitoring
-        if tick.instrument_id != self.instrument_id:
-            return
-        
-        # Update SPX price
-        bid = tick.bid_price.as_double()
-        ask = tick.ask_price.as_double()
-        
-        if bid > 0 and ask > 0:
-            self.current_spx_price = (bid + ask) / 2
-        elif bid > 0:
-            self.current_spx_price = bid
-        elif ask > 0:
-            self.current_spx_price = ask
-        else:
-            return
-        
-        # Update daily high
-        if self.current_spx_price > self.current_spx_high:
-            self.current_spx_high = self.current_spx_price
-        
-        # Track quote time
-        self.last_quote_time_ns = tick.ts_event
-        
-        # Log SPX price periodically (every 30s)
-        now_sec = int(self.clock.timestamp_ns() / 1_000_000_000)
-        if now_sec % 30 == 0 and now_sec != self._last_price_logged_time:
-            self._last_price_logged_time = now_sec
-            or_status = f"OR High={self.or_high:.2f}" if self.or_high else "OR pending"
-            self.logger.info(
-                f"SPX: {self.current_spx_price:.2f}, "
-                f"Today High: {self.current_spx_high:.2f}, "
-                f"{or_status}"
-            )
-        
-        
-        # Monitor active position for exit conditions
-        if self.active_option_id:
+        # Process option quotes only if we have an active position
+        if self.active_option_id and tick.instrument_id == self.active_option_id:
             self._check_exit_conditions()
 
     # =========================================================================
@@ -331,9 +146,9 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         if self.breakout_detected or self.entry_attempted_today:
             return
         
-        if self.current_spx_high > self.or_high:
+        if self.daily_high > self.or_high:
             self.logger.info(
-                f"🔥 BREAKOUT DETECTED! SPX High {self.current_spx_high:.2f} > "
+                f"🔥 BREAKOUT DETECTED! SPX High {self.daily_high:.2f} > "
                 f"OR High {self.or_high:.2f}"
             )
             self.breakout_detected = True
@@ -356,12 +171,13 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         if not self.is_market_open():
             return False, "Market closed"
         
-        # Check time cutoff
-        if not self.is_before_cutoff():
+        # Check time cutoff (compare with Eastern Time)
+        now_et = self.clock.utc_now().astimezone(self.tz)
+        if now_et.time() >= self.cutoff_time:
             return False, f"Past cutoff time ({self.cutoff_time})"
         
         # Check OR calculated
-        if not self.or_calculated:
+        if not self.is_opening_range_complete():
             return False, "Opening range not yet calculated"
         
         # Check breakout occurred
@@ -383,229 +199,49 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         return True, "Ready to enter"
 
     def _prepare_entry(self):
-        """Prepare for entry by requesting appropriate option contracts."""
-        self.logger.info("Preparing entry - requesting option contracts")
-        
-        # Calculate base strike (ATM)
-        base_strike = self._calculate_target_strike()
-        
-        if base_strike is None:
-            self.logger.error("Failed to calculate base strike")
-            return
-        
-        # Request range of strikes to find best price match
-        self._request_call_options(base_strike)
-        
+        """Prepare for entry by searching for Call option via find_option_by_premium."""
+        self.logger.info("Preparing entry - searching for Call option")
         self.entry_attempted_today = True
-
-    def _calculate_target_strike(self) -> Optional[float]:
-        """
-        Calculate target strike price based on option price target.
-        We want an option priced close to target_option_price (e.g., $4).
         
-        Strategy: Request a range of strikes and select the one closest to target price.
-        """
-        if self.current_spx_price == 0:
-            return None
-        
-        # We'll request multiple strikes around ATM and pick the best one
-        # This is a placeholder - we'll request a range in _request_call_options
-        atm_strike = round(self.current_spx_price / 5) * 5
-        
-        self.logger.info(
-            f"Will request strike range around ATM ${atm_strike:.0f} "
-            f"to find option priced near ${self.target_option_price}"
+        search_id = self.find_option_by_premium(
+            target_premium=self.target_option_price,
+            option_kind=OptionKind.CALL,
+            max_spread=self.max_spread_dollars,
+            selection_delay_seconds=self.DEFAULT_SELECTION_DELAY_SECONDS,
+            callback=self._on_call_option_found
         )
         
-        return atm_strike
+        if search_id:
+            self._active_search_id = search_id
+            self.logger.info(f"Option search initiated (search_id: {search_id[:8]}...)")
+        else:
+            self.logger.error("Failed to initiate option search")
 
-    def _request_call_options(self, base_strike: float):
-        """
-        Request multiple SPX Call option contracts to find best price match.
-        Requests strikes: ATM, ATM+5, ATM+10, ATM+15, ATM+20
-        """
-        
-        # Get today's date (0DTE)
-        today = self.clock.utc_now().date()
-        expiry_date_ib = today.strftime("%Y%m%d")
-        
-        # Request 7 strikes to find the one priced closest to target
-        strikes_to_request = [
-            base_strike,
-            base_strike + 5,
-            base_strike + 10,
-            base_strike + 15,
-            base_strike + 20,
-            base_strike + 25,
-            base_strike + 30
-        ]
-        
-        self.logger.info(
-            f"Requesting SPX Calls to find option priced near ${self.target_option_price}: "
-            f"Strikes={strikes_to_request}, Expiry={expiry_date_ib}"
-        )
-        
-        try:
-            contracts = []
-            for strike in strikes_to_request:
-                contracts.append({
-                    "secType": "OPT",
-                    "symbol": "SPX",
-                    "tradingClass": "SPXW",
-                    "exchange": "CBOE",
-                    "currency": "USD",
-                    "lastTradeDateOrContractMonth": expiry_date_ib,
-                    "strike": float(strike),
-                    "right": "C",
-                    "multiplier": "100"
-                })
-            
-            self.request_instruments(
-                venue=Venue("CBOE"),
-                params={"ib_contracts": contracts}
-            )
-            
-            self.options_requested = True
-            self.requested_strikes = strikes_to_request
-            
-            self.logger.info(f"✅ Requested {len(contracts)} SPX Call options")
-            
-        except Exception as e:
-            self.logger.error(f"❌ Failed to request Call options: {e}", exc_info=True)
-
-    def on_instrument(self, instrument):
-        """Called when new instrument is added to cache."""
-        super().on_instrument(instrument)
-        
-        # Collect all received options for selection
-        if (self.options_requested and
-            not self.active_option_id and
-            hasattr(instrument, 'option_kind') and
-            instrument.option_kind == OptionKind.CALL):
-            
-            self.logger.info(f"Received option: {instrument.id}, Strike: {instrument.strike_price}")
-            self.received_options.append(instrument)
-            
-            # Subscribe to option quotes immediately so data is available for selection
-            self.subscribe_quote_ticks(instrument.id)
-            
-            # After receiving options, try to select the best one
-            # Use one-shot time alert (cancel existing to avoid duplicates)
-            timer_name = f"{self.id}.select_option"
-            try:
-                self.clock.cancel_timer(timer_name)
-            except Exception:
-                pass  # Timer may not exist
-            
-            self.clock.set_time_alert(
-                name=timer_name,
-                alert_time=self.clock.utc_now() + timedelta(seconds=2),
-                callback=self._select_and_enter_best_option
-            )
-
-    def _select_and_enter_best_option(self, timer_event):
-        """Select the option with price closest to target and attempt entry."""
-        
-        if self.active_option_id:
-            return  # Already entered
-        
-        if not self.received_options:
-            self.logger.warning("No options received for selection")
+    def _on_call_option_found(self, search_id: str, option: Optional[Instrument], option_data: Optional[Dict]):
+        """Callback when find_option_by_premium completes."""
+        if search_id != self._active_search_id:
             return
         
-        self.logger.info(f"Selecting best option from {len(self.received_options)} received contracts")
+        self._active_search_id = None
         
-        # Get quotes for all received options
-        option_prices = []
-        
-        for option in self.received_options:
-            # Subscribe to get quote
-            self.subscribe_quote_ticks(option.id)
-            
-            # Get quote
-            quote = self.cache.quote_tick(option.id)
-            
-            if quote:
-                bid = quote.bid_price.as_double()
-                ask = quote.ask_price.as_double()
-                
-                if bid > 0 and ask > 0:
-                    mid = (bid + ask) / 2
-                    spread = ask - bid
-                    
-                    option_prices.append({
-                        'option': option,
-                        'bid': bid,
-                        'ask': ask,
-                        'mid': mid,
-                        'spread': spread
-                    })
-                    
-                    self.logger.info(
-                        f"  Strike ${float(option.strike_price.as_double()):.0f}: "
-                        f"Mid=${mid:.2f}, Spread=${spread:.2f}"
-                    )
-        
-        if not option_prices:
-            self.logger.warning("No valid option quotes available")
+        if option is None:
+            self.logger.warning("No suitable Call option found - entry skipped for today")
             return
         
-        # Find option with mid price closest to target (target_option_price)
-        target_price = self.target_option_price
-        best_option_data = min(
-            option_prices,
-            key=lambda x: abs(x['mid'] - target_price)
-        )
-        
-        selected_option = best_option_data['option']
-        selected_mid = best_option_data['mid']
-        selected_spread = best_option_data['spread']
-        
         self.logger.info(
-            f"✅ Selected option: Strike ${float(selected_option.strike_price.as_double()):.0f}, "
-            f"Mid=${selected_mid:.2f} (closest to target ${target_price:.2f}), "
-            f"Spread=${selected_spread:.2f}"
+            f"✅ Call option found: Strike ${float(option.strike_price.as_double()):.0f}, "
+            f"Mid=${option_data['mid']:.2f}, Spread=${option_data['spread']:.2f}"
         )
         
         # Try to enter with selected option
-        self._try_entry_with_option(selected_option)
+        self._try_entry_with_option(option, option_data)
 
-    def _try_entry_with_option(self, option: Instrument):
-        """
-        Attempt to enter position with the received option contract.
+    def _try_entry_with_option(self, option: Instrument, option_data: Dict):
+        """Attempt to enter position with the selected option contract."""
+        ask = option_data['ask']
         
-        IMPORTANT: This is called ONLY ONCE per day after option selection.
-        If spread is too wide, entry is SKIPPED for the day - NO RETRIES.
-        """
-        
-        # Get option quote
-        quote = self.cache.quote_tick(option.id)
-        
-        if not quote:
-            self.logger.warning(f"No quote available for {option.id} - will not retry")
-            return
-        
-        bid = quote.bid_price.as_double()
-        ask = quote.ask_price.as_double()
-        
-        if bid <= 0 or ask <= 0:
-            self.logger.warning(
-                f"Invalid quote for {option.id}: bid={bid}, ask={ask} - will not retry"
-            )
-            return
-        
-        # Check spread - THIS IS THE ONLY ATTEMPT
-        spread = ask - bid
-        if spread > self.max_spread_dollars:
-            self.logger.warning(
-                f"❌ ENTRY SKIPPED - Spread too wide: ${spread:.2f} > ${self.max_spread_dollars}\n"
-                f"   This was the only entry attempt for today (no retries)"
-            )
-            # Entry attempted and failed - won't try again today
-            return
-        
-        # Create entry order
-        entry_order = self.order_factory.limit(
+        # Create entry limit order
+        order = self.order_factory.limit(
             instrument_id=option.id,
             order_side=OrderSide.BUY,
             quantity=Quantity.from_int(self.quantity),
@@ -615,12 +251,11 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         
         # Calculate SL/TP prices
         self.stop_loss_price = ask * (1 - self.stop_loss_percent / 100)
-        self.take_profit_price = ask + self.take_profit_dollars
+        self.take_profit_price = ask + (self.take_profit_dollars / 100)
         
-        # Use BaseStrategy's new bracket order submission
-        # This attaches SL and TP at the broker level
+        # Submit bracket order (entry + target SL/TP)
         success = self.submit_bracket_order(
-            entry_order=entry_order,
+            entry_order=order,
             stop_loss_price=self.stop_loss_price,
             take_profit_price=self.take_profit_price
         )
@@ -630,19 +265,10 @@ class Orb15MinLongCallStrategy(BaseStrategy):
             self.entry_price = ask
             
             self.logger.info(
-                f"📈 BRACKET ORDER SUBMITTED: {option.id} @ ${ask:.2f} (Limit)\n"
-                f"   Entry per share: ${ask:.2f}\n"
-                f"   Entry per contract: ${ask * 100:.2f}\n"
-                f"   Stop Loss per share: ${self.stop_loss_price:.2f} "
-                f"({self.stop_loss_percent}%)\n"
-                f"   Stop Loss per contract: ${self.stop_loss_price * 100:.2f}\n"
-                f"   Take Profit per share: ${self.take_profit_price:.2f}\n"
-                f"   Take Profit per contract: ${self.take_profit_price * 100:.2f} "
-                f"(+${self.take_profit_dollars})"
+                f"📈 BRACKET ORDER SUBMITTED: {option.id} @ ${ask:.2f}\n"
+                f"   SL: ${self.stop_loss_price:.2f} ({self.stop_loss_percent}%)\n"
+                f"   TP: ${self.take_profit_price:.2f} (+${self.take_profit_dollars})"
             )
-            
-            # Subscribe to option quotes for PASSIVE monitoring (auditing)
-            self.subscribe_quote_ticks(option.id)
             
             self.save_state()
 
@@ -712,6 +338,11 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         """Called when strategy stops."""
         self.logger.info("Stopping ORB 15-Min Long Call strategy")
         
+        # Cancel any active search
+        if self._active_search_id:
+            self.cancel_premium_search(self._active_search_id)
+            self._active_search_id = None
+        
         # Close any open positions
         if self._has_open_position():
             self.close_strategy_position(reason="STRATEGY_STOP")
@@ -729,40 +360,20 @@ class Orb15MinLongCallStrategy(BaseStrategy):
 
     def get_state(self) -> Dict[str, Any]:
         """Return strategy state for persistence."""
-        return {
-            "or_high": self.or_high,
-            "or_low": self.or_low,
-            "or_calculated": self.or_calculated,
-            "last_or_calculation_date": str(self.last_or_calculation_date) if self.last_or_calculation_date else None,
-            "last_reset_date": str(self.last_reset_date) if self.last_reset_date else None,
-            "current_spx_high": self.current_spx_high,
-
+        state = super().get_state()
+        state.update({
             "breakout_detected": self.breakout_detected,
             "entry_attempted_today": self.entry_attempted_today,
             "active_option_id": str(self.active_option_id) if self.active_option_id else None,
             "entry_price": self.entry_price,
             "stop_loss_price": self.stop_loss_price,
             "take_profit_price": self.take_profit_price,
-            "options_requested": self.options_requested,
-            "requested_strikes": self.requested_strikes,
-        }
+        })
+        return state
 
     def set_state(self, state: Dict[str, Any]):
         """Restore strategy state."""
-        self.or_high = state.get("or_high")
-        self.or_low = state.get("or_low")
-        self.or_calculated = state.get("or_calculated", False)
-        
-        date_str = state.get("last_or_calculation_date")
-        if date_str:
-            self.last_or_calculation_date = datetime.fromisoformat(date_str).date()
-            
-        reset_date_str = state.get("last_reset_date")
-        if reset_date_str:
-            self.last_reset_date = datetime.fromisoformat(reset_date_str).date()
-
-        
-        self.current_spx_high = state.get("current_spx_high", 0.0)
+        super().set_state(state)
         self.breakout_detected = state.get("breakout_detected", False)
         self.entry_attempted_today = state.get("entry_attempted_today", False)
         
@@ -773,5 +384,3 @@ class Orb15MinLongCallStrategy(BaseStrategy):
         self.entry_price = state.get("entry_price")
         self.stop_loss_price = state.get("stop_loss_price")
         self.take_profit_price = state.get("take_profit_price")
-        self.options_requested = state.get("options_requested", False)
-        self.requested_strikes = state.get("requested_strikes", [])

@@ -21,15 +21,16 @@ from nautilus_trader.model.identifiers import InstrumentId, Venue
 from nautilus_trader.model.objects import Quantity, Price
 from nautilus_trader.model.instruments import Instrument
 
-from app.strategies.base import BaseStrategy
+from app.strategies.base_spx import SPXBaseStrategy
 from app.strategies.config import StrategyConfig
 
 
-class Orb15MinLongCallDeltaStrategy(BaseStrategy):
+class Orb15MinLongCallDeltaStrategy(SPXBaseStrategy):
     """
     Opening Range Breakout 15-Minute Long Call Strategy.
     
     Trades SPX 0DTE Call options based on opening range breakout.
+    Uses unified tick-based OR calculation from SPXBaseStrategy.
     """
 
     def __init__(
@@ -40,52 +41,8 @@ class Orb15MinLongCallDeltaStrategy(BaseStrategy):
     ):
         super().__init__(config, integration_manager, persistence_manager)
         
-        # Strategy parameters
-        self.opening_range_minutes = int(
-            self.strategy_config.parameters.get("opening_range_minutes", 15)
-        )
-        self.target_delta = float(
-            self.strategy_config.parameters.get("target_delta", 0.25)
-        )
-        self.stop_loss_percent = float(
-            self.strategy_config.parameters.get("stop_loss_percent", 40.0)
-        )
-        self.take_profit_dollars = float(
-            self.strategy_config.parameters.get("take_profit_dollars", 50.0)
-        )
-        self.max_spread_dollars = float(
-            self.strategy_config.parameters.get("max_spread_dollars", 0.2)
-        )
-        self.cutoff_time_hour = int(
-            self.strategy_config.parameters.get("cutoff_time_hour", 15)  # 3 PM
-        )
-        self.quantity = int(
-            self.strategy_config.parameters.get("quantity", 1)
-        )
-        
         # State tracking for logging
         self._last_price_logged_time = 0
-        
-        # Market hours (Eastern Time)
-        self.eastern_tz = pytz.timezone('US/Eastern')
-        self.market_open_time = time(9, 30)   # 9:30 AM ET
-        self.market_close_time = time(16, 0)  # 4:00 PM ET
-        self.or_end_time = None  # Calculated dynamically each day
-        self.cutoff_time = time(self.cutoff_time_hour, 0)  # Default 3:00 PM ET
-        
-        # Opening Range state
-        self.or_high = None
-        self.or_low = None
-        self.or_calculated = False
-        self.or_bars = []
-        self.last_or_calculation_date = None
-        self.last_reset_date = None
-
-        
-        # SPX price tracking
-        self.current_spx_price = 0.0
-        self.current_spx_high = 0.0  # Today's high
-        self.last_quote_time_ns = 0
         
         # Position management
         self.active_option_id = None
@@ -108,221 +65,86 @@ class Orb15MinLongCallDeltaStrategy(BaseStrategy):
     # =========================================================================
 
     def on_start_safe(self):
-        """Called after instrument is ready and base setup complete.
+        """Called after instrument is ready and base setup complete."""
+        super().on_start_safe()
         
-        Note: Data subscriptions are handled by _subscribe_data() called from base class.
-        """
+        # Load parameters (already handled by base mostly, but local ones here)
+        params = self.strategy_config.parameters
+        self.target_delta = float(params.get("target_delta", 0.25))
+        self.stop_loss_percent = float(params.get("stop_loss_percent", 40.0))
+        self.take_profit_dollars = float(params.get("take_profit_dollars", 50.0))
+        self.max_spread_dollars = float(params.get("max_spread_dollars", 0.2))
+        self.cutoff_time_hour = int(params.get("cutoff_time_hour", 15))
+        self.quantity = int(params.get("quantity", 1))
+        
+        # Eastern Time cutoff for entries
+        self.cutoff_time = time(self.cutoff_time_hour, 0)
+        
         self.logger.info(
-            f"ORB 15-Min Long Call Delta Strategy starting: "
-            f"OR={self.opening_range_minutes}m, "
-            f"Target delta={self.target_delta}, "
-            f"SL={self.stop_loss_percent}%, "
-            f"TP=${self.take_profit_dollars} per contract, "
-            f"Max spread=${self.max_spread_dollars}"
+            f"ORB 15-Min Long Call Delta Strategy STARTING: "
+            f"OR={self.opening_range_minutes}m, Target Delta={self.target_delta}, "
+            f"SL={self.stop_loss_percent}%, TP=${self.take_profit_dollars}, "
+            f"Quantity={self.quantity}"
         )
 
-    def _subscribe_data(self):
-        """Subscribe to required data feeds."""
-        # Called by BaseStrategy - subscribe to quotes and bars
-        
-        # Subscribe to SPX quotes
-        try:
-            self.subscribe_quote_ticks(self.instrument_id)
-            self.logger.info(f"Subscribed to SPX quotes: {self.instrument_id}")
-        except Exception as e:
-            self.logger.error(f"Failed to subscribe to SPX quotes: {e}", exc_info=True)
-        
-        # Subscribe to 1-minute bars for opening range calculation
-        try:
-            bar_type = BarType(
-                self.instrument_id,
-                BarSpecification.from_str("1-MINUTE-LAST")
+    def on_spx_tick(self, tick: QuoteTick):
+        """Called for each SPX quote tick."""
+        # Periodically log price (every 60s)
+        now_sec = int(self.clock.timestamp_ns() / 1_000_000_000)
+        if now_sec % 60 == 0 and now_sec != self._last_price_logged_time:
+            self._last_price_logged_time = now_sec
+            or_status = f"OR High={self.or_high:.2f}" if self.or_high else "OR pending"
+            self.logger.info(
+                f"SPX: {self.current_spx_price:.2f} | "
+                f"Today High: {self.daily_high:.2f} | "
+                f"{or_status}"
             )
-            self.subscribe_bars(bar_type)
-            self.logger.info(f"Subscribed to 1-minute bars for OR calculation")
-        except Exception as e:
-            self.logger.error(f"Failed to subscribe to bars: {e}", exc_info=True)
+
+        # Check for breakout (tick-by-tick breakout detection)
+        if self.is_opening_range_complete() and not self.breakout_detected:
+            self._check_breakout()
+        
+        # Monitor active position for exit conditions
+        if self.active_option_id:
+            self._check_exit_conditions()
 
 
     # =========================================================================
     # MARKET HOURS & TIMING
     # =========================================================================
 
-    def _get_eastern_now(self) -> datetime:
-        """Get current time in Eastern timezone using strategy clock (backtestable)."""
-        return self.clock.utc_now().astimezone(self.eastern_tz)
+    def on_minute_closed(self, close_price: float):
+        """Called at each minute close. Can be used for smoother signals."""
+        if self.is_opening_range_complete() and not self.breakout_detected:
+            # We also check breakout on minute close for consistency with bar-based methods
+            if close_price > self.or_high:
+                self.logger.info(f"Breakout detected on minute close: {close_price:.2f} > {self.or_high:.2f}")
+                self._check_breakout()
 
-    def is_market_open(self) -> bool:
-        """Check if SPX options market is currently open."""
-        now = self._get_eastern_now()
-        
-        # Weekend check
-        if now.weekday() >= 5:  # Saturday=5, Sunday=6
-            return False
-        
-        # Market hours check
-        current_time = now.time()
-        return self.market_open_time <= current_time <= self.market_close_time
-
-    def is_before_cutoff(self) -> bool:
-        """Check if current time is before entry cutoff (default 3 PM ET)."""
-        now = self._get_eastern_now()
-        return now.time() < self.cutoff_time
-
-    def get_or_end_time(self) -> time:
-        """Calculate opening range end time (9:30 + opening_range_minutes)."""
-        if self.or_end_time is None:
-            # Calculate OR end time
-            market_open = datetime.combine(datetime.today(), self.market_open_time)
-            or_end = market_open + timedelta(minutes=self.opening_range_minutes)
-            self.or_end_time = or_end.time()
-        return self.or_end_time
-
-    def is_in_opening_range_period(self) -> bool:
-        """Check if we're currently in the opening range period."""
-        now = self._get_eastern_now()
-        current_time = now.time()
-        or_end = self.get_or_end_time()
-        
-        return self.market_open_time <= current_time < or_end
-
-    def should_reset_daily_state(self) -> bool:
-        """Check if we need to reset daily state (new trading day)."""
-        now = self._get_eastern_now()
-        today = now.date()
-        
-        if self.last_reset_date != today:
-            return True
-        return False
-
-
-    # =========================================================================
-    # OPENING RANGE CALCULATION
-    # =========================================================================
-
-    def on_bar_safe(self, bar: Bar):
-        """Handle 1-minute bars for opening range calculation."""
-        
-        # Reset daily state if new day
-        if self.should_reset_daily_state():
-            self._reset_daily_state()
-        
-        # Update current high
-        bar_high = bar.high.as_double()
-        if bar_high > self.current_spx_high:
-            self.current_spx_high = bar_high
-        
-        # Collect bars during opening range period
-        if self.is_in_opening_range_period() and not self.or_calculated:
-            self.or_bars.append(bar)
-            self.logger.debug(
-                f"OR bar collected: H={bar.high.as_double():.2f}, "
-                f"L={bar.low.as_double():.2f} "
-                f"({len(self.or_bars)}/{self.opening_range_minutes})"
-            )
-        
-        # Calculate opening range when period ends
-        elif not self.or_calculated and len(self.or_bars) > 0:
-            self._calculate_opening_range()
-        
-        # Check for breakout after OR calculated
-        if self.or_calculated and not self.breakout_detected:
-            self._check_breakout()
-
-    def _calculate_opening_range(self):
-        """Calculate opening range high and low from collected bars."""
-        if not self.or_bars:
-            self.logger.warning("No bars collected for opening range calculation")
-            return
-        
-        highs = [bar.high.as_double() for bar in self.or_bars]
-        lows = [bar.low.as_double() for bar in self.or_bars]
-        
-        self.or_high = max(highs)
-        self.or_low = min(lows)
-        self.or_calculated = True
-        
-        now = self._get_eastern_now()
-        self.last_or_calculation_date = now.date()
-        
-        self.logger.info(
-            f"📈 Opening Range calculated ({self.opening_range_minutes}m): "
-            f"High={self.or_high:.2f}, Low={self.or_low:.2f}, "
-            f"Range=${self.or_high - self.or_low:.2f}"
-        )
-
-    def _reset_daily_state(self):
-        """Reset all daily state for new trading day."""
-        self.logger.info("Resetting daily state for new trading day")
-        
-        # Update reset date tracking
-        now = self._get_eastern_now()
-        self.last_reset_date = now.date()
-        
-        
-        self.or_high = None
-        self.or_low = None
-        self.or_calculated = False
-        self.or_bars = []
-        self.or_end_time = None
-        
-        self.current_spx_high = 0.0
+    def _reset_daily_state(self, current_date):
+        """Reset daily tracking state. Extends base class reset."""
+        super()._reset_daily_state(current_date)
         self.breakout_detected = False
         self.entry_attempted_today = False
-        
         self.options_requested = False
         self.requested_strikes = []
-        self.received_options = []  # Clear received options
+        self.received_options = []
+        self._last_price_logged_time = 0
+        self.logger.info(f"Daily strategy state reset for {current_date}")
 
     # =========================================================================
     # QUOTE HANDLING & PRICE TRACKING
     # =========================================================================
 
-    def on_quote_tick(self, tick: QuoteTick):
-        """Handle quote ticks - only process SPX quotes for price tracking."""
+    # Quote handling is now integrated into base class SPXBaseStrategy.
+    # on_spx_tick() and on_minute_closed() are used instead.
+    
+    def on_quote_tick_safe(self, tick: QuoteTick):
+        """Handle quote ticks. Routes SPX to base, processes options here."""
+        super().on_quote_tick_safe(tick)
         
-        # Filter: Only process quotes for the primary instrument (SPX)
-        # Option quotes are handled separately for position monitoring
-        if tick.instrument_id != self.instrument_id:
-            return
-        
-        # Update SPX price
-        bid = tick.bid_price.as_double()
-        ask = tick.ask_price.as_double()
-        
-        if bid > 0 and ask > 0:
-            self.current_spx_price = (bid + ask) / 2
-        elif bid > 0:
-            self.current_spx_price = bid
-        elif ask > 0:
-            self.current_spx_price = ask
-        else:
-            return
-        
-        # Update daily high
-        if self.current_spx_price > self.current_spx_high:
-            self.current_spx_high = self.current_spx_price
-        
-        # Track quote time
-        self.last_quote_time_ns = tick.ts_event
-        
-        # Log SPX price periodically (every 30s)
-        now_sec = int(self.clock.timestamp_ns() / 1_000_000_000)
-        if now_sec % 30 == 0 and now_sec != self._last_price_logged_time:
-            self._last_price_logged_time = now_sec
-            or_status = f"OR High={self.or_high:.2f}" if self.or_high else "OR pending"
-            self.logger.info(
-                f"SPX: {self.current_spx_price:.2f}, "
-                f"Today High: {self.current_spx_high:.2f}, "
-                f"{or_status}"
-            )
-        
-        # Check for breakout if OR calculated
-        if self.or_calculated and not self.breakout_detected:
-            self._check_breakout()
-        
-        # Monitor active position for exit conditions
-        if self.active_option_id:
+        # Process option quotes only if we have an active position
+        if self.active_option_id and tick.instrument_id == self.active_option_id:
             self._check_exit_conditions()
 
     # =========================================================================
@@ -334,9 +156,9 @@ class Orb15MinLongCallDeltaStrategy(BaseStrategy):
         if self.breakout_detected or self.entry_attempted_today:
             return
         
-        if self.current_spx_high > self.or_high:
+        if self.daily_high > self.or_high:
             self.logger.info(
-                f"🔥 BREAKOUT DETECTED! SPX High {self.current_spx_high:.2f} > "
+                f"🔥 BREAKOUT DETECTED! SPX High {self.daily_high:.2f} > "
                 f"OR High {self.or_high:.2f}"
             )
             self.breakout_detected = True
@@ -359,12 +181,13 @@ class Orb15MinLongCallDeltaStrategy(BaseStrategy):
         if not self.is_market_open():
             return False, "Market closed"
         
-        # Check time cutoff
-        if not self.is_before_cutoff():
+        # Check time cutoff (compare with Eastern Time)
+        now_et = self.clock.utc_now().astimezone(self.tz)
+        if now_et.time() >= self.cutoff_time:
             return False, f"Past cutoff time ({self.cutoff_time})"
         
         # Check OR calculated
-        if not self.or_calculated:
+        if not self.is_opening_range_complete():
             return False, "Opening range not yet calculated"
         
         # Check breakout occurred
@@ -760,14 +583,8 @@ class Orb15MinLongCallDeltaStrategy(BaseStrategy):
 
     def get_state(self) -> Dict[str, Any]:
         """Return strategy state for persistence."""
-        return {
-            "or_high": self.or_high,
-            "or_low": self.or_low,
-            "or_calculated": self.or_calculated,
-            "last_or_calculation_date": str(self.last_or_calculation_date) if self.last_or_calculation_date else None,
-            "last_reset_date": str(self.last_reset_date) if self.last_reset_date else None,
-            "current_spx_high": self.current_spx_high,
-
+        state = super().get_state()
+        state.update({
             "breakout_detected": self.breakout_detected,
             "entry_attempted_today": self.entry_attempted_today,
             "active_option_id": str(self.active_option_id) if self.active_option_id else None,
@@ -776,31 +593,19 @@ class Orb15MinLongCallDeltaStrategy(BaseStrategy):
             "take_profit_price": self.take_profit_price,
             "options_requested": self.options_requested,
             "requested_strikes": self.requested_strikes,
-        }
+        })
+        return state
 
     def set_state(self, state: Dict[str, Any]):
         """Restore strategy state."""
-        self.or_high = state.get("or_high")
-        self.or_low = state.get("or_low")
-        self.or_calculated = state.get("or_calculated", False)
-        
-        date_str = state.get("last_or_calculation_date")
-        if date_str:
-            self.last_or_calculation_date = datetime.fromisoformat(date_str).date()
-            
-        reset_date_str = state.get("last_reset_date")
-        if reset_date_str:
-            self.last_reset_date = datetime.fromisoformat(reset_date_str).date()
-
-        
-        self.current_spx_high = state.get("current_spx_high", 0.0)
+        super().set_state(state)
         self.breakout_detected = state.get("breakout_detected", False)
         self.entry_attempted_today = state.get("entry_attempted_today", False)
         
         option_id_str = state.get("active_option_id")
         if option_id_str:
             self.active_option_id = InstrumentId.from_str(option_id_str)
-        
+            
         self.entry_price = state.get("entry_price")
         self.stop_loss_price = state.get("stop_loss_price")
         self.take_profit_price = state.get("take_profit_price")
