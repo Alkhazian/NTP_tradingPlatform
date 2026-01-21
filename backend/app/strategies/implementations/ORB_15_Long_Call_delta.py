@@ -81,7 +81,7 @@ class Orb15MinLongCallDeltaStrategy(SPXBaseStrategy):
         self.cutoff_time = time(self.cutoff_time_hour, 0)
         
         self.logger.info(
-            f"ORB 15-Min Long Call Delta Strategy STARTING: "
+            f"🚀 ORB 15-Min Long Call Delta Strategy STARTING: "
             f"OR={self.opening_range_minutes}m, Target Delta={self.target_delta}, "
             f"SL={self.stop_loss_percent}%, TP=${self.take_profit_dollars}, "
             f"Quantity={self.quantity}"
@@ -94,9 +94,10 @@ class Orb15MinLongCallDeltaStrategy(SPXBaseStrategy):
         if now_sec % 60 == 0 and now_sec != self._last_price_logged_time:
             self._last_price_logged_time = now_sec
             or_status = f"OR High={self.or_high:.2f}" if self.or_high else "OR pending"
+            daily_high_str = f"{self.daily_high:.2f}" if self.daily_high is not None else "None"
             self.logger.info(
                 f"SPX: {self.current_spx_price:.2f} | "
-                f"Today High: {self.daily_high:.2f} | "
+                f"Today High: {daily_high_str} | "
                 f"{or_status}"
             )
 

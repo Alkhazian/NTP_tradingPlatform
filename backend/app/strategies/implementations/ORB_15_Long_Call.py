@@ -90,9 +90,10 @@ class Orb15MinLongCallStrategy(SPXBaseStrategy):
         if now_sec % 60 == 0 and now_sec != self._last_price_logged_time:
             self._last_price_logged_time = now_sec
             or_status = f"OR High={self.or_high:.2f}" if self.or_high else "OR pending"
+            daily_high_str = f"{self.daily_high:.2f}" if self.daily_high is not None else "None"
             self.logger.info(
                 f"SPX: {self.current_spx_price:.2f} | "
-                f"Today High: {self.daily_high:.2f} | "
+                f"Today High: {daily_high_str} | "
                 f"{or_status}"
             )
 

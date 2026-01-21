@@ -90,9 +90,10 @@ class Orb15MinLongPutStrategy(SPXBaseStrategy):
         if now_sec % 60 == 0 and now_sec != self._last_price_logged_time:
             self._last_price_logged_time = now_sec
             or_status = f"OR Low={self.or_low:.2f}" if self.or_low else "OR pending"
+            daily_low_str = f"{self.daily_low:.2f}" if self.daily_low is not None else "None"
             self.logger.info(
                 f"SPX: {self.current_spx_price:.2f} | "
-                f"Today Low: {self.daily_low:.2f} | "
+                f"Today Low: {daily_low_str} | "
                 f"{or_status}"
             )
 

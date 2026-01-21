@@ -829,6 +829,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
 
     def _reset_daily_state(self, new_date):
         """Reset all daily state for new trading day."""
+        old_date = self.current_trading_day
         super()._reset_daily_state(new_date)
         
         self.high_breached = False
@@ -858,10 +859,6 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         """Return strategy-specific state for persistence."""
         state = super().get_state()
         state.update({
-            "daily_high": self.daily_high,
-            "daily_low": self.daily_low,
-            "range_calculated": self.range_calculated,
-            "current_trading_day": str(self.current_trading_day) if self.current_trading_day else None,
             "high_breached": self.high_breached,
             "low_breached": self.low_breached,
             "traded_today": self.traded_today,
@@ -875,14 +872,6 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
     def set_state(self, state: Dict[str, Any]):
         """Restore strategy-specific state."""
         super().set_state(state)
-        
-        self.daily_high = state.get("daily_high")
-        self.daily_low = state.get("daily_low")
-        self.range_calculated = state.get("range_calculated", False)
-        
-        trading_day_str = state.get("current_trading_day")
-        if trading_day_str:
-            self.current_trading_day = datetime.strptime(trading_day_str, "%Y-%m-%d").date()
         
         self.high_breached = state.get("high_breached", False)
         self.low_breached = state.get("low_breached", False)
