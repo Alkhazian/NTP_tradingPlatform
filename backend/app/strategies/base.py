@@ -1289,6 +1289,8 @@ class BaseStrategy(Strategy):
             
             if is_entry:
                 self._on_entry_filled(event)
+                # NOTE: For entry fills, save_state() is called INSIDE _start_trade_record_async()
+                # after active_trade_id is set, to avoid race condition
             elif is_exit:
                 # Check for mapped bracket exit reason
                 mapped_reason = self._bracket_exit_map.get(order_id)
@@ -1299,12 +1301,15 @@ class BaseStrategy(Strategy):
                     self._bracket_exit_map.pop(order_id, None)
                 
                 self._on_exit_filled(event)
+                # For exit fills, save state immediately (no async dependency)
+                self.save_state()
             
             # Call strategy-specific handler
             self.on_order_filled_safe(event)
             
-            # Save state AFTER strategy-specific logic (ensures timers etc are saved)
-            self.save_state()
+            # Save state for non-entry/exit fills (e.g., spread fills, other order types)
+            if not is_entry and not is_exit:
+                self.save_state()
             
         except Exception as e:
             self.on_unexpected_error(e)
@@ -1384,8 +1389,12 @@ class BaseStrategy(Strategy):
                 self.logger.info(f"Trade record started: ID={self.active_trade_id}")
             else:
                 self.logger.warning("No trade recorder found on integration manager")
+                # Still save state even without trade recorder
+                self.save_state()
         except Exception as e:
             self.logger.error(f"Failed to start trade record: {e}", exc_info=True)
+            # CRITICAL: Save state even on error to preserve inventory and other state
+            self.save_state()
 
     async def _close_trade_record_async(self, event):
         """Async handler for closing trade record."""
