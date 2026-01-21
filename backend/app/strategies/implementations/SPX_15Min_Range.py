@@ -498,48 +498,145 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 "multiplier": "100"
             })
 
-        self.request_instruments(
-            venue=Venue("InteractiveBrokers"),
-            params={"ib_contracts": contracts}
+        # Log full contract details for debugging
+        self.logger.info(
+            f"═══════════════════════════════════════════════════════════════\n"
+            f"📡 REQUESTING OPTION CONTRACTS FROM IB\n"
+            f"═══════════════════════════════════════════════════════════════\n"
+            f"   Venue: InteractiveBrokers\n"
+            f"   Number of contracts: {len(contracts)}\n"
+            f"   Contracts:\n" +
+            "\n".join([
+                f"      [{i+1}] {c['symbol']} {c['tradingClass']} {c['strike']}{c['right']} "
+                f"exp={c['lastTradeDateOrContractMonth']} @ {c['exchange']}"
+                for i, c in enumerate(contracts)
+            ]) + "\n"
+            f"═══════════════════════════════════════════════════════════════"
         )
-        self.logger.debug(f"Requested {len(contracts)} option contracts from IB")
         
-        # Set timeout for entry process
+        try:
+            self.request_instruments(
+                venue=Venue("InteractiveBrokers"),
+                params={"ib_contracts": contracts}
+            )
+            self.logger.info(f"✅ request_instruments() called successfully for {len(contracts)} contracts")
+        except Exception as e:
+            self.logger.error(f"❌ request_instruments() FAILED: {e}", exc_info=True)
+            self._cancel_entry()
+            return
+        
+        # Store expected instrument IDs for cache polling
+        # NautilusTrader/IB format: SPXW260121P06810000.CBOE (uses 2-digit year!)
+        self._expected_instrument_ids = []
+        
+        # Convert YYYYMMDD to YYMMDD (IB uses 2-digit year format)
+        expiry_yy = today_str[2:]  # "20260121" -> "260121"
+        
+        for strike in [self._target_short_strike, self._target_long_strike]:
+            # Format: SPXW260121P06810000.CBOE
+            strike_str = f"{int(strike):05d}000"  # e.g., 6810 -> 06810000
+            inst_id_str = f"SPXW{expiry_yy}{option_right}{strike_str}.CBOE"
+            self._expected_instrument_ids.append(inst_id_str)
+        
+        self.logger.info(
+            f"📋 Expected instrument IDs in cache:\n" +
+            "\n".join([f"      • {inst_id}" for inst_id in self._expected_instrument_ids])
+        )
+        
+        # Start polling cache for instruments (since on_instrument callback doesn't work for request_instruments)
+        self._cache_poll_attempt = 0
+        self._max_cache_poll_attempts = 15  # 15 attempts * 2 seconds = 30 seconds total
+        self.clock.set_time_alert(
+            name=f"{self.id}_cache_poll",
+            alert_time=self.clock.utc_now() + timedelta(seconds=2),
+            callback=self._poll_cache_for_instruments
+        )
+        self.logger.info(f"🔄 Started cache polling (every 2s, max {self._max_cache_poll_attempts} attempts)")
+        
+        # Set absolute timeout for entry process
         self.clock.set_time_alert(
             name=f"{self.id}_entry_timeout",
-            alert_time=self.clock.utc_now() + timedelta(seconds=30),
+            alert_time=self.clock.utc_now() + timedelta(seconds=35),
             callback=self._on_entry_timeout
         )
-        self.logger.debug(f"Entry timeout set for 30 seconds")
+        self.logger.debug(f"Entry timeout set for 35 seconds")
 
     def on_instrument(self, instrument: Instrument):
         """Handle received instruments - track option legs for both directions."""
         super().on_instrument(instrument)
         
+        # Diagnostic: Log ALL instruments received (not just options)
+        self.logger.debug(
+            f"📥 on_instrument received: {instrument.id} "
+            f"(type={type(instrument).__name__}, "
+            f"has_strike={hasattr(instrument, 'strike_price')}, "
+            f"has_kind={hasattr(instrument, 'option_kind')})"
+        )
+        
         if not self.entry_in_progress:
+            self.logger.debug(f"   → Ignored (entry_in_progress=False)")
             return
 
         # Determine expected option kind based on direction
         expected_kind = OptionKind.CALL if self._signal_direction == 'bearish' else OptionKind.PUT
+        expected_kind_str = "CALL" if expected_kind == OptionKind.CALL else "PUT"
+        
+        # Diagnostic: Log option evaluation
+        self.logger.info(
+            f"📋 Evaluating instrument for entry:\n"
+            f"   Instrument: {instrument.id}\n"
+            f"   Entry in progress: {self.entry_in_progress}\n"
+            f"   Signal direction: {self._signal_direction}\n"
+            f"   Expected kind: {expected_kind_str}\n"
+            f"   Target short strike: {self._target_short_strike}\n"
+            f"   Target long strike: {self._target_long_strike}\n"
+            f"   Current found legs: {list(self._found_legs.keys())}"
+        )
 
         # Check if this is an option we're looking for
         if hasattr(instrument, 'strike_price') and hasattr(instrument, 'option_kind'):
             strike = float(instrument.strike_price.as_double())
+            actual_kind = instrument.option_kind
+            actual_kind_str = "CALL" if actual_kind == OptionKind.CALL else "PUT"
+            
+            self.logger.info(
+                f"   🔍 Option details: Strike={strike}, Kind={actual_kind_str}"
+            )
             
             is_target = False
-            if strike == self._target_short_strike and instrument.option_kind == expected_kind:
+            match_reason = ""
+            if strike == self._target_short_strike and actual_kind == expected_kind:
                 is_target = True
-            elif strike == self._target_long_strike and instrument.option_kind == expected_kind:
+                match_reason = "SHORT LEG"
+            elif strike == self._target_long_strike and actual_kind == expected_kind:
                 is_target = True
+                match_reason = "LONG LEG"
+            else:
+                # Log why it didn't match
+                reasons = []
+                if strike != self._target_short_strike and strike != self._target_long_strike:
+                    reasons.append(f"strike {strike} not in [{self._target_short_strike}, {self._target_long_strike}]")
+                if actual_kind != expected_kind:
+                    reasons.append(f"kind {actual_kind_str} != expected {expected_kind_str}")
+                self.logger.debug(f"   ❌ Not a match: {', '.join(reasons)}")
                 
             if is_target:
                 kind_str = "C" if expected_kind == OptionKind.CALL else "P"
-                self.logger.info(f"✅ Found leg: {instrument.id} (Strike {strike}{kind_str})")
+                self.logger.info(
+                    f"   ✅ MATCHED as {match_reason}: {instrument.id} (Strike {strike}{kind_str})"
+                )
                 self._found_legs[strike] = instrument
                 
                 # Check if we have both legs
                 if len(self._found_legs) >= 2:
+                    self.logger.info(f"   🎯 Both legs found! Creating spread instrument...")
                     self._create_spread_instrument()
+                else:
+                    self.logger.info(f"   ⏳ Waiting for more legs ({len(self._found_legs)}/2 found)")
+        else:
+            self.logger.debug(
+                f"   → Not an option instrument (missing strike_price or option_kind)"
+            )
 
     def _create_spread_instrument(self):
         """Create the spread instrument from found legs."""
@@ -749,16 +846,85 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             self.close_spread_smart()
             self._spread_entry_price = None
 
+    def _poll_cache_for_instruments(self, event):
+        """
+        Poll cache for requested instruments.
+        
+        NautilusTrader's request_instruments() adds instruments to cache but
+        does NOT trigger on_instrument callback. So we must poll the cache.
+        """
+        if not self.entry_in_progress:
+            self.logger.debug("Cache poll skipped - entry no longer in progress")
+            return
+        
+        self._cache_poll_attempt += 1
+        self.logger.info(
+            f"🔍 Cache poll attempt {self._cache_poll_attempt}/{self._max_cache_poll_attempts}"
+        )
+        
+        # Check cache for each expected instrument
+        for inst_id_str in self._expected_instrument_ids:
+            try:
+                inst_id = InstrumentId.from_str(inst_id_str)
+                instrument = self.cache.instrument(inst_id)
+                
+                if instrument:
+                    strike = float(instrument.strike_price.as_double())
+                    
+                    if strike not in self._found_legs:
+                        self.logger.info(
+                            f"   ✅ Found in cache: {inst_id_str} (Strike {strike})"
+                        )
+                        self._found_legs[strike] = instrument
+                else:
+                    self.logger.debug(f"   ⏳ Not yet in cache: {inst_id_str}")
+                    
+            except Exception as e:
+                self.logger.warning(f"   ⚠️ Error checking cache for {inst_id_str}: {e}")
+        
+        # Check if we have both legs
+        if len(self._found_legs) >= 2:
+            self.logger.info(
+                f"🎯 Both legs found in cache! Short={self._target_short_strike}, Long={self._target_long_strike}"
+            )
+            # Cancel the polling timer
+            try:
+                self.clock.cancel_timer(f"{self.id}_cache_poll")
+            except Exception:
+                pass
+            # Create spread
+            self._create_spread_instrument()
+            return
+        
+        # Schedule next poll if not exhausted
+        if self._cache_poll_attempt < self._max_cache_poll_attempts:
+            self.clock.set_time_alert(
+                name=f"{self.id}_cache_poll",
+                alert_time=self.clock.utc_now() + timedelta(seconds=2),
+                callback=self._poll_cache_for_instruments
+            )
+        else:
+            self.logger.warning(
+                f"❌ Cache polling exhausted after {self._cache_poll_attempt} attempts. "
+                f"Found {len(self._found_legs)}/2 legs."
+            )
+
     def _on_entry_timeout(self, event):
         """Handle entry timeout."""
         if self.entry_in_progress:
             legs_found = len(self._found_legs)
             if self.spread_instrument:
                 self.logger.info(
-                    f"⏱️ Entry timeout (30s) but spread is ready. "
+                    f"⏱️ Entry timeout (35s) but spread is ready. "
                     f"Continuing to wait for acceptable quote..."
                 )
             else:
+                # Cancel cache polling
+                try:
+                    self.clock.cancel_timer(f"{self.id}_cache_poll")
+                except Exception:
+                    pass
+                
                 self.logger.warning(
                     f"═══════════════════════════════════════════════════════════════\n"
                     f"⏱️ ENTRY TIMEOUT - Spread Not Ready\n"
