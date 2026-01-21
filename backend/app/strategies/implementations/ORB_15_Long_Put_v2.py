@@ -73,6 +73,9 @@ class Orb15MinLongPutV2Strategy(SPXBaseStrategy):
             self.strategy_config.parameters.get("quantity", 1)
         )
         
+        # State tracking for logging
+        self._last_price_logged_time = 0
+        
         # Market hours (Eastern Time)
         self.eastern_tz = pytz.timezone('US/Eastern')
         self.market_open_time = time(9, 30)   # 9:30 AM ET
@@ -137,8 +140,10 @@ class Orb15MinLongPutV2Strategy(SPXBaseStrategy):
         # Track quote time
         self.last_quote_time_ns = tick.ts_event
         
-        # Log SPX price periodically
-        if int(self.clock.timestamp_ns() / 1_000_000_000) % 30 == 0:
+        # Log SPX price periodically (every 30s)
+        now_sec = int(self.clock.timestamp_ns() / 1_000_000_000)
+        if now_sec % 30 == 0 and now_sec != self._last_price_logged_time:
+            self._last_price_logged_time = now_sec
             or_status = f"OR Low={self.or_low:.2f}" if self.or_low else "OR pending"
             self.logger.info(
                 f"SPX: {self.current_spx_price:.2f}, "
@@ -464,6 +469,7 @@ class Orb15MinLongPutV2Strategy(SPXBaseStrategy):
             
             self.save_state()
 
+
     # =========================================================================
     # EXIT LOGIC
     # =========================================================================
@@ -591,6 +597,7 @@ class Orb15MinLongPutV2Strategy(SPXBaseStrategy):
         self.or_low = state.get("or_low")
         self.or_calculated = state.get("or_calculated", False)
         
+        date_str = state.get("last_or_calculation_date")
         if date_str:
             self.last_or_calculation_date = datetime.fromisoformat(date_str).date()
             

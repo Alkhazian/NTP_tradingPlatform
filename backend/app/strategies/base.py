@@ -20,7 +20,7 @@ from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.model.identifiers import ClientOrderId, InstrumentId, Venue
 from nautilus_trader.model.enums import OrderSide, PositionSide, OrderStatus, TimeInForce
 from nautilus_trader.model.objects import Quantity
-from nautilus_trader.model.orders import Order
+from nautilus_trader.model.orders import Order, OrderList
 from nautilus_trader.model.position import Position
 from nautilus_trader.common.enums import ComponentState
 
@@ -95,6 +95,13 @@ class BaseStrategy(Strategy):
         
         # Trade persistence
         self.active_trade_id: Optional[int] = None
+        
+        # Bracket order tracking (mapping ClientOrderId of exit legs to reason)
+        self._bracket_exit_map: Dict[ClientOrderId, str] = {}
+        
+        # Sequential bracket tracking (intent to submit exits after entry fill)
+        # Entry ClientOrderId -> {sl_price, tp_price, ...}
+        self._pending_bracket_exits: Dict[ClientOrderId, Dict[str, Any]] = {}
 
 
     # =========================================================================
@@ -824,6 +831,130 @@ class BaseStrategy(Strategy):
         
         return True, ""
 
+    def submit_bracket_order(
+        self, 
+        entry_order: Order, 
+        stop_loss_price: Optional[float] = None, 
+        take_profit_price: Optional[float] = None
+    ) -> bool:
+        """
+        Submit a bracket order (entry + attached SL/TP).
+        """
+        can_submit, reason = self.can_submit_entry_order()
+        if not can_submit:
+            self.logger.warning(f"Cannot submit bracket order: {reason}")
+            return False
+
+        qty = entry_order.quantity
+        tif = entry_order.time_in_force
+        
+        # LOGIC CHANGE: To bypass IBKR "Combo Strategy" permission rejections (Code 201),
+        # we submit the entry order FIRST and INDEPENDENTLY. 
+        # The exit legs will be submitted as an OCO pair once the entry is filled.
+        
+        # Track entry as pending
+        self._pending_entry_orders.add(entry_order.client_order_id)
+        
+        # Save the exit leg intent
+        self._pending_bracket_exits[entry_order.client_order_id] = {
+            "stop_loss_price": stop_loss_price,
+            "take_profit_price": take_profit_price,
+            "quantity": float(qty.as_double()),
+            "instrument_id": str(entry_order.instrument_id),
+            "time_in_force": tif
+        }
+
+        self.submit_order(entry_order)
+        self.logger.info(
+            f"📈 Entry order submitted: {entry_order.client_order_id}. "
+            f"Broker-side SL/TP will be attached upon fill."
+        )
+        
+        # Immediate save to persist the exit intent
+        self.save_state()
+        return True
+
+    def _trigger_bracket_exits(self, exit_data: dict, entry_side: OrderSide):
+        """Submit the SL and TP legs as an OCO pair after entry fill."""
+        sl_price_val = exit_data.get("stop_loss_price")
+        tp_price_val = exit_data.get("take_profit_price")
+        inst_id_str = exit_data["instrument_id"]
+        from nautilus_trader.model.identifiers import InstrumentId
+        inst_id = InstrumentId.from_str(inst_id_str)
+        qty = self.instrument.make_qty(exit_data["quantity"])
+        tif = exit_data["time_in_force"]
+        
+        exit_side = OrderSide.SELL if entry_side == OrderSide.BUY else OrderSide.BUY
+        
+        instrument = self.cache.instrument(inst_id)
+        if not instrument:
+            self.logger.error(f"Cannot trigger bracket exits: {inst_id} not in cache")
+            return
+
+        # Helper for rounding to instrument tick
+        def round_to_tick(price_val):
+            tick = 0.05
+            if instrument.price_increment > 0:
+                tick = float(instrument.price_increment)
+            elif "SPX" in str(instrument.id):
+                tick = 0.05 if price_val < 3.0 else 0.10
+            return round(price_val / tick) * tick
+
+        orders = []
+
+        # 1. Stop Loss (STOP_LIMIT)
+        if sl_price_val is not None:
+            rounded_sl = round_to_tick(sl_price_val)
+            sl_trigger = instrument.make_price(rounded_sl)
+            limit_offset = 0.05 if rounded_sl < 3.0 else 0.10
+            if exit_side == OrderSide.SELL:
+                sl_limit_val = max(0.01, rounded_sl - limit_offset)
+            else:
+                sl_limit_val = rounded_sl + limit_offset
+            sl_limit = instrument.make_price(sl_limit_val)
+            
+            sl_order = self.order_factory.stop_limit(
+                instrument_id=inst_id,
+                order_side=exit_side,
+                quantity=qty,
+                trigger_price=sl_trigger,
+                price=sl_limit,
+                time_in_force=tif,
+                reduce_only=True
+            )
+            orders.append(sl_order)
+            self._bracket_exit_map[sl_order.client_order_id] = "STOP_LOSS"
+            self._pending_exit_orders.add(sl_order.client_order_id)
+
+        # 2. Take Profit (LIMIT)
+        if tp_price_val is not None:
+            rounded_tp = round_to_tick(tp_price_val)
+            tp_limit = instrument.make_price(rounded_tp)
+            
+            tp_order = self.order_factory.limit(
+                instrument_id=inst_id,
+                order_side=exit_side,
+                quantity=qty,
+                price=tp_limit,
+                time_in_force=tif,
+                reduce_only=True
+            )
+            orders.append(tp_order)
+            self._bracket_exit_map[tp_order.client_order_id] = "TAKE_PROFIT"
+            self._pending_exit_orders.add(tp_order.client_order_id)
+
+        if orders:
+            from nautilus_trader.model.orders import OrderList
+            order_list = OrderList(
+                order_list_id=self.order_factory.generate_order_list_id(),
+                orders=orders
+            )
+            self.submit_order_list(order_list)
+            self.logger.info(
+                f"✅ Sequential bracket legs submitted for {inst_id} (ListID: {order_list.id})"
+            )
+            self.save_state()
+
     def submit_entry_order(self, order: Order) -> bool:
         """
         Submit an entry order with validation.
@@ -1020,6 +1151,14 @@ class BaseStrategy(Strategy):
             if is_entry:
                 self._on_entry_filled(event)
             elif is_exit:
+                # Check for mapped bracket exit reason
+                mapped_reason = self._bracket_exit_map.get(order_id)
+                if mapped_reason:
+                    self.logger.info(f"Bracket exit fill detected: {mapped_reason}")
+                    self._last_exit_reason = mapped_reason
+                    # Clean up map
+                    self._bracket_exit_map.pop(order_id, None)
+                
                 self._on_exit_filled(event)
             
             # Call strategy-specific handler
@@ -1052,6 +1191,11 @@ class BaseStrategy(Strategy):
         self._schedule_async_task(
             self._start_trade_record_async(event)
         )
+        
+        # BRACKET TRIGGER: Check if we have stored exits for this entry
+        if event.client_order_id in self._pending_bracket_exits:
+            exit_data = self._pending_bracket_exits.pop(event.client_order_id)
+            self._trigger_bracket_exits(exit_data, event.order_side)
 
     def _on_exit_filled(self, event):
         """Handle exit fill - close trade record."""
@@ -1219,6 +1363,8 @@ class BaseStrategy(Strategy):
             state['_last_entry_qty'] = self._last_entry_qty
             state['_pending_entry_orders'] = [str(oid) for oid in self._pending_entry_orders]
             state['_pending_exit_orders'] = [str(oid) for oid in self._pending_exit_orders]
+            state['_bracket_exit_map'] = {str(k): v for k, v in self._bracket_exit_map.items()}
+            state['_pending_bracket_exits'] = {str(k): v for k, v in self._pending_bracket_exits.items()}
             self.persistence.save_state(self.strategy_id, state)
 
     def load_state(self):
@@ -1238,6 +1384,14 @@ class BaseStrategy(Strategy):
                 }
                 self._pending_exit_orders = {
                     ClientOrderId(oid) for oid in state.get('_pending_exit_orders', [])
+                }
+                
+                self._bracket_exit_map = {
+                    ClientOrderId(k): v for k, v in state.get('_bracket_exit_map', {}).items()
+                }
+                
+                self._pending_bracket_exits = {
+                    ClientOrderId(k): v for k, v in state.get('_pending_bracket_exits', {}).items()
                 }
                 
                 self.set_state(state)

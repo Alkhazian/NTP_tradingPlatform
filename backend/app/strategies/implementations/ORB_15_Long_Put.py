@@ -17,6 +17,7 @@ from decimal import Decimal
 
 from nautilus_trader.model.data import QuoteTick, Bar, BarType, BarSpecification
 from nautilus_trader.model.enums import OrderSide, OrderType, TimeInForce, OptionKind
+from nautilus_trader.model.events import OrderFilled
 from nautilus_trader.model.identifiers import InstrumentId, Venue
 from nautilus_trader.model.objects import Quantity, Price
 from nautilus_trader.model.instruments import Instrument
@@ -62,6 +63,9 @@ class Orb15MinLongPutStrategy(BaseStrategy):
         self.quantity = int(
             self.strategy_config.parameters.get("quantity", 1)
         )
+        
+        # State tracking for logging
+        self._last_price_logged_time = 0
         
         # Market hours (Eastern Time)
         self.eastern_tz = pytz.timezone('US/Eastern')
@@ -302,8 +306,10 @@ class Orb15MinLongPutStrategy(BaseStrategy):
         # Track quote time
         self.last_quote_time_ns = tick.ts_event
         
-        # Log SPX price periodically
-        if int(self.clock.timestamp_ns() / 1_000_000_000) % 30 == 0:
+        # Log SPX price periodically (every 30s)
+        now_sec = int(self.clock.timestamp_ns() / 1_000_000_000)
+        if now_sec % 30 == 0 and now_sec != self._last_price_logged_time:
+            self._last_price_logged_time = now_sec
             or_status = f"OR Low={self.or_low:.2f}" if self.or_low else "OR pending"
             self.logger.info(
                 f"SPX: {self.current_spx_price:.2f}, "
@@ -618,21 +624,23 @@ class Orb15MinLongPutStrategy(BaseStrategy):
             time_in_force=TimeInForce.DAY
         )
         
-        # Submit entry order
-        if self.submit_entry_order(order):
+        # Calculate SL/TP prices
+        self.stop_loss_price = ask * (1 - self.stop_loss_percent / 100)
+        self.take_profit_price = ask + self.take_profit_dollars
+        
+        # Use BaseStrategy's new bracket order submission
+        success = self.submit_bracket_order(
+            entry_order=order,
+            stop_loss_price=self.stop_loss_price,
+            take_profit_price=self.take_profit_price
+        )
+        
+        if success:
             self.active_option_id = option.id
             self.entry_price = ask
             
-            # Calculate exit levels
-            # Stop Loss: 40% below entry price
-            self.stop_loss_price = ask * (1 - self.stop_loss_percent / 100)
-            
-            # Take Profit: entry + take_profit_dollars PER CONTRACT
-            # Note: Option price is per share, multiply by 100 for contract value
-            self.take_profit_price = ask + (self.take_profit_dollars / 100)
-            
             self.logger.info(
-                f"📈 ENTRY ORDER SUBMITTED: {option.id} @ ${ask:.2f} (Limit)\n"
+                f"📈 BRACKET ORDER SUBMITTED: {option.id} @ ${ask:.2f} (Limit)\n"
                 f"   Entry per share: ${ask:.2f}\n"
                 f"   Entry per contract: ${ask * 100:.2f}\n"
                 f"   Stop Loss per share: ${self.stop_loss_price:.2f} "
@@ -643,10 +651,20 @@ class Orb15MinLongPutStrategy(BaseStrategy):
                 f"(+${self.take_profit_dollars})"
             )
             
-            # Subscribe to option quotes for monitoring
+            # Subscribe to option quotes for PASSIVE monitoring (auditing)
             self.subscribe_quote_ticks(option.id)
             
             self.save_state()
+
+    def on_order_filled_safe(self, event: OrderFilled):
+        """Called when an order is filled."""
+        order_id = event.client_order_id
+        
+        # Check if this was our active option exit
+        if self.active_option_id and order_id in self._pending_exit_orders:
+            # Position closed (either by SL, TP, or manual)
+            self.logger.info(f"Active position closed via fill: {order_id}")
+            self._clear_active_position_state()
 
     # =========================================================================
     # EXIT LOGIC
@@ -673,31 +691,22 @@ class Orb15MinLongPutStrategy(BaseStrategy):
         
         # Check stop loss
         if mid_price <= self.stop_loss_price:
-            self.logger.info(
-                f"🛑 STOP LOSS HIT: ${mid_price:.2f} <= ${self.stop_loss_price:.2f}"
+            self.logger.warning(
+                f"⚠️ PASSIVE ALERT: Price hit 🛑 Stop Loss level: ${mid_price:.2f} <= ${self.stop_loss_price:.2f}\n"
+                f"   Broker should be executing the attached SL order. Monitoring for fill report..."
             )
-            self._exit_position("STOP_LOSS")
             return
         
         # Check take profit
         if mid_price >= self.take_profit_price:
             self.logger.info(
-                f"✅ TAKE PROFIT HIT: ${mid_price:.2f} >= ${self.take_profit_price:.2f}"
+                f"✨ PASSIVE ALERT: Price hit ✅ Take Profit level: ${mid_price:.2f} >= ${self.take_profit_price:.2f}\n"
+                f"   Broker should be executing the attached TP order. Monitoring for fill report..."
             )
-            self._exit_position("TAKE_PROFIT")
             return
 
-    def _exit_position(self, reason: str):
-        """Exit the position."""
-        if not self.active_option_id:
-            return
-        
-        self.logger.info(f"Exiting position: {reason}")
-        
-        # Use base method to close position
-        self.close_strategy_position(reason=reason)
-        
-        # Reset state
+    def _clear_active_position_state(self):
+        """Reset state after position is closed."""
         self.active_option_id = None
         self.entry_price = None
         self.stop_loss_price = None
@@ -754,13 +763,12 @@ class Orb15MinLongPutStrategy(BaseStrategy):
         self.or_low = state.get("or_low")
         self.or_calculated = state.get("or_calculated", False)
         
+        date_str = state.get("last_or_calculation_date")
         if date_str:
-            from datetime import datetime
             self.last_or_calculation_date = datetime.fromisoformat(date_str).date()
             
         reset_date_str = state.get("last_reset_date")
         if reset_date_str:
-            from datetime import datetime
             self.last_reset_date = datetime.fromisoformat(reset_date_str).date()
 
         

@@ -124,8 +124,8 @@ class NautilusManager:
                     ),
 
                 ),
-                symbology_method=SymbologyMethod.IB_SIMPLIFIED,
-                filter_sec_types=frozenset(["OPT"]),
+                symbology_method=SymbologyMethod.IB_NATIVE,
+                filter_sec_types=frozenset({"STK", "FUT", "OPT", "IND"}),
             )
 
             # Configure Interactive Brokers data client
