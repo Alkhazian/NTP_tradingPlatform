@@ -45,3 +45,4 @@ trades.db
 #data/strategies/state/MES-Interval-Default.json
 data/historical_data
 data/catalog
+data/strategies/state
