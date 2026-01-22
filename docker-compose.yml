@@ -28,6 +28,7 @@ services:
     depends_on:
       - redis
       - ib-gateway
+      - victorialogs
     networks:
       - ntd-network
     volumes:
@@ -88,6 +89,40 @@ services:
     networks:
       - ntd-network
 
+  # VictoriaLogs - Log storage with 14-day retention
+  victorialogs:
+    image: victoriametrics/victoria-logs:v1.43.1
+    container_name: ntd-victorialogs
+    command:
+      - -storageDataPath=/data
+      - -retentionPeriod=14d
+      - -httpListenAddr=:9428
+    volumes:
+      - victorialogs-data:/data
+    ports:
+      - "9428:9428"
+    networks:
+      - ntd-network
+    restart: unless-stopped
+
+  # Vector - Container log collector (lightweight, Rust-based)
+  vector:
+    image: timberio/vector:0.52.0-alpine
+    container_name: ntd-vector
+    command: ["--config", "/etc/vector/vector.toml"]
+    volumes:
+      - ./vector/vector.toml:/etc/vector/vector.toml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - ntd-network
+    depends_on:
+      - victorialogs
+    restart: unless-stopped
+
 networks:
   ntd-network:
     driver: bridge
+
+volumes:
+  victorialogs-data:

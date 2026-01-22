@@ -1,0 +1,1121 @@
+# Logging Architecture for NautilusTrader Platform
+
+A pragmatic, low-maintenance logging design using **VictoriaLogs** and **Vector** for a personal trading platform.
+
+> [!IMPORTANT]
+> **Core Principle**: Trading must never depend on logging. If VictoriaLogs dies, trading continues without interruption.
+
+---
+
+## Why VictoriaLogs Instead of Loki
+
+After evaluating both options, **VictoriaLogs is the clear winner** for your use case:
+
+| Aspect | VictoriaLogs | Loki |
+|--------|-------------|------|
+| **RAM Usage** | ~30x less than Loki | Higher memory footprint |
+| **High-Cardinality Fields** | Native support (trace_id, user_id, etc.) | Creates stream explosion, crashes |
+| **Configuration** | Zero-config, sensible defaults | Complex YAML, many knobs |
+| **Query Language** | LogsQL (simpler, faster) | LogQL (more complex) |
+| **Built-in UI** | Yes, at `/select/vmui/` | No (requires Grafana) |
+| **Grafana Plugin** | Yes (victoriametrics-logs-datasource) | Native |
+| **Storage Efficiency** | 15x less disk than Elasticsearch | Good compression |
+| **Setup Complexity** | Single binary, 1 flag for retention | Multiple configs, schema versions |
+
+**For your constraints (single VM, 5 MB/day, solo operator), VictoriaLogs is ideal.**
+
+---
+
+## 1️⃣ Architecture Overview
+
+### Full Log Flow
+
+```mermaid
+graph TD
+    subgraph "Log Sources"
+        NT[NautilusTrader Kernel]
+        ST[Strategy Logs<br/>self.logger]
+        DC[Docker Container Logs]
+    end
+
+    subgraph "Collection Layer"
+        PH[Python VictoriaLogsHandler<br/>HTTP JSON Stream]
+        VC[Vector<br/>Container Logs]
+    end
+
+    subgraph "Storage"
+        VL[VictoriaLogs<br/>Single Binary]
+        FS[(Local Filesystem<br/>/data/victorialogs)]
+    end
+
+    subgraph "Query Layer"
+        VMUI[VictoriaLogs Web UI<br/>Built-in]
+        API[FastAPI Backend<br/>/api/logs/*]
+    end
+
+    subgraph "Presentation"
+        RUI[React + Vite UI]
+    end
+
+    NT --> PH
+    ST --> PH
+    DC --> VC
+
+    PH -->|HTTP POST /insert/jsonline| VL
+    VC -->|HTTP POST| VL
+    
+    VL --> FS
+    VL --> VMUI
+    VL --> API
+    API --> RUI
+```
+
+### Component Justification
+
+| Component | Purpose | Can Be Removed? |
+|-----------|---------|-----------------|
+| **VictoriaLogsHandler** | Push Python logs directly to VictoriaLogs with `strategy_id` as stream field | No - core enrichment point |
+| **Vector** | Collect Docker container logs (nginx, redis, ib-gateway). Modern, Rust-based, lighter/faster than Filebeat. | Yes - if container logs not needed |
+| **VictoriaLogs** | Log storage with 14-day retention, LogsQL queries, built-in UI | No - central requirement |
+| **VictoriaLogs Web UI** | Quick ad-hoc debugging at `http://localhost:9428/select/vmui/` | Optional but free |
+| **Backend API** | Guardrailed queries for React UI, strategy-specific filtering | No - required for UI |
+| **React UI** | User-facing log views on strategy cards | No - per requirements |
+
+### Why This Design?
+
+1. **No log files on disk** (except VictoriaLogs internal storage) - logs go directly via HTTP
+2. **Fire-and-forget async pushing** - strategies don't block on logging
+3. **Single binary VictoriaLogs** - one flag for retention, zero config
+4. **Vector for container logs** - Ultra-efficient Rust agent, replaced heavier Filebeat
+
+---
+
+## 2️⃣ VictoriaLogs Data Model (Best Practices)
+
+### Key Concepts
+
+VictoriaLogs has three special field types:
+
+| Field Type | Purpose | Example |
+|------------|---------|---------|
+| [_time](file:///root/ntp-remote/backend/app/strategies/implementations/SPX_15Min_Range.py#801-828) | Timestamp (auto-extracted) | `2026-01-21T22:16:38.123Z` |
+| `_msg` | Log message body | `"Breakout detected at 5890.50"` |
+| [_stream](file:///root/ntp-remote/backend/app/main.py#327-335) | Stream identifier (labels) | `{strategy_id="orb_15min_call_1", source="strategy"}` |
+
+**All other fields are regular indexed fields** - no cardinality limits!
+
+### Stream Fields Selection (Critical)
+
+> [!WARNING]
+> **Do NOT use high-cardinality fields as stream fields.** Stream fields define log partitioning. Use them for **grouping**, not for unique identifiers.
+
+**Good stream fields** (low cardinality, define log sources):
+- `strategy_id` (max 10)
+- `source` (strategy, system, container)
+- `level` (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+
+**Bad stream fields** (high cardinality, put in regular fields):
+- `order_id` (unique per order)
+- `instrument_id` (many options)
+- `trace_id` (unique per request)
+
+### Log Schema
+
+```json
+{
+  "_time": "2026-01-21T22:16:38.123Z",
+  "_msg": "Breakout detected, entering CALL position",
+  
+  "strategy_id": "orb_15min_call_1",
+  "source": "strategy",
+  "level": "INFO",
+  "component": "ORB_15_Long_Call",
+  
+  "instrument": "SPXW241025C05850000",
+  "action": "entry_trigger",
+  "spx_price": 5890.50
+}
+```
+
+- `strategy_id`, `source`, `level` → **stream fields** (via `_stream_fields` param)
+- All other fields → **regular indexed fields** (queryable, no cardinality concern)
+
+---
+
+## 3️⃣ Python Log Handler for VictoriaLogs
+
+### Implementation: `VictoriaLogsHandler`
+
+```python
+# backend/app/logging/victorialogs_handler.py
+
+import logging
+import json
+import queue
+import threading
+from datetime import datetime, timezone
+from typing import Dict, Any, Optional
+import requests
+
+class VictoriaLogsHandler(logging.Handler):
+    """
+    Async log handler that pushes to VictoriaLogs via JSON stream API.
+    
+    CRITICAL: Fire-and-forget design. Trading never blocks on logging.
+    
+    Uses VictoriaLogs best practices:
+    - JSON line format for efficient ingestion
+    - _stream_fields for low-cardinality grouping
+    - All other fields as regular indexed fields
+    """
+    
+    def __init__(
+        self, 
+        victorialogs_url: str = "http://victorialogs:9428",
+        stream_fields: tuple = ("strategy_id", "source", "level"),
+        extra_fields: Optional[Dict[str, str]] = None,
+        batch_size: int = 100,
+        flush_interval: float = 1.0,
+    ):
+        super().__init__()
+        
+        # Build ingestion URL with stream fields
+        # VictoriaLogs uses query params for configuration
+        stream_fields_param = ",".join(stream_fields)
+        self.ingest_url = (
+            f"{victorialogs_url}/insert/jsonline"
+            f"?_stream_fields={stream_fields_param}"
+            f"&_time_field=_time"
+            f"&_msg_field=_msg"
+        )
+        
+        self.extra_fields = extra_fields or {}
+        self.batch_size = batch_size
+        self.flush_interval = flush_interval
+        
+        self.queue = queue.Queue(maxsize=10000)
+        self._shutdown = False
+        
+        # Background thread for batching and pushing
+        self.worker = threading.Thread(target=self._worker, daemon=True)
+        self.worker.start()
+    
+    def emit(self, record: logging.LogRecord):
+        """
+        Non-blocking: drops logs if queue is full.
+        Trading continues regardless.
+        """
+        try:
+            # Extract strategy_id from logger name: "strategy.orb_15min_call_1"
+            strategy_id = None
+            source = "system"
+            if record.name.startswith("strategy."):
+                strategy_id = record.name.split(".", 1)[1]
+                source = "strategy"
+            
+            # Build log entry following VictoriaLogs data model
+            log_entry = {
+                # Special fields
+                "_time": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+                "_msg": record.getMessage(),
+                
+                # Stream fields (for partitioning)
+                "level": record.levelname,
+                "source": source,
+                
+                # Regular indexed fields
+                "component": record.name,
+                "filename": record.filename,
+                "lineno": record.lineno,
+                "funcname": record.funcName,
+            }
+            
+            # Add strategy_id only if present (to avoid empty stream field)
+            if strategy_id:
+                log_entry["strategy_id"] = strategy_id
+            
+            # Add extra context fields
+            log_entry.update(self.extra_fields)
+            
+            # Add exception info if present
+            if record.exc_info:
+                import traceback
+                log_entry["error_type"] = record.exc_info[0].__name__ if record.exc_info[0] else None
+                log_entry["error_traceback"] = "".join(traceback.format_exception(*record.exc_info))
+            
+            # Add any extra attributes from the log record
+            if hasattr(record, 'extra'):
+                for key, value in record.extra.items():
+                    if key not in log_entry:
+                        log_entry[key] = str(value) if not isinstance(value, (str, int, float, bool)) else value
+            
+            self.queue.put_nowait(log_entry)
+            
+        except queue.Full:
+            # Drop log rather than block trading
+            pass
+        except Exception:
+            # Never raise from logging
+            pass
+    
+    def _worker(self):
+        """Background worker that batches and pushes logs to VictoriaLogs."""
+        batch = []
+        last_flush = datetime.now()
+        
+        while not self._shutdown:
+            try:
+                # Collect logs with timeout for batching
+                try:
+                    entry = self.queue.get(timeout=self.flush_interval)
+                    batch.append(entry)
+                except queue.Empty:
+                    pass
+                
+                # Flush when batch is full or interval elapsed
+                now = datetime.now()
+                should_flush = (
+                    len(batch) >= self.batch_size or 
+                    (batch and (now - last_flush).total_seconds() >= self.flush_interval)
+                )
+                
+                if should_flush:
+                    self._push_batch(batch)
+                    batch = []
+                    last_flush = now
+                    
+            except Exception:
+                # Log failures don't matter - clear batch and continue
+                batch = []
+    
+    def _push_batch(self, batch: list):
+        """
+        Push batch to VictoriaLogs using JSON line format.
+        Fails silently - logging must never affect trading.
+        """
+        if not batch:
+            return
+            
+        try:
+            # VictoriaLogs accepts newline-delimited JSON (ndjson)
+            payload = "\n".join(json.dumps(entry) for entry in batch)
+            
+            requests.post(
+                self.ingest_url,
+                data=payload,
+                headers={"Content-Type": "application/stream+json"},
+                timeout=5.0,
+            )
+        except Exception:
+            # VictoriaLogs down? Don't care. Trading continues.
+            pass
+    
+    def close(self):
+        """Graceful shutdown."""
+        self._shutdown = True
+        self.worker.join(timeout=2.0)
+        super().close()
+```
+
+### Integration with Existing Codebase
+
+Modify [backend/app/main.py](file:///root/ntp-remote/backend/app/main.py):
+
+```python
+# Add near top of file, after existing logging setup
+import os
+from app.logging.victorialogs_handler import VictoriaLogsHandler
+
+# Configure VictoriaLogs handler
+VICTORIALOGS_URL = os.getenv("VICTORIALOGS_URL", "http://victorialogs:9428")
+
+victorialogs_handler = VictoriaLogsHandler(
+    victorialogs_url=VICTORIALOGS_URL,
+    stream_fields=("strategy_id", "source", "level"),
+    extra_fields={"app": "nautilus-trader"},
+)
+victorialogs_handler.setLevel(logging.DEBUG)
+
+# Add to root logger to capture all logs
+logging.getLogger().addHandler(victorialogs_handler)
+
+# Specifically ensure strategy loggers use it
+logging.getLogger("strategy").addHandler(victorialogs_handler)
+logging.getLogger("strategy").setLevel(logging.DEBUG)
+```
+
+### How This Fails Safely
+
+| Failure Mode | Behavior | Impact on Trading |
+|--------------|----------|-------------------|
+| Queue overflow | Old logs dropped, new logs accepted | None |
+| VictoriaLogs down | `requests.post` fails silently | None |
+| Malformed log | Exception caught, log skipped | None |
+| Thread crash | Daemon thread - exits with process | None |
+
+---
+
+## 4️⃣ VictoriaLogs Configuration (Single VM)
+
+### Docker Compose Addition
+
+```yaml
+# Add to docker-compose.yml
+
+  victorialogs:
+    image: victoriametrics/victoria-logs:v1.4.0-victorialogs
+    container_name: ntd-victorialogs
+    command:
+      - -storageDataPath=/data
+      - -retentionPeriod=14d
+      - -httpListenAddr=:9428
+    volumes:
+      - victorialogs-data:/data
+    ports:
+      - "9428:9428"
+    networks:
+      - ntd-network
+    restart: unless-stopped
+
+  # Vector for container logs
+  vector:
+    image: timberio/vector:0.34.0-alpine
+    container_name: ntd-vector
+    volumes:
+      - ./vector/vector.toml:/etc/vector/vector.toml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - ntd-network
+    depends_on:
+      - victorialogs
+
+volumes:
+  victorialogs-data:
+```
+
+### That's It!
+
+No additional configuration files needed. VictoriaLogs uses sensible defaults:
+
+| Setting | Default | Your Value |
+|---------|---------|------------|
+| Retention | 7 days | 14 days (`-retentionPeriod=14d`) |
+| Storage | `/data` | Docker volume |
+| HTTP Port | 9428 | 9428 |
+| RAM limit | auto | auto (uses available) |
+
+### Vector Configuration (`vector/vector.toml`)
+
+```toml
+[sources.docker_logs]
+type = "docker_logs"
+include_containers = ["ntd-nginx", "ntd-redis", "ntd-ib-gateway"]
+
+[transforms.parse_logs]
+type = "remap"
+inputs = ["docker_logs"]
+source = '''
+# Parse additional metadata or JSON if needed
+.source = "container"
+.container_name = .container_name
+'''
+
+[sinks.victorialogs]
+type = "elasticsearch"
+inputs = ["parse_logs"]
+endpoints = ["http://victorialogs:9428/insert/elasticsearch/"]
+mode = "bulk"
+bulk.action = "index"
+
+# High-performance batching
+batch.max_bytes = 1048576 # 1MB
+batch.timeout_secs = 1
+```
+
+> [!NOTE]
+> Vector is used here because it is Rust-based, highly efficient (low RAM/CPU), and integrates seamlessly with VictoriaLogs via the Elasticsearch bulk API.
+
+### Failure Scenarios
+
+| Scenario | Behavior | Recovery |
+|----------|----------|----------|
+| **VictoriaLogs restarts** | Logs during downtime are lost (fire-and-forget). Data persists in volume. | Automatic |
+| **Disk fills** | VictoriaLogs rejects new logs. Trading unaffected. | Expand disk or reduce retention |
+| **VictoriaLogs unavailable** | Handler silently drops logs. UI shows "no data". | Fix VictoriaLogs, logs resume |
+| **Query timeout** | API returns error. UI shows "query failed" message. | Retry or narrow time range |
+
+### Estimated Resource Usage
+
+At your scale (5 MB/day, 10 logs/sec):
+
+| Resource | Usage |
+|----------|-------|
+| RAM | ~20-50 MB |
+| CPU | < 1% |
+| Disk (14 days) | ~100-200 MB compressed |
+
+---
+
+## 5️⃣ LogsQL Query Examples
+
+### Built-in Web UI
+
+Access at `http://localhost:9428/select/vmui/` - no Grafana needed for quick debugging!
+
+### Basic Queries
+
+| Query Goal | LogsQL |
+|------------|--------|
+| All logs (last 5 min) | `_time:5m` |
+| All strategy logs | `source:strategy` |
+| Single strategy | `strategy_id:orb_15min_call_1` |
+| All errors | `level:ERROR` |
+| Strategy errors | `strategy_id:* level:ERROR` |
+| Word search in message | `breakout` |
+| Exact phrase | `"position opened"` |
+
+### Pattern Matching
+
+```logsql
+# Regex match on message
+_msg:~"order.*filled"
+
+# Exclude word
+error -kubernetes
+
+# Numeric comparison (if field exists)
+spx_price:>5900
+
+# Time range
+_time:[2026-01-21T22:00:00Z, 2026-01-21T23:00:00Z]
+```
+
+### Advanced Queries
+
+```logsql
+# All logs for a strategy in the last hour
+strategy_id:orb_15min_call_1 _time:1h
+
+# Errors with stack traces
+level:ERROR error_traceback:*
+
+# Order-related logs
+_msg:~"(order|fill|position)" source:strategy
+
+# Count logs by level (for debugging)
+_time:1h | stats count() by (level)
+
+# Show recent logs with specific fields
+_time:5m strategy_id:* | fields _time, strategy_id, _msg
+```
+
+### What NOT to Query
+
+| Bad Query | Why | Alternative |
+|-----------|-----|-------------|
+| `_time:30d` | Too slow, scans too much | Use `_time:24h` max |
+| `*` with no time filter | Full table scan | Always add `_time:Xh` |
+| PnL analytics | Not what logs are for | Use trades.db |
+
+---
+
+## 6️⃣ Backend API Design
+
+### Endpoints
+
+```python
+# backend/app/routers/logs.py
+
+from fastapi import APIRouter, Query, HTTPException
+from datetime import datetime, timedelta
+from typing import Optional, List
+import httpx
+import os
+
+router = APIRouter(prefix="/api/logs", tags=["logs"])
+
+VICTORIALOGS_URL = os.getenv("VICTORIALOGS_URL", "http://victorialogs:9428")
+MAX_ENTRIES = 500  # Guardrail
+MAX_RANGE_HOURS = 24  # Guardrail
+
+
+@router.get("/")
+async def get_logs(
+    strategy_id: Optional[str] = None,
+    level: Optional[str] = None,
+    source: str = "strategy",
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    search: Optional[str] = None,
+    limit: int = Query(default=100, le=MAX_ENTRIES),
+):
+    """
+    Query logs from VictoriaLogs with guardrails.
+    
+    Args:
+        strategy_id: Filter by specific strategy
+        level: Filter by log level (INFO, ERROR, etc.)
+        source: Filter by source (strategy, system, container)
+        start: Start time (default: 1 hour ago)
+        end: End time (default: now)
+        search: Full-text search term
+        limit: Maximum entries to return (max 500)
+    
+    Returns:
+        List of log entries, most recent first.
+    """
+    # Default to last 1 hour
+    if not end:
+        end = datetime.utcnow()
+    if not start:
+        start = end - timedelta(hours=1)
+    
+    # Guardrail: max 24h range
+    if (end - start).total_seconds() > MAX_RANGE_HOURS * 3600:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Time range exceeds {MAX_RANGE_HOURS}h limit"
+        )
+    
+    # Build LogsQL query
+    query_parts = []
+    
+    # Time filter (always first for performance)
+    start_iso = start.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_iso = end.strftime("%Y-%m-%dT%H:%M:%SZ")
+    query_parts.append(f"_time:[{start_iso}, {end_iso}]")
+    
+    # Stream field filters
+    if strategy_id:
+        query_parts.append(f'strategy_id:"{strategy_id}"')
+    if source:
+        query_parts.append(f'source:"{source}"')
+    if level:
+        query_parts.append(f'level:{level}')
+    
+    # Full-text search
+    if search:
+        query_parts.append(search)
+    
+    query = " ".join(query_parts)
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{VICTORIALOGS_URL}/select/logsql/query",
+                params={
+                    "query": query,
+                    "limit": limit,
+                }
+            )
+            resp.raise_for_status()
+            
+            # VictoriaLogs returns newline-delimited JSON
+            logs = []
+            for line in resp.text.strip().split("\n"):
+                if line:
+                    try:
+                        logs.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+            
+            return {"logs": logs, "count": len(logs), "query": query}
+            
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="VictoriaLogs query timeout")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"VictoriaLogs error: {str(e)}")
+
+
+@router.get("/tail")
+async def tail_logs(
+    strategy_id: Optional[str] = None,
+    limit: int = Query(default=50, le=100),
+):
+    """
+    Get most recent logs (last 5 minutes).
+    Optimized for React UI polling.
+    """
+    return await get_logs(
+        strategy_id=strategy_id,
+        start=datetime.utcnow() - timedelta(minutes=5),
+        limit=limit,
+    )
+
+
+@router.get("/strategy/{strategy_id}")
+async def get_strategy_logs(
+    strategy_id: str,
+    level: Optional[str] = None,
+    limit: int = Query(default=100, le=MAX_ENTRIES),
+):
+    """
+    Convenience endpoint for strategy-specific logs.
+    """
+    return await get_logs(
+        strategy_id=strategy_id,
+        level=level,
+        limit=limit,
+    )
+
+
+@router.get("/errors")
+async def get_recent_errors(
+    strategy_id: Optional[str] = None,
+    limit: int = Query(default=50, le=MAX_ENTRIES),
+):
+    """
+    Get recent ERROR and CRITICAL logs.
+    """
+    return await get_logs(
+        strategy_id=strategy_id,
+        level="ERROR",
+        start=datetime.utcnow() - timedelta(hours=1),
+        limit=limit,
+    )
+```
+
+### API Guardrails Summary
+
+| Guardrail | Value | Purpose |
+|-----------|-------|---------|
+| `MAX_ENTRIES` | 500 | Prevent memory explosion |
+| `MAX_RANGE_HOURS` | 24 | Prevent expensive full scans |
+| `timeout` | 10s | Don't hang on slow queries |
+| Default `_time` | 1 hour | Always scope by time |
+
+---
+
+## 7️⃣ React UI Integration
+
+### Global Logs Page
+
+Update `LogViewer.tsx` to use the new API:
+
+```typescript
+// frontend/src/components/LogViewer.tsx
+
+import { useEffect, useState, useCallback } from 'react';
+import { Card, CardHeader, CardTitle, CardContent } from './ui/card';
+import { Badge } from './ui/badge';
+
+interface LogEntry {
+    _time: string;
+    _msg: string;
+    level: string;
+    source: string;
+    strategy_id?: string;
+    component?: string;
+    [key: string]: any;
+}
+
+export default function LogViewer() {
+    const [logs, setLogs] = useState<LogEntry[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [filters, setFilters] = useState({
+        strategy_id: '',
+        level: '',
+        search: '',
+    });
+    
+    const fetchLogs = useCallback(async () => {
+        setLoading(true);
+        setError(null);
+        
+        try {
+            const params = new URLSearchParams();
+            if (filters.strategy_id) params.set('strategy_id', filters.strategy_id);
+            if (filters.level) params.set('level', filters.level);
+            if (filters.search) params.set('search', filters.search);
+            params.set('limit', '200');
+            
+            const resp = await fetch(`/api/logs/tail?${params}`);
+            
+            if (!resp.ok) {
+                if (resp.status === 502) {
+                    setError('Log service unavailable');
+                } else if (resp.status === 504) {
+                    setError('Query timed out');
+                } else {
+                    setError('Failed to fetch logs');
+                }
+                return;
+            }
+            
+            const data = await resp.json();
+            setLogs(data.logs || []);
+        } catch (e) {
+            setError('Network error');
+        } finally {
+            setLoading(false);
+        }
+    }, [filters]);
+    
+    // Poll every 5 seconds
+    useEffect(() => {
+        fetchLogs();
+        const interval = setInterval(fetchLogs, 5000);
+        return () => clearInterval(interval);
+    }, [fetchLogs]);
+    
+    const getLevelColor = (level: string) => {
+        switch (level) {
+            case 'ERROR':
+            case 'CRITICAL':
+                return 'text-red-400 bg-red-500/10';
+            case 'WARNING':
+                return 'text-amber-400 bg-amber-500/10';
+            case 'INFO':
+                return 'text-blue-300';
+            case 'DEBUG':
+                return 'text-gray-500';
+            default:
+                return 'text-white/70';
+        }
+    };
+    
+    const formatTime = (ts: string) => {
+        const date = new Date(ts);
+        return date.toLocaleTimeString('en-US', { 
+            hour12: false, 
+            hour: '2-digit', 
+            minute: '2-digit', 
+            second: '2-digit' 
+        });
+    };
+    
+    return (
+        <Card variant="glass" className="h-[calc(100vh-8rem)] flex flex-col">
+            <CardHeader className="shrink-0">
+                <CardTitle>System Logs</CardTitle>
+                
+                {/* Filters */}
+                <div className="flex gap-2 mt-3">
+                    <select 
+                        value={filters.level}
+                        onChange={(e) => setFilters(f => ({...f, level: e.target.value}))}
+                        className="px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm"
+                    >
+                        <option value="">All Levels</option>
+                        <option value="ERROR">ERROR</option>
+                        <option value="WARNING">WARNING</option>
+                        <option value="INFO">INFO</option>
+                        <option value="DEBUG">DEBUG</option>
+                    </select>
+                    
+                    <input
+                        type="text"
+                        placeholder="Search..."
+                        value={filters.search}
+                        onChange={(e) => setFilters(f => ({...f, search: e.target.value}))}
+                        className="flex-1 px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 text-sm"
+                    />
+                    
+                    <Badge variant={error ? "destructive" : "success"}>
+                        {error ? "OFFLINE" : "LIVE"}
+                    </Badge>
+                </div>
+            </CardHeader>
+            
+            <CardContent className="flex-1 overflow-auto font-mono text-xs">
+                {error && (
+                    <div className="text-amber-400 p-2 bg-amber-500/10 rounded mb-2">
+                        {error} - logs will resume when service is available
+                    </div>
+                )}
+                
+                {logs.length === 0 && !error && (
+                    <div className="text-gray-500 text-center py-8">
+                        No logs in the last 5 minutes
+                    </div>
+                )}
+                
+                <div className="space-y-0.5">
+                    {logs.map((log, i) => (
+                        <div 
+                            key={`${log._time}-${i}`}
+                            className={`px-2 py-1 rounded ${getLevelColor(log.level)}`}
+                        >
+                            <span className="text-gray-500">{formatTime(log._time)}</span>
+                            {log.strategy_id && (
+                                <span className="mx-2 text-cyan-400">[{log.strategy_id}]</span>
+                            )}
+                            <span>{log._msg}</span>
+                        </div>
+                    ))}
+                </div>
+            </CardContent>
+        </Card>
+    );
+}
+```
+
+### Strategy Details Integration
+
+We need to add the `StrategyLogPanel` to the `Strategies.tsx` (or `StrategyDetails.tsx` if separate).
+
+```typescript
+// frontend/src/pages/StrategyDetails.tsx (or similar)
+
+import { StrategyLogPanel } from '../components/StrategyLogPanel';
+
+// Inside the component return...
+<div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+    <Card>
+        <CardHeader>
+            <CardTitle>Performance</CardTitle>
+        </CardHeader>
+        <CardContent>
+            {/* Existing performance content */}
+        </CardContent>
+    </Card>
+    
+    <Card className="flex flex-col h-96">
+        <CardHeader>
+            <CardTitle>Live Logs</CardTitle>
+        </CardHeader>
+        <CardContent className="flex-1 overflow-hidden p-0">
+             <StrategyLogPanel strategyId={strategyId} />
+        </CardContent>
+    </Card>
+</div>
+```
+
+```typescript
+// frontend/src/components/StrategyLogPanel.tsx
+
+import { useEffect, useState, useRef } from 'react';
+
+interface LogEntry {
+    _time: string;
+    _msg: string;
+    level: string;
+    // ...
+}
+
+export function StrategyLogPanel({ strategyId }: { strategyId: string }) {
+    const [logs, setLogs] = useState<LogEntry[]>([]);
+    const [loading, setLoading] = useState(true);
+    const bottomRef = useRef<HTMLDivElement>(null);
+    
+    // Auto-scroll effect
+    useEffect(() => {
+        if (bottomRef.current) {
+            bottomRef.current.scrollIntoView({ behavior: 'smooth' });
+        }
+    }, [logs]);
+
+    useEffect(() => {
+        const fetchLogs = async () => {
+            try {
+                // Fetch last 50 logs for this strategy
+                const resp = await fetch(`/api/logs/strategy/${strategyId}?limit=50`);
+                if (resp.ok) {
+                    const data = await resp.json();
+                    // Assuming API returns { logs: [], ... }
+                    // Reverse if needed to show oldest top -> newest bottom, 
+                    // or keep newest top. Standard is often newest bottom for "tailing".
+                    const newLogs = data.logs || [];
+                    setLogs(newLogs.reverse()); 
+                }
+            } catch (e) {
+                console.error("Log fetch failed", e);
+            } finally {
+                setLoading(false);
+            }
+        };
+        
+        fetchLogs();
+        const interval = setInterval(fetchLogs, 5000); // 5s poll
+        return () => clearInterval(interval);
+    }, [strategyId]);
+    
+    if (loading && logs.length === 0) return <div className="p-4 text-xs text-gray-500">Loading logs...</div>;
+    
+    return (
+        <div className="h-full overflow-y-auto bg-black/40 font-mono text-xs p-2 space-y-1">
+            {logs.length === 0 && <div className="text-gray-500 italic">No logs found</div>}
+            
+            {logs.map((log, i) => (
+                <div key={i} className="break-all border-b border-white/5 pb-0.5 last:border-0">
+                   <span className="text-gray-500 mr-2">
+                       {new Date(log._time).toLocaleTimeString()}
+                   </span>
+                   <span className={`${
+                       log.level === 'ERROR' ? 'text-red-400 font-bold' : 
+                       log.level === 'WARNING' ? 'text-amber-400' : 
+                       'text-gray-300'
+                   }`}>
+                       {log._msg}
+                   </span>
+                </div>
+            ))}
+            <div ref={bottomRef} />
+        </div>
+    );
+}
+```
+
+---
+
+## 8️⃣ Explicit Non-Goals & Anti-Patterns
+
+### ❌ What This System Does NOT Do
+
+| Non-Goal | Reason |
+|----------|--------|
+| Analytics on logs | Use trades.db for PnL, win rate, etc. |
+| Alerting on trade events | Too slow. Use webhooks or strategy signals. |
+| Long-term storage | 14 days is enough. Historical analysis uses trades.db. |
+| Log-based metrics | Use Prometheus for metrics. VictoriaLogs is for debugging. |
+| Real-time streaming | Polling at 5s is sufficient for debugging. |
+
+### ❌ What Should NOT Be Logged
+
+| Don't Log | Reason |
+|-----------|--------|
+| Every tick | Way too much volume. Log meaningful events. |
+| Raw market data | Use data feeds. Logs are not data storage. |
+| Passwords/secrets | Obviously. |
+| PnL values | Store in trades.db, not logs. |
+| Health check pings | Creates noise. |
+
+### ❌ Stream Field Mistakes to Avoid
+
+| Bad Stream Field | Why | Fix |
+|------------------|-----|-----|
+| `instrument_id` | High cardinality (many options) | Regular field |
+| `order_id` | Unique per order | Regular field |
+| `trace_id` | Unique per request | Regular field |
+| `timestamp` | Already `_time` | Remove |
+
+**VictoriaLogs handles high-cardinality regular fields just fine - just don't make them stream fields!**
+
+### ❌ Why Strategy Execution Must Never Block on Logging
+
+```python
+# BAD - Synchronous logging can block trading
+def on_fill(self, fill):
+    response = requests.post(victorialogs_url, data=log)  # ← Blocks!
+    self.update_position(fill)  # ← Delayed!
+
+# GOOD - Handler queues async, trading proceeds immediately
+def on_fill(self, fill):
+    self.logger.info(f"Fill: {fill}")  # ← Returns immediately
+    self.update_position(fill)  # ← No delay
+```
+
+---
+
+## 9️⃣ Impact on Current Codebase
+
+### Summary
+
+This logging implementation is **additive** - it does not remove or break existing functionality. The current file-based logging and WebSocket streaming will continue to work until you're confident in the new system.
+
+### Backend Changes
+
+| File | Impact | Risk |
+|------|--------|------|
+| `backend/app/main.py` | **Add** VictoriaLogsHandler import, configure it, add logs router | Low - additive only |
+| `backend/app/routers/` | **New file** `logs.py` with API endpoints | None - new code |
+| `backend/app/logging/` | **New directory** with `victorialogs_handler.py` | None - new code |
+
+**No changes to existing strategy files, NautilusManager, or trade recording logic.**
+
+### Frontend Changes
+
+| File | Impact | Risk |
+|------|--------|------|
+| `frontend/src/components/LogViewer.tsx` | **Rewrite** from WebSocket to API polling | Medium - existing component |
+| `frontend/src/pages/StrategyDetails.tsx` | **Add** StrategyLogPanel import and integration | Low - additive |
+| `frontend/src/components/StrategyLogPanel.tsx` | **New file** | None - new code |
+
+### Docker/Infrastructure Changes
+
+| File | Impact | Risk |
+|------|--------|------|
+| `docker-compose.yml` | **Add** victorialogs, vector services | Low - additive |
+| `vector/vector.toml` | **New file** | None - new config |
+
+### What Stays the Same
+
+| Component | Status |
+|-----------|--------|
+| Strategy `self.logger` calls | ✅ Unchanged - VictoriaLogsHandler intercepts via root logger |
+| NautilusTrader kernel logging | ✅ Unchanged - same logger hierarchy |
+| Trade recording to `trades.db` | ✅ Unchanged - completely separate system |
+| Position management | ✅ Unchanged - not touched |
+| WebSocket log streaming (`/ws/logs`) | ⚠️ Can be removed after migration, but works during transition |
+
+### Migration Path
+
+1. **Phase 1**: Deploy VictoriaLogs + Vector, add handler to `main.py`. Both systems run in parallel.
+2. **Phase 2**: Update frontend to use new API. WebSocket endpoint still available as fallback.
+3. **Phase 3**: Remove old WebSocket code and file-based log reading once stable.
+
+> [!TIP]
+> The VictoriaLogsHandler is fire-and-forget. If VictoriaLogs isn't running, the handler silently drops logs. This means you can deploy the backend changes before VictoriaLogs is ready.
+
+---
+
+## Proposed Changes Summary
+
+### New Files to Create
+
+| File | Purpose |
+|------|---------|
+| `backend/app/logging/victorialogs_handler.py` | Async Python→VictoriaLogs handler |
+| `backend/app/routers/logs.py` | FastAPI endpoints for log queries |
+| `vector/vector.toml` | Vector configuration for container logs |
+| `frontend/src/components/StrategyLogPanel.tsx` | Reusable log panel component |
+
+### Files to Modify
+
+| File | Change |
+|------|--------|
+| `docker-compose.yml` | Add victorialogs, vector services. Remove grafana (if not used elsewhere). |
+| `backend/app/main.py` | Configure VictoriaLogsHandler, add router |
+| `frontend/src/components/LogViewer.tsx` | Switch from WebSocket to API polling |
+| `frontend/src/pages/StrategyDetails.tsx` | Add LogPanel to layout |
+
+---
+
+## Verification Plan
+
+### Automated Tests
+
+1. **Unit test VictoriaLogsHandler**: Mock VictoriaLogs endpoint, verify JSON format
+2. **Integration test API**: Query VictoriaLogs, verify response parsing
+3. **Load test**: Push 100 logs/sec for 1 minute, verify no blocking
+
+### Manual Verification
+
+1. Start stack with `docker-compose up -d victorialogs vector`
+2. Trigger strategy logs via test order
+3. Verify logs appear in VictoriaLogs Web UI (`http://localhost:9428/select/vmui/`)
+4. Check that container logs (nginx, etc.) are visible via Vector
+5. Verify `frontend` shows live logs on the Strategy page
+6. Stop VictoriaLogs, verify trading continues unblocked
+
+### Commands
+
+```bash
+# Start VictoriaLogs
+docker-compose up -d victorialogs
+
+# Check if running
+curl http://localhost:9428/health
+
+# Manual log insertion test
+echo '{"_msg":"test log","level":"INFO","source":"test"}' | \
+  curl -X POST \
+    -H "Content-Type: application/stream+json" \
+    --data-binary @- \
+    "http://localhost:9428/insert/jsonline?_stream_fields=source,level"
+
+# Query logs
+curl "http://localhost:9428/select/logsql/query?query=_time:5m"
+```

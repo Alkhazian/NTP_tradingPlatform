@@ -12,6 +12,9 @@ import json
 import aiofiles
 from logging.handlers import RotatingFileHandler
 
+# Import routers
+from .routers import logs as logs_router
+
 # Configure logging
 LOG_FILE = "logs/app.log"
 os.makedirs("logs", exist_ok=True)
@@ -42,8 +45,35 @@ for logger_name in ["uvicorn", "uvicorn.error", "nautilus_trader"]:
     l.handlers = [] 
     l.propagate = True
 
+# Silence noisy loggers (access logs and internal requests)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 logger.info("--- Log Stream Initialized ---")
+
+# Configure VictoriaLogs handler (fire-and-forget)
+# If VictoriaLogs isn't running, logs are silently dropped - trading unaffected
+try:
+    from .logging import VictoriaLogsHandler
+    VICTORIALOGS_URL = os.getenv("VICTORIALOGS_URL", "http://victorialogs:9428")
+    
+    victorialogs_handler = VictoriaLogsHandler(
+        victorialogs_url=VICTORIALOGS_URL,
+        stream_fields=("strategy_id", "source", "level"),
+        extra_fields={"app": "nautilus-trader"},
+    )
+    victorialogs_handler.setLevel(logging.DEBUG)
+    
+    # Add to root logger to capture all logs
+    logging.getLogger().addHandler(victorialogs_handler)
+    # Ensure strategy loggers use it
+    logging.getLogger("strategy").addHandler(victorialogs_handler)
+    
+    logger.info("VictoriaLogs handler configured")
+except Exception as e:
+    logger.warning(f"VictoriaLogs handler not configured: {e}")
 
 app = FastAPI()
 
@@ -62,6 +92,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include routers
+app.include_router(logs_router.router)
 
 redis_manager = RedisManager()
 # Connect to IB Gateway using environment variables
@@ -307,10 +340,6 @@ async def update_strategy(strategy_id: str, config: dict):
         if not updated_strategy:
              raise HTTPException(status_code=404, detail="Strategy not found")
         return {"status": "updated", "id": strategy_id}
-    except Exception as e:
-        logger.error(f"Error updating strategy: {e}")
-        raise HTTPException(status_code=400, detail=str(e))
-
     except Exception as e:
         logger.error(f"Error updating strategy: {e}")
         raise HTTPException(status_code=400, detail=str(e))

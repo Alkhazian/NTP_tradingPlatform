@@ -1,0 +1,20 @@
+[sources.docker_logs]
+type = "docker_logs"
+include_containers = ["ntd-nginx", "ntd-redis", "ntd-ib-gateway", "ntd-backend", "ntd-frontend"]
+
+# Transform to JSON string to ensure NDJSON format
+[transforms.to_json]
+type = "remap"
+inputs = ["docker_logs"]
+source = '''
+. = encode_json(.)
+'''
+
+[sinks.victorialogs]
+type = "http"
+inputs = ["to_json"]
+uri = "http://victorialogs:9428/insert/jsonline?_stream_fields=container_name&_msg_field=message&_time_field=timestamp"
+encoding.codec = "text"
+method = "post"
+batch.max_bytes = 1048576
+batch.timeout_secs = 1
