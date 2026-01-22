@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Card, CardContent } from './ui/card';
 import { Badge } from './ui/badge';
 import { Icons } from './ui/icons';
+import { StrategyLogPanel } from './StrategyLogPanel';
 
 interface StrategyStatus {
     id: string;
@@ -34,7 +35,6 @@ export default function Strategies() {
     const [editError, setEditError] = useState<string | null>(null);
 
     // Logs State
-    const [allLogs, setAllLogs] = useState<string[]>([]);
     const [expandedLogs, setExpandedLogs] = useState<Set<string>>(new Set());
 
     const rawApiUrl = import.meta.env.VITE_API_URL || '';
@@ -54,42 +54,8 @@ export default function Strategies() {
 
     useEffect(() => {
         fetchStrategies();
-        const interval = setInterval(fetchStrategies, 5000);
+        const interval = setInterval(fetchStrategies, 1000); // Polling every 1s for strategies
         return () => clearInterval(interval);
-    }, []);
-
-    // WebSocket for Logs
-    useEffect(() => {
-        let wsUrl: string;
-        const apiEnv = import.meta.env.VITE_API_URL;
-
-        if (apiEnv && apiEnv.startsWith('http')) {
-            wsUrl = apiEnv.replace('http', 'ws');
-            if (!wsUrl.endsWith('/')) wsUrl += '/';
-            wsUrl += 'ws/logs';
-        } else {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            let host = window.location.host;
-            if (host.includes(':5173')) {
-                host = window.location.hostname;
-            }
-            wsUrl = `${protocol}//${host}/ws/logs`;
-        }
-
-        const ws = new WebSocket(wsUrl);
-
-        ws.onmessage = (event) => {
-            setAllLogs(prev => {
-                const newLogs = [...prev, event.data];
-                // Keep only last 1000 lines
-                if (newLogs.length > 1000) {
-                    return newLogs.slice(-1000);
-                }
-                return newLogs;
-            });
-        };
-
-        return () => ws.close();
     }, []);
 
     const handleStart = async (id: string) => {
@@ -311,23 +277,8 @@ export default function Strategies() {
 
                                             {expandedLogs.has(strategy.id) && (
                                                 <div className="mt-3">
-                                                    <div className="p-3 bg-black/40 rounded-lg border border-white/10 h-64 overflow-auto font-mono text-[10px] shadow-inner">
-                                                        {(() => {
-                                                            const stratLogs = allLogs.filter(l =>
-                                                                l.includes(strategy.id) ||
-                                                                l.includes(strategy.config.strategy_type)
-                                                            ).slice().reverse();
-
-                                                            if (stratLogs.length === 0) {
-                                                                return <div className="text-white/30 italic text-center py-8">Waiting for logs...</div>;
-                                                            }
-
-                                                            return stratLogs.map((log, i) => (
-                                                                <div key={i} className="mb-1 pb-1 border-b border-white/5 last:border-0 text-white/70 break-all whitespace-pre-wrap">
-                                                                    {log}
-                                                                </div>
-                                                            ));
-                                                        })()}
+                                                    <div className="h-64 rounded-lg border border-white/10 overflow-hidden">
+                                                        <StrategyLogPanel strategyId={strategy.id} />
                                                     </div>
                                                 </div>
                                             )}
