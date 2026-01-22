@@ -129,8 +129,8 @@ class MesOrbSimpleStrategy(BaseStrategy):
         bar_time_et = dt_utc.astimezone(self.et_tz).time()
         bar_date = dt_utc.astimezone(self.et_tz).date()
         
-        # Reset daily tracking at market open
-        if bar_time_et == self.or_start_time:
+        # Reset daily tracking if new day (robust to mid-session starts)
+        if self.current_trade_date != bar_date:
             self._reset_daily_state(bar_date)
         
         # Collect OR bars (9:30 - 9:45)

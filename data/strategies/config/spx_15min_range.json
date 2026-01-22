@@ -8,7 +8,7 @@
     "parameters": {
         "timezone": "US/Eastern",
         "start_time_str": "09:30:00",
-        "window_minutes": 15,
+        "opening_range_minutes": 15,
         "entry_cutoff_time_str": "13:00:00",
         "min_credit_amount": 50,
         "quantity": 2,

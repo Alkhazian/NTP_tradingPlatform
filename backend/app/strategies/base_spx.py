@@ -12,7 +12,8 @@ Provides:
 
 from abc import abstractmethod
 from typing import Dict, Any, Optional, List, Callable
-from datetime import timedelta
+from datetime import datetime, time, timedelta
+import pytz
 from decimal import Decimal
 import uuid
 
@@ -62,11 +63,33 @@ class SPXBaseStrategy(BaseStrategy):
         self.current_spx_price = 0.0
         self.spx_subscribed = False
         
+        # Opening Range Parameters
+        params = config.parameters
+        self.opening_range_minutes = int(params.get("opening_range_minutes", params.get("window_minutes", 15)))
+        timezone_str = params.get("timezone", "US/Eastern")
+        self.tz = pytz.timezone(timezone_str)
+        self.market_open_time = time(9, 30)
+        
+        # Opening Range State
+        self.daily_high: Optional[float] = None
+        self.daily_low: Optional[float] = None
+        self.or_high: Optional[float] = None
+        self.or_low: Optional[float] = None
+        self.range_calculated: bool = False
+        self.current_trading_day = None
+        
+        # Minute Emulation State
+        self._last_minute_idx: int = -1
+        self._last_tick_price: Optional[float] = None
+        
         # Dictionary for parallel option premium searches
         # Key: search_id (UUID), Value: search state dict
         self._premium_searches: Dict[str, Dict[str, Any]] = {}
         
-        self.logger.info(f"SPXBaseStrategy initialized with SPX instrument: {self.spx_instrument_id}")
+        self.logger.info(
+            f"SPXBaseStrategy initialized | OR Window: {self.opening_range_minutes}m | "
+            f"TZ: {timezone_str}"
+        )
     
     # =========================================================================
     # SPX SUBSCRIPTION WITH FALLBACK MECHANISM
@@ -184,36 +207,107 @@ class SPXBaseStrategy(BaseStrategy):
     # SPX TICK HANDLING
     # =========================================================================
     
-    def on_quote_tick(self, tick: QuoteTick):
+    def on_quote_tick_safe(self, tick: QuoteTick):
         """
-        Handle quote tick events.
-        Routes SPX ticks to on_spx_tick(), other ticks to parent.
+        Standardizes SPX price tracking and OR calculation.
+        """
+        # Check if this is an SPX tick
+        if tick.instrument_id == self.spx_instrument_id:
+            # Update current SPX price
+            bid = tick.bid_price.as_double()
+            ask = tick.ask_price.as_double()
+            
+            if bid > 0 and ask > 0:
+                self.current_spx_price = (bid + ask) / 2
+            elif bid > 0:
+                self.current_spx_price = bid
+            elif ask > 0:
+                self.current_spx_price = ask
+            
+            # Core SPX Processing (ported from SPX_15Min_Range)
+            self._process_spx_tick_unified(tick)
+            
+            # Call strategy-specific SPX tick handler
+            self.on_spx_tick(tick)
+        else:
+            # Not an SPX tick (e.g., an option or spread)
+            pass
+
+    def _process_spx_tick_unified(self, tick: QuoteTick):
+        """
+        Ported from SPX_15Min_Range: Unified tick processing for all SPX strategies.
+        Handles daily reset, minute-close emulation, and range calculation.
+        """
+        utc_now = self.clock.utc_now()
+        et_now = utc_now.astimezone(self.tz)
+        current_date = et_now.date()
+        current_time = et_now.time()
+        price = self.current_spx_price
+
+        if price <= 0:
+            return
+
+        # 1. Reset state on new trading day
+        if self.current_trading_day != current_date:
+            self._reset_daily_state(current_date)
+            self._last_minute_idx = -1
+
+        # 2. Minute change logic (Candle Close Emulation)
+        current_minute_idx = current_time.hour * 60 + current_time.minute
         
-        Args:
-            tick: Quote tick data
-        """
-        try:
-            # Check if this is an SPX tick
-            if tick.instrument_id == self.spx_instrument_id:
-                # Update current SPX price
-                bid = tick.bid_price.as_double()
-                ask = tick.ask_price.as_double()
-                
-                if bid > 0 and ask > 0:
-                    self.current_spx_price = (bid + ask) / 2
-                elif bid > 0:
-                    self.current_spx_price = bid
-                elif ask > 0:
-                    self.current_spx_price = ask
-                
-                # Call strategy-specific SPX tick handler
-                self.on_spx_tick(tick)
+        if self._last_minute_idx != -1 and current_minute_idx != self._last_minute_idx:
+            # New minute started - previous minute closed
+            if self._last_tick_price:
+                self.on_minute_closed(self._last_tick_price)
+        
+        self._last_minute_idx = current_minute_idx
+        self._last_tick_price = price
+
+        # 3. Range window calculation (09:30 + opening_range_minutes)
+        end_minute = self.market_open_time.minute + self.opening_range_minutes
+        end_hour = self.market_open_time.hour + (end_minute // 60)
+        end_minute = end_minute % 60
+        range_end_time = time(end_hour, end_minute, 0)
+
+        # 4. Update daily high/low throughout the day (from market open)
+        if current_time >= self.market_open_time:
+            if not self.daily_high or price > self.daily_high:
+                self.daily_high = price
+            if not self.daily_low or price < self.daily_low:
+                self.daily_low = price
+
+        # 5. Range formation period (logic for locking OR)
+        if self.market_open_time <= current_time < range_end_time:
+            self.range_calculated = False
+
+        # 5. Lock in range after window period
+        elif current_time >= range_end_time and not self.range_calculated:
+            if self.daily_high and self.daily_low:
+                self.or_high = self.daily_high
+                self.or_low = self.daily_low
+                self.range_calculated = True
+                self.logger.info(
+                    f"📈 RANGE LOCKED ({self.opening_range_minutes}m): "
+                    f"High={self.or_high:.2f}, Low={self.or_low:.2f}, "
+                    f"Width={self.or_high - self.or_low:.2f}"
+                )
+                self.save_state()
             else:
-                # Not an SPX tick - let parent handle it
-                # This allows strategies to subscribe to other instruments
-                pass
-        except Exception as e:
-            self.on_unexpected_error(e)
+                self.logger.error(
+                    f"❌ RANGE LOCK FAILED at {current_time}: Insufficient data."
+                )
+                self.range_calculated = True
+
+    def _reset_daily_state(self, current_date):
+        """Reset all daily tracking state."""
+        self.logger.info(f"Resetting daily SPX state for {current_date}")
+        self.current_trading_day = current_date
+        self.daily_high = None
+        self.daily_low = None
+        self.or_high = None
+        self.or_low = None
+        self.range_calculated = False
+        self._last_tick_price = None
     
     # =========================================================================
     # LIFECYCLE MANAGEMENT
@@ -243,31 +337,41 @@ class SPXBaseStrategy(BaseStrategy):
     def get_state(self) -> Dict[str, Any]:
         """
         Return strategy-specific state to persist.
-        
-        Returns:
-            Dictionary containing SPX state
         """
         state = super().get_state()
         state.update({
             "current_spx_price": self.current_spx_price,
             "spx_subscribed": self.spx_subscribed,
+            "or_high": self.or_high,
+            "or_low": self.or_low,
+            "range_calculated": self.range_calculated,
+            "current_trading_day": self.current_trading_day.isoformat() if self.current_trading_day else None,
+            "daily_high": self.daily_high,
+            "daily_low": self.daily_low,
         })
         return state
     
     def set_state(self, state: Dict[str, Any]):
         """
         Restore strategy-specific state.
-        
-        Args:
-            state: Dictionary containing saved state
         """
         super().set_state(state)
         self.current_spx_price = state.get("current_spx_price", 0.0)
         self.spx_subscribed = state.get("spx_subscribed", False)
+        self.or_high = state.get("or_high")
+        self.or_low = state.get("or_low")
+        self.range_calculated = state.get("range_calculated", False)
+        
+        day_str = state.get("current_trading_day")
+        if day_str:
+            self.current_trading_day = datetime.fromisoformat(day_str).date()
+        
+        self.daily_high = state.get("daily_high")
+        self.daily_low = state.get("daily_low")
         
         self.logger.info(
             f"SPX state restored: price={self.current_spx_price:.2f}, "
-            f"subscribed={self.spx_subscribed}"
+            f"OR={self.or_high}/{self.or_low}"
         )
     
     # =========================================================================
@@ -780,15 +884,23 @@ class SPXBaseStrategy(BaseStrategy):
     def on_spx_tick(self, tick: QuoteTick):
         """
         Called for each SPX quote tick.
-        
-        Args:
-            tick: SPX quote tick data
-            
-        Implement this method to:
-        - React to SPX price changes
-        - Update strategy logic based on SPX movement
-        - Trigger entry/exit conditions
-        
-        Note: self.current_spx_price is automatically updated before this is called
         """
         pass
+
+    def on_minute_closed(self, close_price: float):
+        """
+        Called for each minute close (candle emulation).
+        Override in derived strategies to handle signals.
+        """
+        pass
+
+    def is_opening_range_complete(self) -> bool:
+        """Check if opening range calculation is complete."""
+        return self.range_calculated and self.or_high is not None and self.or_low is not None
+
+    def is_market_open(self) -> bool:
+        """Check if US market is currently open (9:30 AM - 4:00 PM ET)."""
+        now_et = self.clock.utc_now().astimezone(self.tz)
+        current_time = now_et.time()
+        market_close_time = time(16, 0)
+        return self.market_open_time <= current_time < market_close_time

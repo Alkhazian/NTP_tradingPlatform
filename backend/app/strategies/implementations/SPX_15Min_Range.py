@@ -71,43 +71,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
     ):
         super().__init__(config, integration_manager, persistence_manager)
         
-        # Load parameters from config
-        params = config.parameters
-        
-        # Time settings
-        timezone_str = params.get("timezone", "US/Eastern")
-        self.tz = pytz.timezone(timezone_str)
-        
-        start_time_str = params.get("start_time_str", "09:30:00")
-        t = datetime.strptime(start_time_str, "%H:%M:%S").time()
-        self.start_time = t
-        self.window_minutes = params.get("window_minutes", 15)
-        
-        # Entry cutoff time - no entries after this time
-        entry_cutoff_str = params.get("entry_cutoff_time_str", "12:00:00")
-        self.entry_cutoff_time = datetime.strptime(entry_cutoff_str, "%H:%M:%S").time()
-        
-        # Entry parameters
-        self.min_credit_amount = params.get("min_credit_amount", 50.0)
-        self.config_quantity = params.get("quantity", 2)
-        self.strike_width = params.get("strike_width", 5)
-        
-        # Risk management
-        self.stop_loss_multiplier = params.get("stop_loss_multiplier", 2.0)
-        self.take_profit_amount = params.get("take_profit_amount", 50.0)
-        
-        # Strike parameters
-        self.strike_step = params.get("strike_step", 5)
-        
         # Signal validation
-        self.signal_max_age_seconds = params.get("signal_max_age_seconds", 5)
-        self.max_price_deviation = params.get("max_price_deviation", 10.0)
-        
-        # Range state
-        self.daily_high: Optional[float] = None
-        self.daily_low: Optional[float] = None
-        self.range_calculated: bool = False
-        self.current_trading_day = None
+        self.signal_max_age_seconds = 5
+        self.max_price_deviation = 10.0
         
         # Trading state - bidirectional breach tracking
         self.high_breached: bool = False
@@ -122,32 +88,54 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._spread_entry_price: Optional[float] = None
         self._signal_direction: Optional[str] = None  # 'bearish' or 'bullish'
 
-        # Candle emulation from ticks
-        self._last_minute_idx: int = -1
-        self._last_tick_price: Optional[float] = None
+        # Calculate range end time for logging
+        range_end_time = "Range Close" # Will be calculated/logged by base
+        
+
+    # =========================================================================
+    # LIFECYCLE
+    # =========================================================================
+
+    def on_start_safe(self):
+        """Initialize strategy after base class setup."""
+        super().on_start_safe()
+        
+        # Load parameters from config
+        params = self.strategy_config.parameters
+        
+        # Strategy-specific time settings
+        start_time_str = params.get("start_time_str", "09:30:00")
+        t = datetime.strptime(start_time_str, "%H:%M:%S").time()
+        self.start_time = t
+        
+        # Entry cutoff time
+        entry_cutoff_str = params.get("entry_cutoff_time_str", "12:00:00")
+        self.entry_cutoff_time = datetime.strptime(entry_cutoff_str, "%H:%M:%S").time()
+        
+        # Entry parameters
+        self.min_credit_amount = float(params.get("min_credit_amount", 50.0))
+        self.config_quantity = int(params.get("quantity", 2))
+        self.strike_width = int(params.get("strike_width", 5))
+        
+        # Risk management
+        self.stop_loss_multiplier = float(params.get("stop_loss_multiplier", 2.0))
+        self.take_profit_amount = float(params.get("take_profit_amount", 50.0))
+        
+        # Strike parameters
+        self.strike_step = int(params.get("strike_step", 5))
         
         # Signal validation
-        self._signal_time: Optional[datetime] = None
-        self._signal_close_price: Optional[float] = None
+        self.signal_max_age_seconds = int(params.get("signal_max_age_seconds", 5))
+        self.max_price_deviation = float(params.get("max_price_deviation", 10.0))
         
-        # Diagnostic counters
-        self._tick_count: int = 0
-        self._range_tick_count: int = 0
-        self._last_log_minute: int = -1
-        
-        # Calculate range end time for logging
-        end_minute = self.start_time.minute + self.window_minutes
-        end_hour = self.start_time.hour + (1 if end_minute >= 60 else 0)
-        end_minute = end_minute % 60
-        range_end_time = time(end_hour, end_minute, 0)
+        range_end_time = "Range Close" # Will be calculated/logged by base
         
         self.logger.info(
             f"═══════════════════════════════════════════════════════════════\n"
-            f"SPX15MinRangeStrategy INITIALIZED\n"
+            f"🚀 SPX15MinRangeStrategy STARTING\n"
             f"═══════════════════════════════════════════════════════════════\n"
             f"  🌍 Timezone: {self.tz}\n"
-            f"  📈 Instrument: {config.instrument_id}\n"
-            f"  📅 Range Window: {self.start_time} - {range_end_time} ({self.window_minutes} min)\n"
+            f"  📅 Range Window: {self.start_time} - {range_end_time} ({self.opening_range_minutes} min)\n"
             f"  ⏰ Entry Cutoff: {self.entry_cutoff_time} (no entries after)\n"
             f"  💰 Min Credit: ${self.min_credit_amount:.2f}\n"
             f"  📏 Strike Width: {self.strike_width} pts\n"
@@ -157,20 +145,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             f"  ⏱️ Signal Max Age: {self.signal_max_age_seconds}s\n"
             f"  📊 Max Price Deviation: {self.max_price_deviation} pts\n"
             f"  📦 Quantity: {self.config_quantity} spreads\n"
+            f"  Mode: Tick-Only with Bidirectional Breakout\n"
+            f"  Waiting for SPX data stream...\n"
             f"═══════════════════════════════════════════════════════════════"
-        )
-
-    # =========================================================================
-    # LIFECYCLE
-    # =========================================================================
-
-    def on_start_safe(self):
-        """Initialize strategy after base class setup."""
-        super().on_start_safe()
-        self.logger.info(
-            f"🚀 SPX15MinRangeStrategy STARTED\n"
-            f"   Mode: Tick-Only with Bidirectional Breakout\n"
-            f"   Waiting for SPX data stream..."
         )
 
     def on_spx_ready(self):
@@ -185,14 +162,14 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
     # TICK PROCESSING
     # =========================================================================
 
-    def on_quote_tick(self, tick: QuoteTick):
+    def on_quote_tick_safe(self, tick: QuoteTick):
         """
         Handle all quote ticks.
         
         1. SPX ticks go to parent -> on_spx_tick
         2. Spread ticks are processed for position management
         """
-        super().on_quote_tick(tick)
+        super().on_quote_tick_safe(tick)
         
         # Process spread ticks for position management
         if self.spread_instrument and tick.instrument_id == self.spread_instrument.id:
@@ -200,123 +177,35 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
 
     def on_spx_tick(self, tick: QuoteTick):
         """Main logic executed on each SPX tick."""
-        self._tick_count += 1
-        
-        utc_now = self.clock.utc_now()
-        et_now = utc_now.astimezone(self.tz)
-        current_date = et_now.date()
-        current_time = et_now.time()
-        price = self.current_spx_price
+        # This is now called after SPXBaseStrategy has updated prices and range
+        pass
 
-        if price <= 0:
-            self.logger.warning(f"⚠️ Invalid SPX price received: {price}. Tick ignored.")
-            return
-
-        # 1. Reset state on new trading day
-        if self.current_trading_day != current_date:
-            self._reset_daily_state(current_date)
-            self._last_minute_idx = -1
-
-        # Minute change logic (Candle Close Emulation)
-        current_minute_idx = current_time.hour * 60 + current_time.minute
-        
-        if self._last_minute_idx != -1 and current_minute_idx != self._last_minute_idx:
-            # New minute started - previous minute closed
-            if self._last_tick_price:
-                self._on_minute_closed(self._last_tick_price)
-        
-        self._last_minute_idx = current_minute_idx
-        self._last_tick_price = price
-
-        # Calculate range window end time (09:30 + 15min = 09:45)
-        end_minute = self.start_time.minute + self.window_minutes
-        end_hour = self.start_time.hour + (1 if end_minute >= 60 else 0)
-        end_minute = end_minute % 60
-        end_time = time(end_hour, end_minute, 0)
-
-        # 2. During range formation period (09:30-09:45)
-        if self.start_time <= current_time < end_time:
-            self._range_tick_count += 1
-            old_high = self.daily_high
-            old_low = self.daily_low
-            
-            if not self.daily_high or price > self.daily_high:
-                self.daily_high = price
-            if not self.daily_low or price < self.daily_low:
-                self.daily_low = price
-            self.range_calculated = False
-            
-            # Log range updates periodically (every minute)
-            if current_minute_idx != self._last_log_minute:
-                self._last_log_minute = current_minute_idx
-                self.logger.info(
-                    f"📈 RANGE FORMING [{current_time.strftime('%H:%M')}]: "
-                    f"High={self.daily_high:.2f}, Low={self.daily_low:.2f}, "
-                    f"Width={self.daily_high - self.daily_low:.2f} pts, "
-                    f"Ticks={self._range_tick_count}"
-                )
-
-        # 3. Lock in range after window period
-        elif current_time >= end_time and not self.range_calculated:
-            if self.daily_high and self.daily_low:
-                range_width = self.daily_high - self.daily_low
-                self.range_calculated = True
-                self.high_breached = False
-                self.low_breached = False
-                self.logger.info(
-                    f"═══════════════════════════════════════════════════════════════\n"
-                    f"🎯 RANGE LOCKED at {current_time.strftime('%H:%M:%S')} ET\n"
-                    f"═══════════════════════════════════════════════════════════════\n"
-                    f"   📊 High: {self.daily_high:.2f}\n"
-                    f"   📊 Low:  {self.daily_low:.2f}\n"
-                    f"   📏 Width: {range_width:.2f} pts\n"
-                    f"   📈 Range Ticks: {self._range_tick_count}\n"
-                    f"   🔴 BEARISH trigger: Close < {self.daily_low:.2f}\n"
-                    f"   🟢 BULLISH trigger: Close > {self.daily_high:.2f}\n"
-                    f"═══════════════════════════════════════════════════════════════"
-                )
-                self.save_state()
-            else:
-                self.logger.error(
-                    f"❌ RANGE LOCK FAILED at {current_time.strftime('%H:%M:%S')}: "
-                    f"High={self.daily_high}, Low={self.daily_low}. "
-                    f"Insufficient data during range window! No trading possible today."
-                )
-                # Mark as calculated (failed) to prevent repeated error logs
-                self.range_calculated = True
-
-    def _on_minute_closed(self, close_price: float):
+    def on_minute_closed(self, close_price: float):
         """
         Called once at the start of a new minute.
         close_price is the last tick price of the previous minute.
         Handles bidirectional breakout detection.
         """
-        if not self.range_calculated:
-            self.logger.debug(f"Minute closed at {close_price:.2f} but range not yet calculated. Skipping.")
+        if not self.is_opening_range_complete():
             return
         
-        # Guard against range lock failure (daily_high/low are None)
-        if self.daily_high is None or self.daily_low is None:
-            self.logger.debug(f"Minute closed at {close_price:.2f} but range is invalid (None). Skipping.")
-            return
-
         et_now = self.clock.utc_now().astimezone(self.tz)
         
         # Log every minute close with full context
         self.logger.info(
             f"⏰ MINUTE CLOSE [{et_now.strftime('%H:%M')}]: Price={close_price:.2f} | "
-            f"Range=[{self.daily_low:.2f}-{self.daily_high:.2f}] | "
-            f"vs Low: {close_price - self.daily_low:+.2f} | vs High: {close_price - self.daily_high:+.2f} | "
+            f"Range=[{self.or_low:.2f}-{self.or_high:.2f}] | "
+            f"vs Low: {close_price - self.or_low:+.2f} | vs High: {close_price - self.or_high:+.2f} | "
             f"State: HighBreached={self.high_breached}, LowBreached={self.low_breached}, Traded={self.traded_today}"
         )
 
         # 1. Check for breach conditions (cross-invalidation)
-        if close_price > self.daily_high:
+        if close_price > self.or_high:
             if not self.high_breached:
                 self.logger.warning(
                     f"═══════════════════════════════════════════════════════════════\n"
                     f"🚫 HIGH BREACHED at {et_now.strftime('%H:%M:%S')}\n"
-                    f"   Close: {close_price:.2f} > High: {self.daily_high:.2f}\n"
+                    f"   Close: {close_price:.2f} > High: {self.or_high:.2f}\n"
                     f"   → BEARISH entry is now INVALIDATED for today\n"
                     f"   → BULLISH entry remains: {'VALID' if not self.low_breached else 'INVALID'}\n"
                     f"═══════════════════════════════════════════════════════════════"
@@ -324,12 +213,12 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 self.high_breached = True
                 self.save_state()
                 
-        if close_price < self.daily_low:
+        if close_price < self.or_low:
             if not self.low_breached:
                 self.logger.warning(
                     f"═══════════════════════════════════════════════════════════════\n"
                     f"🚫 LOW BREACHED at {et_now.strftime('%H:%M:%S')}\n"
-                    f"   Close: {close_price:.2f} < Low: {self.daily_low:.2f}\n"
+                    f"   Close: {close_price:.2f} < Low: {self.or_low:.2f}\n"
                     f"   → BULLISH entry is now INVALIDATED for today\n"
                     f"   → BEARISH entry remains: {'VALID' if not self.high_breached else 'INVALID'}\n"
                     f"═══════════════════════════════════════════════════════════════"
@@ -355,22 +244,22 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             return
 
         # 2. Check BEARISH entry (close below Low, High not breached first)
-        if close_price < self.daily_low:
+        if close_price < self.or_low:
             if self.high_breached:
                 self.logger.info(
-                    f"📉 Close below Low ({close_price:.2f} < {self.daily_low:.2f}) "
+                    f"📉 Close below Low ({close_price:.2f} < {self.or_low:.2f}) "
                     f"but High was breached earlier. BEARISH entry BLOCKED."
                 )
             else:
                 current_price = self.current_spx_price
-                price_deviation = current_price - self.daily_low
+                price_deviation = current_price - self.or_low
                 
                 if price_deviation > self.max_price_deviation:
                     self.logger.warning(
                         f"═══════════════════════════════════════════════════════════════\n"
                         f"⚠️ BEARISH SIGNAL REJECTED - Price Bounce\n"
                         f"═══════════════════════════════════════════════════════════════\n"
-                        f"   Close: {close_price:.2f} < Low: {self.daily_low:.2f} ✓\n"
+                        f"   Close: {close_price:.2f} < Low: {self.or_low:.2f} ✓\n"
                         f"   But current price: {current_price:.2f}\n"
                         f"   Deviation from Low: {price_deviation:.2f} pts\n"
                         f"   Max allowed: {self.max_price_deviation} pts\n"
@@ -387,7 +276,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                     f"═══════════════════════════════════════════════════════════════\n"
                     f"⚡ BEARISH ENTRY SIGNAL CONFIRMED\n"
                     f"═══════════════════════════════════════════════════════════════\n"
-                    f"   Trigger: Close {close_price:.2f} < Low {self.daily_low:.2f}\n"
+                    f"   Trigger: Close {close_price:.2f} < Low {self.or_low:.2f}\n"
                     f"   Current price: {current_price:.2f}\n"
                     f"   Deviation: {price_deviation:.2f} pts (max: {self.max_price_deviation})\n"
                     f"   High was NOT breached first: ✓\n"
@@ -398,22 +287,22 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 return
 
         # 3. Check BULLISH entry (close above High, Low not breached first)
-        if close_price > self.daily_high:
+        if close_price > self.or_high:
             if self.low_breached:
                 self.logger.info(
-                    f"📈 Close above High ({close_price:.2f} > {self.daily_high:.2f}) "
+                    f"📈 Close above High ({close_price:.2f} > {self.or_high:.2f}) "
                     f"but Low was breached earlier. BULLISH entry BLOCKED."
                 )
             else:
                 current_price = self.current_spx_price
-                price_deviation = self.daily_high - current_price
+                price_deviation = self.or_high - current_price
                 
                 if price_deviation > self.max_price_deviation:
                     self.logger.warning(
                         f"═══════════════════════════════════════════════════════════════\n"
                         f"⚠️ BULLISH SIGNAL REJECTED - Price Drop\n"
                         f"═══════════════════════════════════════════════════════════════\n"
-                        f"   Close: {close_price:.2f} > High: {self.daily_high:.2f} ✓\n"
+                        f"   Close: {close_price:.2f} > High: {self.or_high:.2f} ✓\n"
                         f"   But current price: {current_price:.2f}\n"
                         f"   Deviation from High: {price_deviation:.2f} pts\n"
                         f"   Max allowed: {self.max_price_deviation} pts\n"
@@ -430,7 +319,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                     f"═══════════════════════════════════════════════════════════════\n"
                     f"⚡ BULLISH ENTRY SIGNAL CONFIRMED\n"
                     f"═══════════════════════════════════════════════════════════════\n"
-                    f"   Trigger: Close {close_price:.2f} > High {self.daily_high:.2f}\n"
+                    f"   Trigger: Close {close_price:.2f} > High {self.or_high:.2f}\n"
                     f"   Current price: {current_price:.2f}\n"
                     f"   Deviation: {price_deviation:.2f} pts (max: {self.max_price_deviation})\n"
                     f"   Low was NOT breached first: ✓\n"
@@ -456,14 +345,14 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         
         if self._signal_direction == 'bearish':
             # CALL CREDIT SPREAD: Short strike above High, Long strike higher
-            target_short = self.daily_high + 0.01
+            target_short = self.or_high + 0.01
             self._target_short_strike = math.ceil(target_short / self.strike_step) * self.strike_step
             self._target_long_strike = self._target_short_strike + self.strike_width
             option_right = "C"
             spread_type = "CALL Credit Spread"
         else:  # bullish
             # PUT CREDIT SPREAD: Short strike below Low, Long strike lower
-            target_short = self.daily_low - 0.01
+            target_short = self.or_low - 0.01
             self._target_short_strike = math.floor(target_short / self.strike_step) * self.strike_step
             self._target_long_strike = self._target_short_strike - self.strike_width
             option_right = "P"
@@ -503,7 +392,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             f"═══════════════════════════════════════════════════════════════\n"
             f"📡 REQUESTING OPTION CONTRACTS FROM IB\n"
             f"═══════════════════════════════════════════════════════════════\n"
-            f"   Venue: InteractiveBrokers\n"
+            f"   Venue: CBOE\n"
             f"   Number of contracts: {len(contracts)}\n"
             f"   Contracts:\n" +
             "\n".join([
@@ -516,7 +405,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         
         try:
             self.request_instruments(
-                venue=Venue("InteractiveBrokers"),
+                venue=Venue("CBOE"),
                 params={"ib_contracts": contracts}
             )
             self.logger.info(f"✅ request_instruments() called successfully for {len(contracts)} contracts")
@@ -710,10 +599,10 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             
             # Check if SPX bounced away from entry level
             if self._signal_direction == 'bearish':
-                price_deviation = self.current_spx_price - self.daily_low
+                price_deviation = self.current_spx_price - self.or_low
                 level_name = "Low"
             else:  # bullish
-                price_deviation = self.daily_high - self.current_spx_price
+                price_deviation = self.or_high - self.current_spx_price
                 level_name = "High"
                 
             if price_deviation > self.max_price_deviation:
@@ -944,11 +833,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
     def _reset_daily_state(self, new_date):
         """Reset all daily state for new trading day."""
         old_date = self.current_trading_day
-        
-        self.daily_high = None
-        self.daily_low = None
-        self.range_calculated = False
-        self.current_trading_day = new_date
+        super()._reset_daily_state(new_date)
         
         self.high_breached = False
         self.low_breached = False
@@ -957,8 +842,6 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._found_legs.clear()
         self._spread_entry_price = None
         self._signal_direction = None
-        self._last_minute_idx = -1
-        self._last_tick_price = None
         self._signal_time = None
         self._signal_close_price = None
         self._tick_count = 0
@@ -979,10 +862,6 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         """Return strategy-specific state for persistence."""
         state = super().get_state()
         state.update({
-            "daily_high": self.daily_high,
-            "daily_low": self.daily_low,
-            "range_calculated": self.range_calculated,
-            "current_trading_day": str(self.current_trading_day) if self.current_trading_day else None,
             "high_breached": self.high_breached,
             "low_breached": self.low_breached,
             "traded_today": self.traded_today,
@@ -996,14 +875,6 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
     def set_state(self, state: Dict[str, Any]):
         """Restore strategy-specific state."""
         super().set_state(state)
-        
-        self.daily_high = state.get("daily_high")
-        self.daily_low = state.get("daily_low")
-        self.range_calculated = state.get("range_calculated", False)
-        
-        trading_day_str = state.get("current_trading_day")
-        if trading_day_str:
-            self.current_trading_day = datetime.strptime(trading_day_str, "%Y-%m-%d").date()
         
         self.high_breached = state.get("high_breached", False)
         self.low_breached = state.get("low_breached", False)
