@@ -649,17 +649,23 @@ class BaseStrategy(Strategy):
 
         return first_qty
 
-    def close_spread_smart(self) -> bool:
+    def close_spread_smart(self, limit_price: Optional[float] = None) -> bool:
         """
-        Розумне закриття спреду.
-        Визначає, як брокер тримає позицію (цілісно чи ногами) і закриває відповідно.
+        Розумне закриття спреду через зворотній комбо-ордер.
         
-        This method:
-        1. First checks for native combo position and closes it atomically
-        2. If no native combo but legs are present (legged out), closes each leg individually
+        IB завжди репортить позиції по спреду як окремі ноги, тому ми:
+        1. Перевіряємо effective quantity через ноги
+        2. Закриваємо через ЗВОРОТНІЙ комбо-ордер (не окремі ноги!)
+        
+        This approach avoids IB rejecting individual leg orders due to 
+        "options strategy permissions" and ensures atomic closure.
+        
+        Args:
+            limit_price: Optional limit price for the closing order.
+                        If None, uses current mid price from spread quote.
         
         Returns:
-            True if close was initiated, False if no position exists.
+            True if close order was submitted, False if no position exists.
         """
         effective_qty = self.get_effective_spread_quantity()
         
@@ -667,54 +673,52 @@ class BaseStrategy(Strategy):
             self.logger.info("No effective spread position to close.")
             return False
 
-        # 1. Перевіряємо Native Position
-        native_pos = self.cache.positions_open(instrument_id=self.spread_id)
-        if native_pos:
-            pos = native_pos[0]
-            self.logger.info(
-                f"═══════════════════════════════════════════════════════════════\n"
-                f"📤 CLOSING SPREAD (Smart - Native Combo)\n"
-                f"═══════════════════════════════════════════════════════════════\n"
-                f"   Spread ID: {self.spread_id}\n"
-                f"   Position: {pos.quantity} {pos.side.name}\n"
-                f"   Avg Entry: {pos.avg_px_open}\n"
-                f"   Mode: NATIVE COMBO (atomic close)\n"
-                f"   Status: PENDING\n"
-                f"═══════════════════════════════════════════════════════════════"
-            )
-            self.close_all_positions(self.spread_id)
-            return True
-
-        # 2. Якщо Native немає, але effective_qty != 0, значить позиція "розсипана" (Legged Out)
-        self.logger.warning(
+        # Визначаємо напрямок закриття
+        # effective_qty > 0 означає LONG spread → потрібно SELL
+        # effective_qty < 0 означає SHORT spread → потрібно BUY
+        is_long = effective_qty > 0
+        close_qty = abs(effective_qty)
+        close_side = "SELL" if is_long else "BUY"
+        
+        # Отримуємо limit price для закриття
+        closing_limit_price = limit_price
+        if closing_limit_price is None and self.spread_instrument:
+            # Спробуємо отримати поточний quote
+            try:
+                quote = self.cache.quote(self.spread_instrument.id)
+                if quote and quote.bid_price and quote.ask_price:
+                    bid = float(quote.bid_price)
+                    ask = float(quote.ask_price)
+                    mid = (bid + ask) / 2
+                    # Для закриття використовуємо mid price
+                    closing_limit_price = mid
+                    self.logger.info(f"   Using mid price for close: {mid:.4f} (bid={bid:.4f}, ask={ask:.4f})")
+            except Exception as e:
+                self.logger.warning(f"Could not get quote for spread, using market order: {e}")
+        
+        self.logger.info(
             f"═══════════════════════════════════════════════════════════════\n"
-            f"⚠️ CLOSING SPREAD (Smart - Legged Out)\n"
+            f"📤 CLOSING SPREAD (Smart - Reverse Combo Order)\n"
             f"═══════════════════════════════════════════════════════════════\n"
             f"   Spread ID: {self.spread_id}\n"
             f"   Effective Qty: {effective_qty}\n"
-            f"   Mode: LEGGED OUT (closing individual legs)\n"
-            f"   Warning: Broker has scattered the combo into separate legs!\n"
+            f"   Close Direction: {close_side} {close_qty}\n"
+            f"   Limit Price: {closing_limit_price if closing_limit_price else 'MARKET'}\n"
+            f"   Mode: REVERSE COMBO ORDER (atomic)\n"
+            f"   Note: IB scattered legs into individual positions,\n"
+            f"         but we close via combo order for atomicity.\n"
             f"═══════════════════════════════════════════════════════════════"
         )
         
-        # Закриваємо кожну ногу окремо
-        legs_closed = 0
-        for leg_id, ratio in self._spread_legs:
-            leg_positions = self.cache.positions_open(instrument_id=leg_id)
-            if leg_positions:
-                pos = leg_positions[0]
-                self.logger.info(
-                    f"   → Closing leg: {leg_id}\n"
-                    f"      Position: {pos.quantity} {pos.side.name}\n"
-                    f"      Ratio: {ratio}"
-                )
-                self.close_all_positions(leg_id)
-                legs_closed += 1
-            else:
-                self.logger.debug(f"   → No position on leg {leg_id}, skipping.")
-        
-        self.logger.info(f"   Total legs closed: {legs_closed}/{len(self._spread_legs)}")
-        return True
+        # Закриваємо через зворотній комбо-ордер
+        # is_buy=False якщо ми LONG (потрібно SELL)
+        # is_buy=True якщо ми SHORT (потрібно BUY)
+        return self.open_spread_position(
+            quantity=close_qty,
+            is_buy=not is_long,  # Протилежний напрямок
+            limit_price=closing_limit_price,
+            time_in_force=TimeInForce.DAY
+        )
 
     # =========================================================================
     # POSITION MANAGEMENT
