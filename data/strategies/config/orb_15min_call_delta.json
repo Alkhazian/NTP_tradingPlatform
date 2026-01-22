@@ -11,7 +11,7 @@
         "stop_loss_percent": 30.0,
         "take_profit_dollars": 0.5,
         "max_spread_dollars": 0.2,
-        "cutoff_time_hour": 15,
+        "cutoff_time_hour": 13,
         "quantity": 1
     }
 }
