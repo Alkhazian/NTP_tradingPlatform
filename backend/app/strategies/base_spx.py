@@ -269,12 +269,15 @@ class SPXBaseStrategy(BaseStrategy):
         end_minute = end_minute % 60
         range_end_time = time(end_hour, end_minute, 0)
 
-        # 4. During range formation period
-        if self.market_open_time <= current_time < range_end_time:
+        # 4. Update daily high/low throughout the day (from market open)
+        if current_time >= self.market_open_time:
             if not self.daily_high or price > self.daily_high:
                 self.daily_high = price
             if not self.daily_low or price < self.daily_low:
                 self.daily_low = price
+
+        # 5. Range formation period (logic for locking OR)
+        if self.market_open_time <= current_time < range_end_time:
             self.range_calculated = False
 
         # 5. Lock in range after window period
@@ -894,3 +897,10 @@ class SPXBaseStrategy(BaseStrategy):
     def is_opening_range_complete(self) -> bool:
         """Check if opening range calculation is complete."""
         return self.range_calculated and self.or_high is not None and self.or_low is not None
+
+    def is_market_open(self) -> bool:
+        """Check if US market is currently open (9:30 AM - 4:00 PM ET)."""
+        now_et = self.clock.utc_now().astimezone(self.tz)
+        current_time = now_et.time()
+        market_close_time = time(16, 0)
+        return self.market_open_time <= current_time < market_close_time
