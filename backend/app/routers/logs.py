@@ -155,9 +155,9 @@ async def get_strategy_logs(
     Convenience endpoint for strategy-specific logs.
     By default returns logs from the last hour, unless start is provided.
     """
-    # If no start time provided, default to 24h ago per user request for history
+    # If no start time provided, default to 8h ago per user request for history
     if not start:
-        start = datetime.utcnow() - timedelta(hours=12)
+        start = datetime.utcnow() - timedelta(hours=8)
 
     return await get_logs(
         strategy_id=strategy_id,
