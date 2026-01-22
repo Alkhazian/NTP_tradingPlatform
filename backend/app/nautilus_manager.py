@@ -125,6 +125,10 @@ class NautilusManager:
 
                 ),
                 symbology_method=SymbologyMethod.IB_SIMPLIFIED,
+                symbol_to_mic_venue={  
+                    "SPX": "CBOE",  "MES": "CME"# Force SPX options to use CBOE  
+                },  
+                convert_exchange_to_mic_venue=True,
                 #filter_sec_types=frozenset({"STK", "FUT", "OPT", "IND"}),
             )
 
