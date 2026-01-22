@@ -5,7 +5,7 @@
 
 from fastapi import APIRouter, Query, HTTPException
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Annotated
 import json
 import os
 
@@ -27,8 +27,8 @@ async def get_logs(
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
     search: Optional[str] = None,
-    exclude_containers: Optional[list[str]] = Query(None),
-    limit: int = Query(default=100, le=MAX_ENTRIES),
+    exclude_containers: Annotated[Optional[list[str]], Query()] = None,
+    limit: Annotated[int, Query(le=MAX_ENTRIES)] = 100,
 ):
     """
     Query logs from VictoriaLogs with guardrails.
@@ -123,9 +123,9 @@ async def tail_logs(
     strategy_id: Optional[str] = None,
     source: Optional[str] = None,
     level: Optional[str] = None,
-    exclude_containers: Optional[list[str]] = Query(None),
+    exclude_containers: Annotated[Optional[list[str]], Query()] = None,
     search: Optional[str] = None,
-    limit: int = Query(default=50, le=MAX_ENTRIES),
+    limit: Annotated[int, Query(le=MAX_ENTRIES)] = 50,
 ):
     """
     Get most recent logs (last 5 minutes).
@@ -149,7 +149,7 @@ async def get_strategy_logs(
     start: Optional[datetime] = None,
     # end: Optional[datetime] = None, # Implicitly now
     search: Optional[str] = None,
-    limit: int = Query(default=100, le=MAX_ENTRIES),
+    limit: Annotated[int, Query(le=MAX_ENTRIES)] = 100,
 ):
     """
     Convenience endpoint for strategy-specific logs.
@@ -172,7 +172,7 @@ async def get_strategy_logs(
 @router.get("/errors")
 async def get_recent_errors(
     strategy_id: Optional[str] = None,
-    limit: int = Query(default=50, le=MAX_ENTRIES),
+    limit: Annotated[int, Query(le=MAX_ENTRIES)] = 50,
 ):
     """
     Get recent ERROR and CRITICAL logs from the last hour.
