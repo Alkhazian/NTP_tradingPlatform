@@ -88,6 +88,10 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._spread_entry_price: Optional[float] = None
         self._signal_direction: Optional[str] = None  # 'bearish' or 'bullish'
         
+        # Position monitoring
+        self._last_position_log_time: Optional[datetime] = None
+        self._position_log_interval_seconds: int = 30  # Log position status every N seconds
+        
         # Calculate range end time for logging
         range_end_time = "Range Close" # Will be calculated/logged by base
         
@@ -696,9 +700,50 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         pnl_per_spread = (entry_credit - current_cost) * 100
         total_pnl = pnl_per_spread * self.config_quantity
         
+        # Calculate SL/TP prices for logging
+        stop_price = -(self._spread_entry_price * self.stop_loss_multiplier)
+        tp_points = self.take_profit_amount / 100.0
+        required_debit = self._spread_entry_price - tp_points
+        if required_debit < 0.05:
+            required_debit = 0.05
+        tp_price = -required_debit
+        
+        # Periodic position status logging (every 30 seconds)
+        now = self.clock.utc_now()
+        should_log = (
+            self._last_position_log_time is None or
+            (now - self._last_position_log_time).total_seconds() >= self._position_log_interval_seconds
+        )
+        
+        if should_log:
+            self._last_position_log_time = now
+            et_now = now.astimezone(self.tz)
+            
+            # Calculate distances to SL and TP
+            distance_to_sl = mid - stop_price  # Negative = closer to SL
+            distance_to_tp = tp_price - mid    # Negative = closer to TP
+            
+            # Determine position health indicator
+            if total_pnl > 0:
+                health = "🟢 PROFIT"
+            elif total_pnl > -50:
+                health = "🟡 SLIGHT LOSS"
+            else:
+                health = "🔴 LOSS"
+            
+            self.logger.info(
+                f"📊 POSITION STATUS [{et_now.strftime('%H:%M:%S')}] {health}\n"
+                f"   SPX: {self.current_spx_price:.2f} | Range: [{self.or_low:.2f}-{self.or_high:.2f}]\n"
+                f"   Spread: Bid={bid:.4f}, Ask={ask:.4f}, Mid={mid:.4f}\n"
+                f"   Entry Credit: ${entry_credit * 100:.2f} | Current Cost: ${current_cost * 100:.2f}\n"
+                f"   P&L: ${total_pnl:+.2f} ({pnl_per_spread:+.2f}/spread × {self.config_quantity})\n"
+                f"   SL @ {stop_price:.4f} (distance: {distance_to_sl:.4f}) | "
+                f"TP @ {tp_price:.4f} (distance: {distance_to_tp:.4f})"
+            )
+        
         # STOP LOSS
         # If mid becomes more negative (spread costs more to buy back), we're losing
-        stop_price = -(self._spread_entry_price * self.stop_loss_multiplier)
+        # Check STOP LOSS (stop_price already calculated above)
         if mid <= stop_price:
             self.logger.warning(
                 f"═══════════════════════════════════════════════════════════════\n"
@@ -715,13 +760,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             self._spread_entry_price = None
             return
 
-        # TAKE PROFIT
-        # We want the spread to become LESS negative (cheaper to buy back)
-        tp_points = self.take_profit_amount / 100.0
-        required_debit = self._spread_entry_price - tp_points
-        if required_debit < 0.05:
-            required_debit = 0.05
-        tp_price = -required_debit
+        # Check TAKE PROFIT (tp_price already calculated above)
         
         if mid >= tp_price:
             self.logger.info(
