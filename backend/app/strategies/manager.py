@@ -6,6 +6,7 @@ import json
 import os
 
 from nautilus_trader.live.node import TradingNode
+from nautilus_trader.model.data import BarType
 from .config import StrategyConfig
 from .persistence import PersistenceManager
 from .base import BaseStrategy
@@ -327,28 +328,41 @@ class StrategyManager:
             elif pos.avg_px_open:
                  try: entry_price = float(pos.avg_px_open.as_double())
                  except: entry_price = float(pos.avg_px_open)
-                 
-            # Current Price
-            current_price = 0.0
-            ticker = strategy.instrument_id
             
-            # 1. Try Last Trade
-            last_trade = strategy.cache.trade_tick(ticker)
+            # Use POSITION's instrument_id for price lookups, not strategy's base instrument
+            # This is critical for option strategies where position is in the option, not the underlying
+            position_instrument_id = pos.instrument_id
+            
+            # Current Price - Priority-based lookup
+            current_price = 0.0
+            
+            # 1. Try trade tick on position's instrument
+            last_trade = strategy.cache.trade_tick(position_instrument_id)
             if last_trade:
                 current_price = float(last_trade.price)
-            else:
-                # 2. Try Quote Mid
-                quote = strategy.cache.quote_tick(ticker)
+            
+            # 2. Try quote tick on position's instrument
+            if current_price == 0:
+                quote = strategy.cache.quote_tick(position_instrument_id)
                 if quote:
                     bid = float(quote.bid_price)
                     ask = float(quote.ask_price)
                     if bid > 0 and ask > 0:
                         current_price = (bid + ask) / 2.0
             
+            # 3. Fallback: Try last bar (for bar-based strategies like MES)
+            if current_price == 0:
+                current_price = self._get_last_bar_price(strategy, position_instrument_id)
+            
+            # Get multiplier from actual position's instrument
+            multiplier = 1.0
+            position_instrument = strategy.cache.instrument(position_instrument_id)
+            if position_instrument and hasattr(position_instrument, 'multiplier'):
+                multiplier = float(position_instrument.multiplier)
+            
             # Calculate Unrealized PnL
             unrealized_pnl = 0.0
             if current_price > 0 and entry_price > 0:
-                multiplier = float(strategy.instrument.multiplier) if strategy.instrument else 1.0
                 if side_str == "LONG":
                     unrealized_pnl = (current_price - entry_price) * qty * multiplier
                 else:
@@ -365,6 +379,35 @@ class StrategyManager:
         except Exception as e:
             logger.error(f"Error getting positions for {strategy.strategy_id}: {e}")
             return []
+
+    def _get_last_bar_price(self, strategy: BaseStrategy, instrument_id) -> float:
+        """Get close price from last bar for an instrument (using existing subscriptions) with robust variant checkout."""
+        try:
+            # Get base symbol (without venue or external suffix)
+            symbol_str = str(instrument_id.symbol) if hasattr(instrument_id, 'symbol') else str(instrument_id).split('.')[0]
+            venue_str = str(instrument_id.venue) if hasattr(instrument_id, 'venue') else str(instrument_id).split('.')[-1].replace('-EXTERNAL', '')
+            
+            # Try different bar type combinations
+            bar_specs = ["1-MINUTE-LAST-EXTERNAL", "1-MINUTE-MID-EXTERNAL", "1-MINUTE-BID-EXTERNAL", "30-MINUTE-LAST-EXTERNAL"]
+            instrument_variants = [
+                str(instrument_id),
+                f"{symbol_str}.{venue_str}",
+            ]
+            
+            for inst_var in instrument_variants:
+                for bar_spec in bar_specs:
+                    try:
+                        bar_type_str = f"{inst_var}-{bar_spec}"
+                        bar_type = BarType.from_str(bar_type_str)
+                        bar = strategy.cache.bar(bar_type)
+                        if bar:
+                            return float(bar.close)
+                    except Exception:
+                        continue
+            return 0.0
+        except Exception as e:
+            logger.error(f"Error getting last bar price for {instrument_id}: {e}")
+            return 0.0
 
     async def get_all_strategies_status(self) -> list:
         # Fetch all statuses concurrently

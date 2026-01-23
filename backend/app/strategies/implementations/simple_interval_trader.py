@@ -61,7 +61,7 @@ class SimpleIntervalTrader(BaseStrategy):
         
         bar_type = BarType(
             self.instrument_id,
-            BarSpecification.from_str("1-MINUTE-MID")
+            BarSpecification.from_str("1-MINUTE-LAST")
         )
         self.subscribe_bars(bar_type)
         

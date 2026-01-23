@@ -22,6 +22,7 @@ from nautilus_trader.config import (
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import AccountId, Venue, Symbol
 from nautilus_trader.model.enums import OrderSide, PositionSide
+from nautilus_trader.model.data import BarType
 from .services.trade_recorder import TradeRecorder
 
 logger = logging.getLogger(__name__)
@@ -346,6 +347,10 @@ class NautilusManager:
                                 if p.unrealized_pnl:
                                     upnl = float(p.unrealized_pnl.as_double())
                             except Exception: pass
+                            
+                            # Fallback: Calculate PnL from cache if native PnL is 0
+                            if upnl == 0.0:
+                                upnl = self._calculate_pnl_from_cache(p)
 
                             avg_px = 0.0
                             try:
@@ -358,6 +363,8 @@ class NautilusManager:
                             
                             # logger.info(f"Nautilus Position: {symbol}, qty={qty}, avg_px={avg_px}")
                             
+                            logger.info(f"Position Detail: ID={p.id}, Inst={p.instrument_id}, Qty={qty}, AvgPx={avg_px}, UPnL={upnl}")
+
                             if symbol not in netted:
                                 netted[symbol] = {
                                     "net_qty": 0.0,
@@ -367,19 +374,22 @@ class NautilusManager:
                             
                             netted[symbol]["net_qty"] += qty
                             netted[symbol]["total_upnl"] += upnl
-                            netted[symbol]["total_cost"] += (abs(qty) * avg_px)
+                            netted[symbol]["total_cost"] += (qty * avg_px)
 
                     # Convert netted map to list
                     for symbol, data in netted.items():
                         if abs(data["net_qty"]) > 1e-9:
-                            avg_price = data["total_cost"] / abs(data["net_qty"]) if data["net_qty"] != 0 else 0
+                            avg_price = data["total_cost"] / data["net_qty"] if data["net_qty"] != 0 else 0
                             positions_data.append({
                                 "symbol": symbol,
                                 "quantity": data["net_qty"],
                                 "avg_price": avg_price,
                                 "unrealized_pnl": data["total_upnl"]
                             })
-                            logger.info(f"Position reported: {symbol}, Net Qty: {data['net_qty']}, UPnL: {data['total_upnl']}")
+                            if data["total_upnl"] == 0.0:
+                                logger.info(f"Position reported: {symbol}, Net Qty: {data['net_qty']}, Avg Price: {avg_price}, UPnL: {data['total_upnl']} (no price data)")
+                            else:
+                                logger.info(f"Position reported: {symbol}, Net Qty: {data['net_qty']}, Avg Price: {avg_price}, UPnL: {data['total_upnl']}")
                 except Exception as e:
                     logger.error(f"Error processing positions: {e}", exc_info=True)
                 
@@ -567,6 +577,87 @@ class NautilusManager:
         except Exception as e:
             logger.error(f"Error fetching recent trades: {e}", exc_info=True)
             return []
+
+
+    def _calculate_pnl_from_cache(self, position) -> float:
+        """Calculate PnL using available market data from cache (quote ticks or bars)."""
+        try:
+            instrument_id = position.instrument_id
+            entry_price = 0.0
+            current_price = 0.0
+            
+            # Get entry price
+            if position.avg_px_open is not None:
+                if hasattr(position.avg_px_open, "as_double"):
+                    entry_price = float(position.avg_px_open.as_double())
+                else:
+                    entry_price = float(position.avg_px_open)
+            
+            if entry_price == 0:
+                logger.debug(f"PnL calc: {instrument_id} - no entry price")
+                return 0.0
+            
+            # Try quote tick first
+            quote = self.node.cache.quote_tick(instrument_id)
+            if quote:
+                bid = float(quote.bid_price)
+                ask = float(quote.ask_price)
+                if bid > 0 and ask > 0:
+                    current_price = (bid + ask) / 2.0
+                    logger.debug(f"PnL calc: {instrument_id} - got quote: {current_price}")
+            
+            # Try last bar if no quote - try multiple instrument ID variants
+            if current_price == 0:
+                # Get base symbol (without venue or external suffix)
+                symbol_str = str(instrument_id.symbol) if hasattr(instrument_id, 'symbol') else str(instrument_id).split('.')[0]
+                venue_str = str(instrument_id.venue) if hasattr(instrument_id, 'venue') else str(instrument_id).split('.')[-1].replace('-EXTERNAL', '')
+                
+                # Try different bar type combinations
+                bar_specs = ["1-MINUTE-LAST-EXTERNAL", "1-MINUTE-MID-EXTERNAL", "1-MINUTE-BID-EXTERNAL", "30-MINUTE-LAST-EXTERNAL"]
+                instrument_variants = [
+                    str(instrument_id),
+                    f"{symbol_str}.{venue_str}",
+                ]
+                
+                logger.debug(f"PnL calc: {instrument_id} - trying bar variants: {instrument_variants}")
+                
+                for inst_var in instrument_variants:
+                    if current_price > 0:
+                        break
+                    for bar_spec in bar_specs:
+                        try:
+                            bar_type_str = f"{inst_var}-{bar_spec}"
+                            bar_type = BarType.from_str(bar_type_str)
+                            bar = self.node.cache.bar(bar_type)
+                            if bar:
+                                current_price = float(bar.close)
+                                logger.debug(f"PnL calc: {instrument_id} - got bar from {bar_type_str}: {current_price}")
+                                break
+                        except Exception as e:
+                            logger.debug(f"PnL calc: {instrument_id} - failed {bar_type_str}: {e}")
+                            continue
+            
+            if current_price == 0:
+                logger.debug(f"PnL calc: {instrument_id} - no current price found")
+                return 0.0
+            
+            # Get multiplier
+            instrument = self.node.cache.instrument(instrument_id)
+            multiplier = float(instrument.multiplier) if instrument and hasattr(instrument, 'multiplier') else 1.0
+            
+            qty = float(position.quantity)
+            if position.side == PositionSide.LONG:
+                pnl = (current_price - entry_price) * qty * multiplier
+
+            else:
+                pnl = (entry_price - current_price) * qty * multiplier
+            
+            logger.debug(f"PnL calc: {instrument_id} - entry={entry_price}, current={current_price}, qty={qty}, mult={multiplier} -> PnL={pnl}")
+            return pnl
+                
+        except Exception as e:
+            logger.warning(f"Could not calculate PnL for {position.instrument_id}: {e}")
+            return 0.0
 
     async def stop(self):
         """Stop the NautilusTrader TradingNode"""

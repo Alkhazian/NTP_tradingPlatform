@@ -69,7 +69,7 @@ try:
     # Add to root logger to capture all logs
     logging.getLogger().addHandler(victorialogs_handler)
     # Ensure strategy loggers use it
-    logging.getLogger("strategy").addHandler(victorialogs_handler)
+    #logging.getLogger("strategy").addHandler(victorialogs_handler)
     
     logger.info("VictoriaLogs handler configured")
 except Exception as e:
