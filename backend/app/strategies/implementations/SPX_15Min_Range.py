@@ -87,7 +87,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._found_legs: Dict[float, Instrument] = {}
         self._spread_entry_price: Optional[float] = None
         self._signal_direction: Optional[str] = None  # 'bearish' or 'bullish'
-
+        
         # Calculate range end time for logging
         range_end_time = "Range Close" # Will be calculated/logged by base
         
@@ -107,6 +107,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         start_time_str = params.get("start_time_str", "09:30:00")
         t = datetime.strptime(start_time_str, "%H:%M:%S").time()
         self.start_time = t
+        # CRITICAL: Override base class market_open_time to use config value
+        # Without this, the range calculation ignores start_time_str!
+        self.market_open_time = t
         
         # Entry cutoff time
         entry_cutoff_str = params.get("entry_cutoff_time_str", "12:00:00")
