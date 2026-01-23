@@ -76,7 +76,7 @@ async def get_logs(
         query_parts.append(f"level:{level}")
     
     # Exclusions
-    if exclude_containers:
+    if exclude_containers and isinstance(exclude_containers, (list, tuple)):
         for container in exclude_containers:
             query_parts.append(f'container_name:!"{container}"')
     

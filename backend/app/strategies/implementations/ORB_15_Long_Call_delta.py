@@ -76,6 +76,7 @@ class Orb15MinLongCallDeltaStrategy(SPXBaseStrategy):
         self.max_spread_dollars = float(params.get("max_spread_dollars", 0.2))
         self.cutoff_time_hour = int(params.get("cutoff_time_hour", 15))
         self.quantity = int(params.get("quantity", 1))
+        self.selection_delay_seconds = float(params.get("selection_delay_seconds", 10.0))
         
         # Eastern Time cutoff for entries
         self.cutoff_time = time(self.cutoff_time_hour, 0)
@@ -84,7 +85,7 @@ class Orb15MinLongCallDeltaStrategy(SPXBaseStrategy):
             f"🚀 ORB 15-Min Long Call Delta Strategy STARTING: "
             f"OR={self.opening_range_minutes}m, Target Delta={self.target_delta}, "
             f"SL={self.stop_loss_percent}%, TP=${self.take_profit_dollars}, "
-            f"Quantity={self.quantity}"
+            f"Quantity={self.quantity}, Selection Delay={self.selection_delay_seconds}s"
         )
 
     def on_spx_tick(self, tick: QuoteTick):
@@ -224,6 +225,7 @@ class Orb15MinLongCallDeltaStrategy(SPXBaseStrategy):
         self._request_call_options(base_strike)
         
         self.entry_attempted_today = True
+        self.save_state()  # Save state immediately to prevent repeated attempts on restart
 
     def _calculate_target_strike(self) -> Optional[float]:
         """
@@ -337,7 +339,7 @@ class Orb15MinLongCallDeltaStrategy(SPXBaseStrategy):
             
             self.clock.set_time_alert(
                 name=timer_name,
-                alert_time=self.clock.utc_now() + timedelta(seconds=2),
+                alert_time=self.clock.utc_now() + timedelta(seconds=self.selection_delay_seconds),
                 callback=self._select_and_enter_best_option
             )
 
@@ -366,20 +368,25 @@ class Orb15MinLongCallDeltaStrategy(SPXBaseStrategy):
             
             # Use GreeksCalculator
             try:
+                quote = self.cache.quote_tick(option.id)
                 greeks = self.greeks.instrument_greeks(option.id)
+                
+                mid = 0.0
+                spread = 0.0
+                if quote:
+                    bid = quote.bid_price.as_double()
+                    ask = quote.ask_price.as_double()
+                    if bid > 0 and ask > 0:
+                        mid = (bid + ask) / 2
+                        spread = ask - bid
+                else:
+                    self.logger.warning(f"  Strike ${float(option.strike_price.as_double()):.0f}: No quote yet")
+
                 if greeks and greeks.delta:
                     delta = abs(float(greeks.delta))
-                    
-                    # Also get price for logging
-                    quote = self.cache.quote_tick(option.id)
-                    mid = 0.0
-                    spread = 0.0
-                    if quote:
-                        bid = quote.bid_price.as_double()
-                        ask = quote.ask_price.as_double()
-                        if bid > 0 and ask > 0:
-                            mid = (bid + ask) / 2
-                            spread = ask - bid
+                    gamma = float(greeks.gamma) if greeks.gamma else 0.0
+                    theta = float(greeks.theta) if greeks.theta else 0.0
+                    vega = float(greeks.vega) if greeks.vega else 0.0
                     
                     option_data.append({
                         'option': option,
@@ -390,7 +397,14 @@ class Orb15MinLongCallDeltaStrategy(SPXBaseStrategy):
                     
                     self.logger.info(
                         f"  Strike ${float(option.strike_price.as_double()):.0f}: "
-                        f"Delta={delta:.3f}, Mid=${mid:.2f}, Spread=${spread:.2f}"
+                        f"Delta={delta:.3f} (γ={gamma:.4f}, θ={theta:.2f}, ν={vega:.2f}) | "
+                        f"Mid=${mid:.2f}, Spread=${spread:.2f}"
+                    )
+                else:
+                    reason = "Greeks missing" if greeks else "No response for Greeks yet"
+                    self.logger.warning(
+                        f"  Strike ${float(option.strike_price.as_double()):.0f}: {reason} | "
+                        f"Mid=${mid:.2f}"
                     )
             except Exception as e:
                 self.logger.warning(f"Could not calculate Greeks for {option.id}: {e}")
