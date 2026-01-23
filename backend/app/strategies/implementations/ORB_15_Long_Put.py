@@ -73,6 +73,7 @@ class Orb15MinLongPutStrategy(SPXBaseStrategy):
         self.max_spread_dollars = float(params.get("max_spread_dollars", 0.2))
         self.cutoff_time_hour = int(params.get("cutoff_time_hour", 15))
         self.quantity = int(params.get("quantity", 1))
+        self.selection_delay_seconds = float(params.get("selection_delay_seconds", 5.0))
         
         self.cutoff_time = time(self.cutoff_time_hour, 0)
         
@@ -80,7 +81,7 @@ class Orb15MinLongPutStrategy(SPXBaseStrategy):
             f"🚀 ORB 15-Min Long Put Strategy STARTING: "
             f"OR={self.opening_range_minutes}m, Target Price=${self.target_option_price}, "
             f"SL={self.stop_loss_percent}%, TP=${self.take_profit_dollars}, "
-            f"Quantity={self.quantity}"
+            f"Quantity={self.quantity}, Selection Delay={self.selection_delay_seconds}s"
         )
 
     def on_spx_tick(self, tick: QuoteTick):
@@ -203,12 +204,13 @@ class Orb15MinLongPutStrategy(SPXBaseStrategy):
         """Prepare for entry by searching for Put option via find_option_by_premium."""
         self.logger.info("Preparing entry - searching for Put option")
         self.entry_attempted_today = True
+        self.save_state()  # Persist entry attempt immediately
         
         search_id = self.find_option_by_premium(
             target_premium=self.target_option_price,
             option_kind=OptionKind.PUT,
             max_spread=self.max_spread_dollars,
-            selection_delay_seconds=self.DEFAULT_SELECTION_DELAY_SECONDS,
+            selection_delay_seconds=self.selection_delay_seconds,
             callback=self._on_put_option_found
         )
         
