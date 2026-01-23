@@ -241,20 +241,23 @@ class Orb15MinLongPutStrategy(SPXBaseStrategy):
         """Attempt to enter position with the selected option contract."""
         ask = option_data['ask']
         
+        # Round ask price to conform to tick size
+        rounded_ask = self.round_to_tick(ask, option)
+        
         # Create entry limit order
         order = self.order_factory.limit(
             instrument_id=option.id,
             order_side=OrderSide.BUY,
             quantity=Quantity.from_int(self.quantity),
-            price=Price.from_str(str(ask)),
+            price=Price.from_str(str(rounded_ask)),
             time_in_force=TimeInForce.DAY
         )
         
-        # Calculate SL/TP prices
-        # Stop Loss: target premium * (1 - SL%)
-        self.stop_loss_price = ask * (1 - self.stop_loss_percent / 100)
-        # Take Profit: entry + TP dollars per share (multiplier 100)
-        self.take_profit_price = ask + (self.take_profit_dollars / 100)
+        # Calculate SL/TP prices based on rounded entry price
+        # Stop Loss: rounded entry * (1 - SL%)
+        self.stop_loss_price = rounded_ask * (1 - self.stop_loss_percent / 100)
+        # Take Profit: rounded entry + TP dollars per share (multiplier 100)
+        self.take_profit_price = rounded_ask + (self.take_profit_dollars / 100)
         
         # Submit bracket order (entry + target SL/TP)
         success = self.submit_bracket_order(
@@ -265,10 +268,10 @@ class Orb15MinLongPutStrategy(SPXBaseStrategy):
         
         if success:
             self.active_option_id = option.id
-            self.entry_price = ask
+            self.entry_price = rounded_ask
             
             self.logger.info(
-                f"📈 BRACKET ORDER SUBMITTED: {option.id} @ ${ask:.2f}\n"
+                f"📈 BRACKET ORDER SUBMITTED: {option.id} @ ${rounded_ask:.2f} (original: ${ask:.2f})\n"
                 f"   SL: ${self.stop_loss_price:.2f} ({self.stop_loss_percent}%)\n"
                 f"   TP: ${self.take_profit_price:.2f} (+${self.take_profit_dollars})"
             )

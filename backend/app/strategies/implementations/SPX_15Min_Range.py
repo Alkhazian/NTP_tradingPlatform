@@ -631,6 +631,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         if mid <= target_price:
             signal_age = (self.clock.utc_now() - self._signal_time).total_seconds() if self._signal_time else 0
             
+            # Round price before submission and logging
+            rounded_mid = self.round_to_tick(mid, self.spread_instrument)
+            
             self.logger.info(
                 f"═══════════════════════════════════════════════════════════════\n"
                 f"✅ ENTRY ORDER SUBMITTED\n"
@@ -638,11 +641,11 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 f"   Direction: {self._signal_direction.upper()}\n"
                 f"   Spread: {self.spread_instrument.id if self.spread_instrument else 'N/A'}\n"
                 f"   Quantity: {self.config_quantity}\n"
-                f"   Limit Price: {mid:.4f}\n"
-                f"   Credit Received: ${abs(mid) * 100:.2f} per spread\n"
-                f"   Total Credit: ${abs(mid) * 100 * self.config_quantity:.2f}\n"
+                f"   Limit Price: {rounded_mid:.4f} (original: {mid:.4f})\n"
+                f"   Credit Received: ${abs(rounded_mid) * 100:.2f} per spread\n"
+                f"   Total Credit: ${abs(rounded_mid) * 100 * self.config_quantity:.2f}\n"
                 f"   Signal Age: {signal_age:.1f}s\n"
-                f"   Stop Loss at: ${abs(mid) * 100 * self.stop_loss_multiplier:.2f}\n"
+                f"   Stop Loss at: ${abs(rounded_mid) * 100 * self.stop_loss_multiplier:.2f}\n"
                 f"   Take Profit at: ${self.take_profit_amount:.2f}\n"
                 f"═══════════════════════════════════════════════════════════════"
             )
@@ -650,12 +653,12 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             self.open_spread_position(
                 quantity=self.config_quantity,
                 is_buy=True,
-                limit_price=mid
+                limit_price=rounded_mid
             )
             
             self.traded_today = True
             self.entry_in_progress = False
-            self._spread_entry_price = abs(mid)  # Store as positive credit amount
+            self._spread_entry_price = abs(rounded_mid)  # Store as positive credit amount
             self._signal_time = None
             self._signal_close_price = None
             self.save_state()

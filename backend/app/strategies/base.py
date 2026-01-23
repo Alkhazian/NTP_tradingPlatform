@@ -14,6 +14,7 @@ from typing import Dict, Any, Optional, Set, List, Tuple
 from datetime import datetime, timedelta
 import traceback
 import logging
+from decimal import Decimal, ROUND_HALF_UP
 
 from nautilus_trader.trading.strategy import Strategy
 from nautilus_trader.model.instruments import Instrument
@@ -474,7 +475,9 @@ class BaseStrategy(Strategy):
 
         # Create order - prefer LIMIT for spreads
         if limit_price is not None:
-            price = self.spread_instrument.make_price(limit_price)
+            # Automatically round to nearest valid tick
+            rounded_price = self.round_to_tick(limit_price, self.spread_instrument)
+            price = self.spread_instrument.make_price(rounded_price)
             order = self.order_factory.limit(
                 instrument_id=self.spread_instrument.id,
                 order_side=side,
@@ -483,7 +486,7 @@ class BaseStrategy(Strategy):
                 time_in_force=time_in_force,
             )
             order_type = "LIMIT"
-            price_str = f"{limit_price:.4f}"
+            price_str = f"{rounded_price:.4f} (original: {limit_price:.4f})"
         else:
             # Market order (use with caution for spreads)
             order = self.order_factory.market(
@@ -972,22 +975,13 @@ class BaseStrategy(Strategy):
             self.logger.error(f"Cannot trigger bracket exits: {inst_id} not in cache")
             return
 
-        # Helper for rounding to instrument tick
-        def round_to_tick(price_val):
-            tick = 0.05
-            if instrument.price_increment > 0:
-                tick = float(instrument.price_increment)
-            elif "SPX" in str(instrument.id):
-                tick = 0.05 if price_val < 3.0 else 0.10
-            return round(price_val / tick) * tick
-
         orders = []
 
         # 1. Stop Loss (STOP_LIMIT)
         if sl_price_val is not None:
-            rounded_sl = round_to_tick(sl_price_val)
+            rounded_sl = self.round_to_tick(sl_price_val, instrument)
             sl_trigger = instrument.make_price(rounded_sl)
-            limit_offset = 0.05 if rounded_sl < 3.0 else 0.10
+            limit_offset = 0.05 if abs(rounded_sl) < 3.0 else 0.10
             if exit_side == OrderSide.SELL:
                 sl_limit_val = max(0.01, rounded_sl - limit_offset)
             else:
@@ -1009,7 +1003,7 @@ class BaseStrategy(Strategy):
 
         # 2. Take Profit (LIMIT)
         if tp_price_val is not None:
-            rounded_tp = round_to_tick(tp_price_val)
+            rounded_tp = self.round_to_tick(tp_price_val, instrument)
             tp_limit = instrument.make_price(rounded_tp)
             
             tp_order = self.order_factory.limit(
@@ -1251,6 +1245,42 @@ class BaseStrategy(Strategy):
         except Exception as e:
             self.on_unexpected_error(e)
 
+    # =========================================================================
+    # UTILITIES
+    # =========================================================================
+
+    def round_to_tick(self, price: float, instrument: Instrument) -> float:
+        """
+        Round a price to the nearest valid tick (minimum price variation).
+        Handles special SPX complex order rules and instrument defaults.
+        """
+        # Default increment
+        tick = 0.01 
+        
+        # 1. Try instrument's own price_increment if available
+        if instrument.price_increment > 0:
+            tick = float(instrument.price_increment)
+        
+        # 2. Special overrides for SPX/SPXW (CBOE)
+        if "SPX" in str(instrument.id):
+            # Complex orders (spreads) are generally 0.05 regardless of price
+            if hasattr(instrument, 'legs') and len(instrument.legs) > 0:
+                tick = 0.05
+            else:
+                # Single legs: 0.05 < 3.0, 0.10 >= 3.0
+                abs_price = abs(price)
+                tick = 0.05 if abs_price < 3.0 else 0.10
+        
+        # Use Decimal for precise rounding (avoids banker's rounding of float)
+        try:
+            p_dec = Decimal(str(price))
+            t_dec = Decimal(str(tick))
+            rounded = (p_dec / t_dec).quantize(Decimal('1'), rounding=ROUND_HALF_UP) * t_dec
+            return float(rounded)
+        except Exception:
+            # Fallback to simple round if Decimal fails
+            return round(price / tick) * tick
+
     def on_order_filled(self, event):
         """Handle order fill - update tracking and record trade."""
         try:
@@ -1334,7 +1364,7 @@ class BaseStrategy(Strategy):
             self.signed_inventory -= qty
             
         self.logger.info(f"Inventory updated: {self.signed_inventory}")
-        
+        self.save_state()
         # Start trade record asynchronously
         self._schedule_async_task(
             self._start_trade_record_async(event)

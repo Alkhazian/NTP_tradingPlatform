@@ -462,32 +462,35 @@ class Orb15MinLongCallDeltaStrategy(SPXBaseStrategy):
             f"Spread=${spread:.2f} ✅"
         )
         
+        # Round ask price to conform to tick size
+        rounded_ask = self.round_to_tick(ask, option)
+        
         # Create limit order at ask price
         order = self.order_factory.limit(
             instrument_id=option.id,
             order_side=OrderSide.BUY,
             quantity=Quantity.from_int(self.quantity),
-            price=Price.from_str(str(ask)),
+            price=Price.from_str(str(rounded_ask)),
             time_in_force=TimeInForce.DAY
         )
         
         # Submit entry order
         if self.submit_entry_order(order):
             self.active_option_id = option.id
-            self.entry_price = ask
+            self.entry_price = rounded_ask
             
-            # Calculate exit levels
+            # Calculate exit levels based on rounded entry price
             # Stop Loss: 40% below entry price
-            self.stop_loss_price = ask * (1 - self.stop_loss_percent / 100)
+            self.stop_loss_price = rounded_ask * (1 - self.stop_loss_percent / 100)
             
             # Take Profit: entry + take_profit_dollars PER CONTRACT
             # Note: Option price is per share, multiply by 100 for contract value
-            self.take_profit_price = ask + (self.take_profit_dollars / 100)
+            self.take_profit_price = rounded_ask + (self.take_profit_dollars / 100)
             
             self.logger.info(
-                f"📈 ENTRY ORDER SUBMITTED: {option.id} @ ${ask:.2f} (Limit)\n"
-                f"   Entry per share: ${ask:.2f}\n"
-                f"   Entry per contract: ${ask * 100:.2f}\n"
+                f"📈 ENTRY ORDER SUBMITTED: {option.id} @ ${rounded_ask:.2f} (Limit) (original: ${ask:.2f})\n"
+                f"   Entry per share: ${rounded_ask:.2f}\n"
+                f"   Entry per contract: ${rounded_ask * 100:.2f}\n"
                 f"   Stop Loss per share: ${self.stop_loss_price:.2f} "
                 f"({self.stop_loss_percent}%)\n"
                 f"   Stop Loss per contract: ${self.stop_loss_price * 100:.2f}\n"

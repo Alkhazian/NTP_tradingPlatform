@@ -327,6 +327,10 @@ class SPXBaseStrategy(BaseStrategy):
             except Exception as e:
                 self.logger.error(f"Failed to unsubscribe from SPX: {e}")
         
+        # Cancel ALL active searches on stop
+        for search_id in list(self._premium_searches.keys()):
+            self.cancel_premium_search(search_id)
+
         # Call parent cleanup
         super().on_stop_safe()
     
