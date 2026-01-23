@@ -4,7 +4,7 @@
 - [x] [Options] SPX ORB 15 min long call - search strike using delta value
 - [x] [Options] SPX ORB 15 min long call - search strike using $ value 
 - [x] [Options] SPX ORB 15 min long put - search strike using $ value
-- [ ] [Options] SPX ORB 15 min 5 size with vertical credit spreads (call credit and put credit)
+- [x] [Options] SPX ORB 15 min 5 size with vertical credit spreads (call credit and put credit)
 - [ ] [Options] SPX ORB 60 min 10 size with vertical credit spreads §(call credit and put credit)
 - [ ] [Futures] MNQ ORB 5 min + Fair Value Gap (FVG)
 
@@ -37,7 +37,7 @@
 
 ## UI
 - [ ] [Analytics] Add strategy analytics section: strategy selector, equity curve, statistics. Read data from trades.db
-- [ ] [Strategies] Improve logs for strategies on UI. As of now UI reads ony the first 500 lines from app.log. Hence, all logs from the strategy are not displayed
+- [x] [Strategies] Improve logs for strategies on UI. As of now UI reads ony the first 500 lines from app.log. Hence, all logs from the strategy are not displayed
 - [ ] [Strategies] Add unrealized P&L to strategy stats/status
 
 ## Backtesting
@@ -51,7 +51,7 @@
 ## System
 - [ ] Fix UI status of IB connection. As of now it in not taken into account 
 - [ ] [Logging] Log more nautilus trader events in app.log. For example, issues with IBKR connection are not logged to the app.log
-- [ ] [Logging] Re-do logging on UI to use API and lazy-loading to search fot the full history. Implement DB storage of logs.
+- [x] [Logging] Re-do logging on UI to use API and lazy-loading to search fot the full history. Implement DB storage of logs.
 - [ ] Integrate with exchange_calendars library or maintain a holiday list. Update strategy logic to account for holidays
 - [ ] [Logging] ? Remove custom logger (use inherited Nautilus logger)
 - [ ] Enhanced Configuration
