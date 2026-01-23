@@ -95,6 +95,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         # Calculate range end time for logging
         range_end_time = "Range Close" # Will be calculated/logged by base
         
+        # Tracking
+        self._tick_count = 0
+        
 
     # =========================================================================
     # LIFECYCLE

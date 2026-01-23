@@ -1,7 +1,7 @@
 {
     "id": "orb_15min_put",
     "name": "ORB 15-Min Long Put",
-    "enabled": true,
+    "enabled": false,
     "instrument_id": "^SPX.CBOE",
     "strategy_type": "Orb15MinLongPutStrategy",
     "order_size": 1.0,

@@ -688,7 +688,7 @@ class BaseStrategy(Strategy):
         if closing_limit_price is None and self.spread_instrument:
             # Спробуємо отримати поточний quote
             try:
-                quote = self.cache.quote(self.spread_instrument.id)
+                quote = self.cache.quote_tick(self.spread_instrument.id)
                 if quote and quote.bid_price and quote.ask_price:
                     bid = float(quote.bid_price)
                     ask = float(quote.ask_price)

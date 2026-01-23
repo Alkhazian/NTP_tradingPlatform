@@ -1,7 +1,7 @@
 {
     "id": "orb_15min_call",
     "name": "ORB 15-Min Long Call",
-    "enabled": true,
+    "enabled": false,
     "instrument_id": "^SPX.CBOE",
     "strategy_type": "Orb15MinLongCallStrategy",
     "order_size": 1.0,
