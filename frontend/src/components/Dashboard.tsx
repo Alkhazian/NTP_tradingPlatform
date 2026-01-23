@@ -207,6 +207,11 @@ export default function Dashboard() {
                     active={activeNav === 'logs'}
                     onClick={() => handleNavChange('logs')}
                 />
+                <SidebarItem
+                    icon="database"
+                    label="VictoriaLogs"
+                    onClick={() => window.open(`http://${window.location.hostname}:9428/select/vmui/`, '_blank')}
+                />
             </Sidebar>
 
             {/* Main Content */}
