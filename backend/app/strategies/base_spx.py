@@ -44,7 +44,7 @@ class SPXBaseStrategy(BaseStrategy):
     
     # Default timeout for option selection (can be overridden in derived strategies)
     # IMPORTANT: In live trading, increase this value if IB is slow (e.g., market open)
-    DEFAULT_SELECTION_DELAY_SECONDS = 2.0
+    DEFAULT_SELECTION_DELAY_SECONDS = 10.0
     
     def __init__(self, config, integration_manager=None, persistence_manager=None):
         """
@@ -390,7 +390,7 @@ class SPXBaseStrategy(BaseStrategy):
         strike_range: int = 7,
         strike_step: int = 5,
         max_spread: Optional[float] = None,
-        selection_delay_seconds: float = 2.0,
+        selection_delay_seconds: float = 10.0,
         callback: Optional[Callable[[Optional[Instrument], Optional[Dict]], None]] = None
     ) -> Optional[str]:
         """
