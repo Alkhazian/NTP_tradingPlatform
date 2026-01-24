@@ -1,5 +1,7 @@
 # NTD - Trader Dashboard
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Alkhazian/NTP_tradingPlatform)
+
 A containerized trading dashboard built with NautilusTrader integration in mind.
 
 ## Components
