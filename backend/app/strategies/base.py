@@ -106,6 +106,10 @@ class BaseStrategy(Strategy):
         # Sequential bracket tracking (intent to submit exits after entry fill)
         # Entry ClientOrderId -> {sl_price, tp_price, ...}
         self._pending_bracket_exits: Dict[ClientOrderId, Dict[str, Any]] = {}
+        
+        # Mapping for linked auto-cancellation of ghost orders
+        # Entry ClientOrderId -> List[Exit ClientOrderId]
+        self._entry_to_exits: Dict[ClientOrderId, List[ClientOrderId]] = {}
 
 
     # =========================================================================
@@ -199,6 +203,9 @@ class BaseStrategy(Strategy):
                 # Call strategy-specific startup hook, but protect it as well
                 try:
                     self.on_start_safe()
+                    
+                    # FINAL SAFETY STEP: Audit protection for any resumed positions
+                    self._audit_protection()
                 except Exception as e:
                     # Strategy hook error should be logged but must not bubble
                     self.on_unexpected_error(e)
@@ -309,7 +316,7 @@ class BaseStrategy(Strategy):
     #             (call_4050_id, -1),  # Sell leg (ratio -1)
     #         ])
     #
-    #     def on_spread_ready(self, instrument):
+    #     def on_spread_ready(self):
     #         # Now safe to trade - open 5 spreads
     #         self.open_spread_position(5, is_buy=True, limit_price=2.50)
     #
@@ -646,9 +653,15 @@ class BaseStrategy(Strategy):
                 f"BROKEN SPREAD DETECTED! Leg quantities do not match ratios. "
                 f"Implied quantities per leg: {potential_spread_qtys}"
             )
-            # Тут рішення залежить від ризик-менеджменту. 
-            # Безпечно повернути мінімальне значення або 0, щоб не закрити зайве.
-            return 0.0 
+            # SAFETY FIX: Return the minimum absolute quantity to BLOCK re-entry.
+            # Returning 0.0 would falsely indicate "flat" and allow duplicate entries.
+            # By returning min, we signal that SOME position exists.
+            min_abs_qty = min(potential_spread_qtys, key=abs)
+            self.logger.warning(
+                f"Returning minimum implied quantity ({min_abs_qty}) to prevent "
+                f"duplicate entries. Manual intervention may be required."
+            )
+            return min_abs_qty
 
         return first_qty
 
@@ -923,6 +936,7 @@ class BaseStrategy(Strategy):
     ) -> bool:
         """
         Submit a bracket order (entry + attached SL/TP).
+        Supports both single instruments and spread instruments.
         """
         can_submit, reason = self.can_submit_entry_order()
         if not can_submit:
@@ -932,12 +946,12 @@ class BaseStrategy(Strategy):
         qty = entry_order.quantity
         tif = entry_order.time_in_force
         
-        # LOGIC CHANGE: To bypass IBKR "Combo Strategy" permission rejections (Code 201),
-        # we submit the entry order FIRST and INDEPENDENTLY. 
-        # The exit legs will be submitted as an OCO pair once the entry is filled.
-        
         # Track entry as pending
         self._pending_entry_orders.add(entry_order.client_order_id)
+        
+        # Track spread orders for logging/state
+        if entry_order.instrument_id == self.spread_id:
+            self._pending_spread_orders.add(entry_order.client_order_id)
         
         # Save the exit leg intent
         self._pending_bracket_exits[entry_order.client_order_id] = {
@@ -951,14 +965,23 @@ class BaseStrategy(Strategy):
         self.submit_order(entry_order)
         self.logger.info(
             f"📈 Entry order submitted: {entry_order.client_order_id}. "
-            f"Broker-side SL/TP will be attached upon fill."
+            f"Submitting linked SL/TP exits immediately (0ms gap)..."
         )
         
-        # Immediate save to persist the exit intent
+        # IMPROVED: Trigger exits IMMEDIATELY without waiting for fill
+        # This eliminates the 0.5-5s naked exposure gap.
+        # Ghost protection is handled via linked cancellation in on_order_rejected/cancelled.
+        self._trigger_bracket_exits(
+            self._pending_bracket_exits[entry_order.client_order_id], 
+            entry_order.order_side, 
+            parent_id=entry_order.client_order_id
+        )
+        
+        # Immediate save to persist state
         self.save_state()
         return True
 
-    def _trigger_bracket_exits(self, exit_data: dict, entry_side: OrderSide):
+    def _trigger_bracket_exits(self, exit_data: dict, entry_side: OrderSide, parent_id: Optional[ClientOrderId] = None):
         """Submit the SL and TP legs as an OCO pair after entry fill."""
         sl_price_val = exit_data.get("stop_loss_price")
         tp_price_val = exit_data.get("take_profit_price")
@@ -1025,10 +1048,15 @@ class BaseStrategy(Strategy):
                 orders=orders
             )
             self.submit_order_list(order_list)
-            self.logger.info(
-                f"✅ Sequential bracket legs submitted for {inst_id} (ListID: {order_list.id})"
-            )
-            self.save_state()
+        
+        # Track linked orders for ghost order protection
+        if parent_id:
+            self._entry_to_exits[parent_id] = [o.client_order_id for o in orders]
+            
+        self.logger.info(
+            f"✅ Sequential bracket legs submitted for {inst_id} (ListID: {order_list.id})"
+        )
+        self.save_state()
 
     def submit_entry_order(self, order: Order) -> bool:
         """
@@ -1193,6 +1221,9 @@ class BaseStrategy(Strategy):
             else:
                 self.logger.error(f"Order rejected: {event.reason}")
             
+            # LINKED CANCELLATION: If this was an entry, cancel linked exits
+            self._cancel_linked_exits(order_id)
+            
             self.on_order_rejected_safe(event)
         except Exception as e:
             self.on_unexpected_error(e)
@@ -1217,6 +1248,9 @@ class BaseStrategy(Strategy):
             else:
                 self.logger.warning(f"Order cancelled: {order_id}")
             
+            # LINKED CANCELLATION: If this was an entry, cancel linked exits
+            self._cancel_linked_exits(order_id)
+            
             self.on_order_canceled_safe(event)
         except Exception as e:
             self.on_unexpected_error(e)
@@ -1240,6 +1274,9 @@ class BaseStrategy(Strategy):
                 )
             else:
                 self.logger.warning(f"Order expired: {order_id}")
+            
+            # LINKED CANCELLATION: If this was an entry, cancel linked exits
+            self._cancel_linked_exits(order_id)
             
             self.on_order_expired_safe(event)
         except Exception as e:
@@ -1370,25 +1407,21 @@ class BaseStrategy(Strategy):
             self._start_trade_record_async(event)
         )
         
-        # BRACKET TRIGGER: Check if we have stored exits for this entry
+        # NOTE: Bracket trigger was moved to submit_bracket_order for immediate submission
+        # instead of waiting for fill, to bridge the naked exposure gap.
         if event.client_order_id in self._pending_bracket_exits:
-            exit_data = self._pending_bracket_exits.pop(event.client_order_id)
-            self._trigger_bracket_exits(exit_data, event.order_side)
+            self._pending_bracket_exits.pop(event.client_order_id, None)
 
     def _on_exit_filled(self, event):
         """Handle exit fill - close trade record."""
         self.logger.info(f"Exit filled: {event.last_qty} @ {event.last_px}")
         
-        # Update inventory
-        qty = float(event.last_qty)
-        if event.order_side == OrderSide.BUY:
-            self.signed_inventory += qty # Buying back (exit short) adds to inventory
-        else:
-            self.signed_inventory -= qty # Selling (exit long) subtracts
-            
-        self.logger.info(f"Inventory updated: {self.signed_inventory}")
+        # Update state
+        self.signed_inventory = 0.0 # Reset on exit fill
+        self.active_trade_id = None
+        self.save_state()
         
-        # Close trade record asynchronously
+        # Record fill
         self._schedule_async_task(
             self._close_trade_record_async(event)
         )
@@ -1520,6 +1553,71 @@ class BaseStrategy(Strategy):
         except Exception as e:
             self.on_unexpected_error(e)
 
+    def _cancel_linked_exits(self, entry_id: ClientOrderId):
+        """
+        Cancel any exit orders linked to an entry order that was rejected or cancelled.
+        Used to prevent 'ghost' orders on the exchange.
+        """
+        try:
+            linked_exits = self._entry_to_exits.pop(entry_id, None)
+            if linked_exits:
+                self.logger.warning(
+                    f"Entry {entry_id} failed. Cancelling {len(linked_exits)} linked exit orders: {linked_exits}"
+                )
+                for exit_id in linked_exits:
+                    order = self.cache.order(exit_id)
+                    if order and order.status.is_active:
+                        self.cancel_order(order)
+                self.save_state()
+        except Exception as e:
+            self.on_unexpected_error(e)
+
+    def _audit_protection(self):
+        """
+        Startup Safety Audit: Ensure all open positions have active SL/TP orders on exchange.
+        """
+        try:
+            # 1. Check for single instrument position
+            pos = self._get_open_position()
+            if pos:
+                self._check_and_alert_naked_position(pos.instrument_id, float(pos.quantity))
+
+            # 2. Check for spread position
+            spread_qty = self.get_effective_spread_quantity()
+            if abs(spread_qty) > 1e-9:
+                self._check_and_alert_naked_position(self.spread_id, abs(spread_qty))
+                
+        except Exception as e:
+            self.logger.error(f"Error during protection audit: {e}")
+
+    def _check_and_alert_naked_position(self, instrument_id: Optional[InstrumentId], qty: float):
+        """Check if a specific position has active exit orders."""
+        if not instrument_id:
+            return
+
+        open_orders = self.cache.orders_open(instrument_id=instrument_id)
+        # Look for REDUCE_ONLY or strategy exit orders
+        has_protection = any(
+            order.status.is_active and (self._bracket_exit_map.get(order.client_order_id) or order.reduce_only)
+            for order in open_orders
+        )
+        
+        if not has_protection:
+            self.logger.critical(
+                f"🚨 NAKED POSITION DETECTED on start! {instrument_id} (qty={qty}) "
+                f"has NO active exit orders on exchange."
+            )
+            # Call strategy hook to handle this
+            self.on_naked_position_detected(instrument_id, qty)
+
+    def on_naked_position_detected(self, instrument_id: InstrumentId, qty: float):
+        """
+        Hook called when a position is detected without SL/TP orders on startup.
+        Override in strategy to submit default protection.
+        """
+        self.logger.warning(f"Default naked position handler for {instrument_id}. Override to automate protection.")
+        pass
+
     def on_quote_tick(self, tick):
         """
         Handle quote tick event.
@@ -1545,8 +1643,10 @@ class BaseStrategy(Strategy):
             state['_last_entry_qty'] = self._last_entry_qty
             state['_pending_entry_orders'] = [str(oid) for oid in self._pending_entry_orders]
             state['_pending_exit_orders'] = [str(oid) for oid in self._pending_exit_orders]
+            state['_pending_spread_orders'] = [str(oid) for oid in self._pending_spread_orders]
             state['_bracket_exit_map'] = {str(k): v for k, v in self._bracket_exit_map.items()}
             state['_pending_bracket_exits'] = {str(k): v for k, v in self._pending_bracket_exits.items()}
+            state['_entry_to_exits'] = {str(k): [str(v1) for v1 in v] for k, v in self._entry_to_exits.items()}
             self.persistence.save_state(self.strategy_id, state)
 
     def load_state(self):
@@ -1567,14 +1667,16 @@ class BaseStrategy(Strategy):
                 self._pending_exit_orders = {
                     ClientOrderId(oid) for oid in state.get('_pending_exit_orders', [])
                 }
+                self._pending_spread_orders = {
+                    ClientOrderId(oid) for oid in state.get('_pending_spread_orders', [])
+                }
                 
                 self._bracket_exit_map = {
                     ClientOrderId(k): v for k, v in state.get('_bracket_exit_map', {}).items()
                 }
                 
-                self._pending_bracket_exits = {
-                    ClientOrderId(k): v for k, v in state.get('_pending_bracket_exits', {}).items()
-                }
+                self._pending_bracket_exits = {ClientOrderId.from_str(k): v for k, v in state.get('_pending_bracket_exits', {}).items()}
+                self._entry_to_exits = {ClientOrderId.from_str(k): [ClientOrderId.from_str(v1) for v1 in v] for k, v in state.get('_entry_to_exits', {}).items()}
                 
                 self.set_state(state)
 

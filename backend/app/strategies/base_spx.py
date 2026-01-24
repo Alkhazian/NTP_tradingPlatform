@@ -44,7 +44,7 @@ class SPXBaseStrategy(BaseStrategy):
     
     # Default timeout for option selection (can be overridden in derived strategies)
     # IMPORTANT: In live trading, increase this value if IB is slow (e.g., market open)
-    DEFAULT_SELECTION_DELAY_SECONDS = 10.0
+    #DEFAULT_SELECTION_DELAY_SECONDS = 10.0
     
     def __init__(self, config, integration_manager=None, persistence_manager=None):
         """
@@ -81,6 +81,7 @@ class SPXBaseStrategy(BaseStrategy):
         # Minute Emulation State
         self._last_minute_idx: int = -1
         self._last_tick_price: Optional[float] = None
+        self._pending_minute_close_price: Optional[float] = None  # For accurate minute-close timing
         
         # Dictionary for parallel option premium searches
         # Key: search_id (UUID), Value: search state dict
@@ -253,13 +254,19 @@ class SPXBaseStrategy(BaseStrategy):
             self._last_minute_idx = -1
 
         # 2. Minute change logic (Candle Close Emulation)
+        # FIX: Call on_minute_closed with the PREVIOUS minute's close (last tick before boundary)
+        # NOT the first tick of the new minute.
         current_minute_idx = current_time.hour * 60 + current_time.minute
         
         if self._last_minute_idx != -1 and current_minute_idx != self._last_minute_idx:
-            # New minute started - previous minute closed
-            if self._last_tick_price:
-                self.on_minute_closed(self._last_tick_price)
+            # New minute started - emit the STORED close price from previous minute
+            if self._pending_minute_close_price is not None:
+                self.on_minute_closed(self._pending_minute_close_price)
+                self._pending_minute_close_price = None
         
+        # Store current price as the potential close for THIS minute
+        # (will be used when the NEXT minute starts)
+        self._pending_minute_close_price = price
         self._last_minute_idx = current_minute_idx
         self._last_tick_price = price
 

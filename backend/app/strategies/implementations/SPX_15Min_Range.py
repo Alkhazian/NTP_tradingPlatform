@@ -637,6 +637,16 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             # Round price before submission and logging
             rounded_mid = self.round_to_tick(mid, self.spread_instrument)
             
+            # IMPROVED risk management: Calculate SL/TP levels for broker-side bracket
+            entry_credit_abs = abs(rounded_mid)
+            sl_price_val = -(entry_credit_abs * self.stop_loss_multiplier)
+            
+            # Take profit: entry credit minus target profit (in points)
+            tp_debit = entry_credit_abs - (self.take_profit_amount / 100.0)
+            if tp_debit < 0.05:
+                tp_debit = 0.05  # Minimum debit price
+            tp_price_val = -tp_debit
+
             self.logger.info(
                 f"═══════════════════════════════════════════════════════════════\n"
                 f"✅ ENTRY ORDER SUBMITTED\n"
@@ -869,9 +879,12 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                     f"   Legs found: {legs_found}/2\n"
                     f"   Short strike {self._target_short_strike}: {'✓' if self._target_short_strike in self._found_legs else '✗'}\n"
                     f"   Long strike {self._target_long_strike}: {'✓' if self._target_long_strike in self._found_legs else '✗'}\n"
-                    f"   → Entry cancelled\n"
+                    f"   → Entry cancelled, marking day as traded to prevent retries\n"
                     f"═══════════════════════════════════════════════════════════════"
                 )
+                # CRITICAL FIX: Mark day as traded to prevent infinite retry loop
+                self.traded_today = True
+                self.save_state()
                 self._cancel_entry()
 
     # =========================================================================

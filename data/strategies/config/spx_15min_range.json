@@ -14,7 +14,7 @@
         "quantity": 2,
         "strike_width": 5,
         "stop_loss_multiplier": 2,
-        "take_profit_amount": 50,
+        "take_profit_amount": 35,
         "strike_step": 5,
         "signal_max_age_seconds": 5,
         "max_price_deviation": 10
