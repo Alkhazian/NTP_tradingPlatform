@@ -1264,7 +1264,17 @@ class BaseStrategy(Strategy):
         # 2. Special overrides for SPX/SPXW (CBOE)
         if "SPX" in str(instrument.id):
             # Complex orders (spreads) are generally 0.05 regardless of price
-            if hasattr(instrument, 'legs') and len(instrument.legs) > 0:
+            is_spread = False
+            legs = getattr(instrument, 'legs', None)
+            
+            # Handle if legs is a method (callable) or property (list)
+            if callable(legs):
+                legs = legs()
+                
+            if legs and len(legs) > 0:
+                is_spread = True
+            
+            if is_spread:
                 tick = 0.05
             else:
                 # Single legs: 0.05 < 3.0, 0.10 >= 3.0
