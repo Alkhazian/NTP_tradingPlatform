@@ -17,7 +17,10 @@ from .adapters.custom_ib import CustomInteractiveBrokersLiveDataClientFactory
 from .actors.spx_streamer import SpxStreamer, SpxStreamerConfig
 from nautilus_trader.config import (
     TradingNodeConfig,
-    RoutingConfig
+    RoutingConfig,
+    CacheConfig,
+    MessageBusConfig,
+    DatabaseConfig
 )
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import AccountId, Venue, Symbol
@@ -156,9 +159,24 @@ class NautilusManager:
             )
 
 
+            # Redis Configuration
+            redis_config = DatabaseConfig(
+                type="redis",
+                host=os.getenv("REDIS_HOST", "redis"),
+                port=int(os.getenv("REDIS_PORT", "6379")),
+            )
 
-            # Create TradingNode configuration
             config = TradingNodeConfig(
+                # Enable Object Cache (Orders, Positions)
+                cache=CacheConfig(
+                    database=redis_config,
+                    timestamps_as_iso8601=True,
+                ),
+                # Enable Message Bus (UI Streaming)
+                message_bus=MessageBusConfig(
+                    database=redis_config,
+                    stream_per_topic=True,
+                ),
                 data_clients={
                     "CME": ib_data_config,
                     "CBOE": ib_data_config,
