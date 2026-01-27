@@ -91,12 +91,12 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         # Position monitoring
         self._last_position_log_time: Optional[datetime] = None
         self._position_log_interval_seconds: int = 30  # Log position status every N seconds
+        self._cache_poll_interval_seconds: int = 2     # Poll cache for instruments every N seconds
+        self._required_legs_count: int = 2             # Number of option legs required for spread
         
         # Calculate range end time for logging
         range_end_time = "Range Close" # Will be calculated/logged by base
         
-        # Tracking
-        self._tick_count = 0
         
 
     # =========================================================================
@@ -134,38 +134,45 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         # Strike parameters
         self.strike_step = int(params.get("strike_step", 5))
         
+        
         # Signal validation
         self.signal_max_age_seconds = int(params.get("signal_max_age_seconds", 5))
         self.max_price_deviation = float(params.get("max_price_deviation", 10.0))
+        self.entry_timeout_seconds = int(params.get("entry_timeout_seconds", 35))
         
         range_end_time = "Range Close" # Will be calculated/logged by base
         
         self.logger.info(
-            f"═══════════════════════════════════════════════════════════════\n"
-            f"🚀 SPX15MinRangeStrategy STARTING\n"
-            f"═══════════════════════════════════════════════════════════════\n"
-            f"  🌍 Timezone: {self.tz}\n"
-            f"  📅 Range Window: {self.start_time} - {range_end_time} ({self.opening_range_minutes} min)\n"
-            f"  ⏰ Entry Cutoff: {self.entry_cutoff_time} (no entries after)\n"
-            f"  💰 Min Credit: ${self.min_credit_amount:.2f}\n"
-            f"  📏 Strike Width: {self.strike_width} pts\n"
-            f"  🛡️ Strike Step: {self.strike_step} pts\n"
-            f"  🛑 SL Multiplier: {self.stop_loss_multiplier}x\n"
-            f"  💵 TP Amount: ${self.take_profit_amount:.2f}\n"
-            f"  ⏱️ Signal Max Age: {self.signal_max_age_seconds}s\n"
-            f"  📊 Max Price Deviation: {self.max_price_deviation} pts\n"
-            f"  📦 Quantity: {self.config_quantity} spreads\n"
-            f"  Mode: Tick-Only with Bidirectional Breakout\n"
-            f"  Waiting for SPX data stream...\n"
-            f"═══════════════════════════════════════════════════════════════"
+            f"🚀 SPX15MinRangeStrategy STARTING | {self.tz} | Window: {self.start_time}-{range_end_time} | Cutoff: {self.entry_cutoff_time}",
+            extra={
+                "extra": {
+                    "event_type": "strategy_start",
+                    "strategy": "SPX15MinRangeStrategy",
+                    "full_config": self.strategy_config.dict(),
+                    "timezone": str(self.tz),
+                    "start_time": str(self.start_time),
+                    "window_minutes": self.opening_range_minutes,
+                    "entry_cutoff": str(self.entry_cutoff_time),
+                    "min_credit": self.min_credit_amount,
+                    "quantity": self.config_quantity,
+                    "strike_width": self.strike_width,
+                    "stop_loss_mult": self.stop_loss_multiplier,
+                    "take_profit": self.take_profit_amount
+                }
+            }
         )
 
     def on_spx_ready(self):
         """Callback when SPX data stream is ready."""
         self.logger.info(
-            f"✅ SPX DATA STREAM READY\n"
-            f"   Current SPX Price: {self.current_spx_price:.2f}\n"
-            f"   Range monitoring is now ACTIVE"
+            f"✅ SPX DATA STREAM READY | Price: {self.current_spx_price:.2f}",
+            extra={
+                "extra": {
+                    "event_type": "data_ready",
+                    "symbol": "SPX",
+                    "price": self.current_spx_price
+                }
+            }
         )
 
     # =========================================================================
@@ -203,53 +210,96 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         
         # Log every minute close with full context
         self.logger.info(
-            f"⏰ MINUTE CLOSE [{et_now.strftime('%H:%M')}]: Price={close_price:.2f} | "
-            f"Range=[{self.or_low:.2f}-{self.or_high:.2f}] | "
-            f"vs Low: {close_price - self.or_low:+.2f} | vs High: {close_price - self.or_high:+.2f} | "
-            f"State: HighBreached={self.high_breached}, LowBreached={self.low_breached}, Traded={self.traded_today}"
+            f"⏰ MINUTE CLOSE [{et_now.strftime('%H:%M')}] | Price: {close_price:.2f} | Range: [{self.or_low:.2f}-{self.or_high:.2f}]",
+            extra={
+                "extra": {
+                    "event_type": "minute_close",
+                    "timestamp": et_now.isoformat(),
+                    "close_price": close_price,
+                    "range_low": self.or_low,
+                    "range_high": self.or_high,
+                    "high_breached": self.high_breached,
+                    "low_breached": self.low_breached,
+                    "traded_today": self.traded_today
+                }
+            }
         )
 
         # 1. Check for breach conditions (cross-invalidation)
         if close_price > self.or_high:
             if not self.high_breached:
-                self.logger.warning(
-                    f"═══════════════════════════════════════════════════════════════\n"
-                    f"🚫 HIGH BREACHED at {et_now.strftime('%H:%M:%S')}\n"
-                    f"   Close: {close_price:.2f} > High: {self.or_high:.2f}\n"
-                    f"   → BEARISH entry is now INVALIDATED for today\n"
-                    f"   → BULLISH entry remains: {'VALID' if not self.low_breached else 'INVALID'}\n"
-                    f"═══════════════════════════════════════════════════════════════"
+                self.logger.info(
+                    f"🚫 HIGH BREACHED | Close: {close_price:.2f} > High: {self.or_high:.2f} | Bearish Invalidated",
+                    extra={
+                        "extra": {
+                            "event_type": "range_breach",
+                            "breach_type": "high",
+                            "close_price": close_price,
+                            "range_high": self.or_high,
+                            "bearish_valid": False,
+                            "bullish_valid": not self.low_breached
+                        }
+                    }
                 )
                 self.high_breached = True
                 self.save_state()
                 
         if close_price < self.or_low:
             if not self.low_breached:
-                self.logger.warning(
-                    f"═══════════════════════════════════════════════════════════════\n"
-                    f"🚫 LOW BREACHED at {et_now.strftime('%H:%M:%S')}\n"
-                    f"   Close: {close_price:.2f} < Low: {self.or_low:.2f}\n"
-                    f"   → BULLISH entry is now INVALIDATED for today\n"
-                    f"   → BEARISH entry remains: {'VALID' if not self.high_breached else 'INVALID'}\n"
-                    f"═══════════════════════════════════════════════════════════════"
+                self.logger.info(
+                    f"🚫 LOW BREACHED | Close: {close_price:.2f} < Low: {self.or_low:.2f} | Bullish Invalidated",
+                    extra={
+                        "extra": {
+                            "event_type": "range_breach",
+                            "breach_type": "low",
+                            "close_price": close_price,
+                            "range_low": self.or_low,
+                            "bullish_valid": False,
+                            "bearish_valid": not self.high_breached
+                        }
+                    }
                 )
                 self.low_breached = True
                 self.save_state()
 
         # Skip if already traded or entry in progress
+        # Skip if already traded or entry in progress
         if self.traded_today:
-            self.logger.debug(f"Already traded today. Skipping signal check.")
+            self.logger.info(
+                f"⏭️ Already traded today | Skipping signal check",
+                extra={
+                    "extra": {
+                        "event_type": "signal_check_skipped",
+                        "reason": "already_traded"
+                    }
+                }
+            )
             return
         if self.entry_in_progress:
-            self.logger.debug(f"Entry already in progress. Skipping signal check.")
+            self.logger.info(
+                f"⏳ Entry already in progress | Skipping signal check",
+                extra={
+                    "extra": {
+                        "event_type": "signal_check_skipped",
+                        "reason": "entry_in_progress"
+                    }
+                }
+            )
             return
         
         # Skip if past entry cutoff time
         current_time = et_now.time()
         if current_time >= self.entry_cutoff_time:
-            self.logger.debug(
-                f"Past entry cutoff time ({self.entry_cutoff_time}). "
-                f"Current time: {current_time}. Skipping signal check."
+            self.logger.info(
+                f"⏰ Past entry cutoff time | {current_time} >= {self.entry_cutoff_time} | Skipping signal check",
+                extra={
+                    "extra": {
+                        "event_type": "signal_check_skipped",
+                        "reason": "past_cutoff_time",
+                        "current_time": str(current_time),
+                        "cutoff_time": str(self.entry_cutoff_time)
+                    }
+                }
             )
             return
 
@@ -257,24 +307,37 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         if close_price < self.or_low:
             if self.high_breached:
                 self.logger.info(
-                    f"📉 Close below Low ({close_price:.2f} < {self.or_low:.2f}) "
-                    f"but High was breached earlier. BEARISH entry BLOCKED."
+                    f"📉 BEARISH entry BLOCKED | Close below Low ({close_price:.2f} < {self.or_low:.2f}) but High breached earlier",
+                    extra={
+                        "extra": {
+                            "event_type": "signal_blocked",
+                            "reason": "cross_invalidation",
+                            "direction": "bearish",
+                            "close_price": close_price,
+                            "range_low": self.or_low,
+                            "high_breached": True
+                        }
+                    }
                 )
             else:
                 current_price = self.current_spx_price
                 price_deviation = current_price - self.or_low
                 
                 if price_deviation > self.max_price_deviation:
-                    self.logger.warning(
-                        f"═══════════════════════════════════════════════════════════════\n"
-                        f"⚠️ BEARISH SIGNAL REJECTED - Price Bounce\n"
-                        f"═══════════════════════════════════════════════════════════════\n"
-                        f"   Close: {close_price:.2f} < Low: {self.or_low:.2f} ✓\n"
-                        f"   But current price: {current_price:.2f}\n"
-                        f"   Deviation from Low: {price_deviation:.2f} pts\n"
-                        f"   Max allowed: {self.max_price_deviation} pts\n"
-                        f"   → Entry CANCELLED due to price bounce\n"
-                        f"═══════════════════════════════════════════════════════════════"
+                    self.logger.info(
+                        f"⚠️ BEARISH SIGNAL REJECTED - Price Bounce | Dev: {price_deviation:.2f} > Max: {self.max_price_deviation}",
+                        extra={
+                            "extra": {
+                                "event_type": "signal_rejected",
+                                "reason": "price_bounce",
+                                "direction": "bearish",
+                                "close_price": close_price,
+                                "current_price": current_price,
+                                "range_low": self.or_low,
+                                "deviation": price_deviation,
+                                "max_deviation": self.max_price_deviation
+                            }
+                        }
                     )
                     return
                 
@@ -283,15 +346,17 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 self._signal_direction = 'bearish'
                 
                 self.logger.info(
-                    f"═══════════════════════════════════════════════════════════════\n"
-                    f"⚡ BEARISH ENTRY SIGNAL CONFIRMED\n"
-                    f"═══════════════════════════════════════════════════════════════\n"
-                    f"   Trigger: Close {close_price:.2f} < Low {self.or_low:.2f}\n"
-                    f"   Current price: {current_price:.2f}\n"
-                    f"   Deviation: {price_deviation:.2f} pts (max: {self.max_price_deviation})\n"
-                    f"   High was NOT breached first: ✓\n"
-                    f"   → Initiating CALL Credit Spread entry\n"
-                    f"═══════════════════════════════════════════════════════════════"
+                    f"⚡ BEARISH ENTRY SIGNAL CONFIRMED | Close {close_price:.2f} < Low {self.or_low:.2f}",
+                    extra={
+                        "extra": {
+                            "event_type": "signal_confirmed",
+                            "direction": "bearish",
+                            "trigger_price": close_price,
+                            "range_low": self.or_low,
+                            "current_price": current_price,
+                            "deviation": price_deviation
+                        }
+                    }
                 )
                 self._initiate_entry_sequence()
                 return
@@ -300,24 +365,37 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         if close_price > self.or_high:
             if self.low_breached:
                 self.logger.info(
-                    f"📈 Close above High ({close_price:.2f} > {self.or_high:.2f}) "
-                    f"but Low was breached earlier. BULLISH entry BLOCKED."
+                    f"📈 BULLISH entry BLOCKED | Close above High ({close_price:.2f} > {self.or_high:.2f}) but Low breached earlier",
+                    extra={
+                        "extra": {
+                            "event_type": "signal_blocked",
+                            "reason": "cross_invalidation",
+                            "direction": "bullish",
+                            "close_price": close_price,
+                            "range_high": self.or_high,
+                            "low_breached": True
+                        }
+                    }
                 )
             else:
                 current_price = self.current_spx_price
                 price_deviation = self.or_high - current_price
                 
                 if price_deviation > self.max_price_deviation:
-                    self.logger.warning(
-                        f"═══════════════════════════════════════════════════════════════\n"
-                        f"⚠️ BULLISH SIGNAL REJECTED - Price Drop\n"
-                        f"═══════════════════════════════════════════════════════════════\n"
-                        f"   Close: {close_price:.2f} > High: {self.or_high:.2f} ✓\n"
-                        f"   But current price: {current_price:.2f}\n"
-                        f"   Deviation from High: {price_deviation:.2f} pts\n"
-                        f"   Max allowed: {self.max_price_deviation} pts\n"
-                        f"   → Entry CANCELLED due to price drop\n"
-                        f"═══════════════════════════════════════════════════════════════"
+                    self.logger.info(
+                        f"⚠️ BULLISH SIGNAL REJECTED - Price Drop | Dev: {price_deviation:.2f} > Max: {self.max_price_deviation}",
+                        extra={
+                            "extra": {
+                                "event_type": "signal_rejected",
+                                "reason": "price_drop",
+                                "direction": "bullish",
+                                "close_price": close_price,
+                                "current_price": current_price,
+                                "range_high": self.or_high,
+                                "deviation": price_deviation,
+                                "max_deviation": self.max_price_deviation
+                            }
+                        }
                     )
                     return
                 
@@ -326,15 +404,17 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 self._signal_direction = 'bullish'
                 
                 self.logger.info(
-                    f"═══════════════════════════════════════════════════════════════\n"
-                    f"⚡ BULLISH ENTRY SIGNAL CONFIRMED\n"
-                    f"═══════════════════════════════════════════════════════════════\n"
-                    f"   Trigger: Close {close_price:.2f} > High {self.or_high:.2f}\n"
-                    f"   Current price: {current_price:.2f}\n"
-                    f"   Deviation: {price_deviation:.2f} pts (max: {self.max_price_deviation})\n"
-                    f"   Low was NOT breached first: ✓\n"
-                    f"   → Initiating PUT Credit Spread entry\n"
-                    f"═══════════════════════════════════════════════════════════════"
+                    f"⚡ BULLISH ENTRY SIGNAL CONFIRMED | Close {close_price:.2f} > High {self.or_high:.2f}",
+                    extra={
+                        "extra": {
+                            "event_type": "signal_confirmed",
+                            "direction": "bullish",
+                            "trigger_price": close_price,
+                            "range_high": self.or_high,
+                            "current_price": current_price,
+                            "deviation": price_deviation
+                        }
+                    }
                 )
                 self._initiate_entry_sequence()
 
@@ -369,17 +449,17 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             spread_type = "PUT Credit Spread"
         
         self.logger.info(
-            f"═══════════════════════════════════════════════════════════════\n"
-            f"🔍 INITIATING ENTRY SEQUENCE\n"
-            f"═══════════════════════════════════════════════════════════════\n"
-            f"   Direction: {self._signal_direction.upper()}\n"
-            f"   Spread Type: {spread_type}\n"
-            f"   Expiry: {today_str}\n"
-            f"   Short Leg: {self._target_short_strike}{option_right} (SELL)\n"
-            f"   Long Leg:  {self._target_long_strike}{option_right} (BUY)\n"
-            f"   Width: {abs(self._target_long_strike - self._target_short_strike)} pts\n"
-            f"   Requesting instruments from IB...\n"
-            f"═══════════════════════════════════════════════════════════════"
+            f"🔍 INITIATING ENTRY SEQUENCE | {self._signal_direction.upper()} | {spread_type} | [{self._target_short_strike}/{self._target_long_strike}]",
+            extra={
+                "extra": {
+                    "event_type": "entry_sequence_start",
+                    "direction": self._signal_direction,
+                    "spread_type": spread_type,
+                    "short_leg": f"{self._target_short_strike}{option_right}",
+                    "long_leg": f"{self._target_long_strike}{option_right}",
+                    "width": abs(self._target_long_strike - self._target_short_strike)
+                }
+            }
         )
         
         # Request option contracts
@@ -399,18 +479,14 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
 
         # Log full contract details for debugging
         self.logger.info(
-            f"═══════════════════════════════════════════════════════════════\n"
-            f"📡 REQUESTING OPTION CONTRACTS FROM IB\n"
-            f"═══════════════════════════════════════════════════════════════\n"
-            f"   Venue: CBOE\n"
-            f"   Number of contracts: {len(contracts)}\n"
-            f"   Contracts:\n" +
-            "\n".join([
-                f"      [{i+1}] {c['symbol']} {c['tradingClass']} {c['strike']}{c['right']} "
-                f"exp={c['lastTradeDateOrContractMonth']} @ {c['exchange']}"
-                for i, c in enumerate(contracts)
-            ]) + "\n"
-            f"═══════════════════════════════════════════════════════════════"
+            f"📡 REQUESTING OPTION CONTRACTS | Count: {len(contracts)} | Venue: CBOE",
+            extra={
+                "extra": {
+                    "event_type": "contract_request",
+                    "count": len(contracts),
+                    "contracts": [f"{c['strike']}{c['right']}" for c in contracts]
+                }
+            }
         )
         
         try:
@@ -418,9 +494,26 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 venue=Venue("CBOE"),
                 params={"ib_contracts": contracts}
             )
-            self.logger.info(f"✅ request_instruments() called successfully for {len(contracts)} contracts")
+            self.logger.info(
+                f"✅ request_instruments() called successfully | Count: {len(contracts)}",
+                extra={
+                    "extra": {
+                        "event_type": "request_instruments_success",
+                        "count": len(contracts)
+                    }
+                }
+            )
         except Exception as e:
-            self.logger.error(f"❌ request_instruments() FAILED: {e}", exc_info=True)
+            self.logger.error(
+                f"❌ request_instruments() FAILED | Error: {e}", 
+                exc_info=True,
+                extra={
+                    "extra": {
+                        "event_type": "request_instruments_failure",
+                        "error": str(e)
+                    }
+                }
+            )
             self._cancel_entry()
             return
         
@@ -438,8 +531,13 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             self._expected_instrument_ids.append(inst_id_str)
         
         self.logger.info(
-            f"📋 Expected instrument IDs in cache:\n" +
-            "\n".join([f"      • {inst_id}" for inst_id in self._expected_instrument_ids])
+            f"📋 Expected instrument IDs in cache: {self._expected_instrument_ids}",
+            extra={
+                "extra": {
+                    "event_type": "expected_instruments",
+                    "instrument_ids": self._expected_instrument_ids
+                }
+            }
         )
         
         # Start polling cache for instruments (since on_instrument callback doesn't work for request_instruments)
@@ -447,33 +545,64 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._max_cache_poll_attempts = 15  # 15 attempts * 2 seconds = 30 seconds total
         self.clock.set_time_alert(
             name=f"{self.id}_cache_poll",
-            alert_time=self.clock.utc_now() + timedelta(seconds=2),
+            alert_time=self.clock.utc_now() + timedelta(seconds=self._cache_poll_interval_seconds),
             callback=self._poll_cache_for_instruments
         )
-        self.logger.info(f"🔄 Started cache polling (every 2s, max {self._max_cache_poll_attempts} attempts)")
+        self.logger.info(
+            f"🔄 Started cache polling | Interval: {self._cache_poll_interval_seconds}s | Max Attempts: {self._max_cache_poll_attempts}",
+            extra={
+                "extra": {
+                    "event_type": "cache_polling_start",
+                    "interval_seconds": self._cache_poll_interval_seconds,
+                    "max_attempts": self._max_cache_poll_attempts
+                }
+            }
+        )
         
         # Set absolute timeout for entry process
         self.clock.set_time_alert(
             name=f"{self.id}_entry_timeout",
-            alert_time=self.clock.utc_now() + timedelta(seconds=35),
+            alert_time=self.clock.utc_now() + timedelta(seconds=self.entry_timeout_seconds),
             callback=self._on_entry_timeout
         )
-        self.logger.debug(f"Entry timeout set for 35 seconds")
+        self.logger.info(
+            f"⏱️ Entry timeout set | Duration: {self.entry_timeout_seconds}s",
+            extra={
+                "extra": {
+                    "event_type": "entry_timeout_set",
+                    "duration_seconds": self.entry_timeout_seconds
+                }
+            }
+        )
 
     def on_instrument(self, instrument: Instrument):
         """Handle received instruments - track option legs for both directions."""
         super().on_instrument(instrument)
         
         # Diagnostic: Log ALL instruments received (not just options)
-        self.logger.debug(
-            f"📥 on_instrument received: {instrument.id} "
-            f"(type={type(instrument).__name__}, "
-            f"has_strike={hasattr(instrument, 'strike_price')}, "
-            f"has_kind={hasattr(instrument, 'option_kind')})"
+        self.logger.info(
+            f"📥 on_instrument received | ID: {instrument.id} | Type: {type(instrument).__name__}",
+            extra={
+                "extra": {
+                    "event_type": "on_instrument_received",
+                    "instrument_id": str(instrument.id),
+                    "type": type(instrument).__name__,
+                    "has_strike": hasattr(instrument, 'strike_price'),
+                    "has_kind": hasattr(instrument, 'option_kind')
+                }
+            }
         )
         
         if not self.entry_in_progress:
-            self.logger.debug(f"   → Ignored (entry_in_progress=False)")
+            self.logger.info(
+                f"Ignored instrument check | Entry not in progress",
+                extra={
+                    "extra": {
+                        "event_type": "on_instrument_ignored",
+                        "reason": "entry_not_in_progress"
+                    }
+                }
+            )
             return
 
         # Determine expected option kind based on direction
@@ -482,14 +611,18 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         
         # Diagnostic: Log option evaluation
         self.logger.info(
-            f"📋 Evaluating instrument for entry:\n"
-            f"   Instrument: {instrument.id}\n"
-            f"   Entry in progress: {self.entry_in_progress}\n"
-            f"   Signal direction: {self._signal_direction}\n"
-            f"   Expected kind: {expected_kind_str}\n"
-            f"   Target short strike: {self._target_short_strike}\n"
-            f"   Target long strike: {self._target_long_strike}\n"
-            f"   Current found legs: {list(self._found_legs.keys())}"
+            f"📋 Evaluating instrument for entry | {instrument.id}",
+            extra={
+                "extra": {
+                    "event_type": "evaluating_instrument",
+                    "instrument_id": str(instrument.id),
+                    "signal_direction": self._signal_direction,
+                    "expected_kind": expected_kind_str,
+                    "target_short_strike": self._target_short_strike,
+                    "target_long_strike": self._target_long_strike,
+                    "found_legs_count": len(self._found_legs)
+                }
+            }
         )
 
         # Check if this is an option we're looking for
@@ -499,7 +632,14 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             actual_kind_str = "CALL" if actual_kind == OptionKind.CALL else "PUT"
             
             self.logger.info(
-                f"   🔍 Option details: Strike={strike}, Kind={actual_kind_str}"
+                f"🔍 Option details: Strike={strike}, Kind={actual_kind_str}",
+                extra={
+                    "extra": {
+                        "event_type": "option_details",
+                        "strike": strike,
+                        "kind": actual_kind_str
+                    }
+                }
             )
             
             is_target = False
@@ -517,24 +657,67 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                     reasons.append(f"strike {strike} not in [{self._target_short_strike}, {self._target_long_strike}]")
                 if actual_kind != expected_kind:
                     reasons.append(f"kind {actual_kind_str} != expected {expected_kind_str}")
-                self.logger.debug(f"   ❌ Not a match: {', '.join(reasons)}")
+                
+                self.logger.info(
+                    f"❌ Not a match | Reason: {', '.join(reasons)}",
+                    extra={
+                        "extra": {
+                            "event_type": "option_match_failed",
+                            "instrument_id": str(instrument.id),
+                            "reasons": reasons
+                        }
+                    }
+                )
                 
             if is_target:
                 kind_str = "C" if expected_kind == OptionKind.CALL else "P"
                 self.logger.info(
-                    f"   ✅ MATCHED as {match_reason}: {instrument.id} (Strike {strike}{kind_str})"
+                    f"✅ MATCHED as {match_reason} | {instrument.id} (Strike {strike}{kind_str})",
+                    extra={
+                        "extra": {
+                            "event_type": "option_matched",
+                            "match_type": match_reason,
+                            "instrument_id": str(instrument.id),
+                            "strike": strike,
+                            "kind": kind_str
+                        }
+                    }
                 )
                 self._found_legs[strike] = instrument
                 
                 # Check if we have both legs
-                if len(self._found_legs) >= 2:
-                    self.logger.info(f"   🎯 Both legs found! Creating spread instrument...")
+                if len(self._found_legs) >= self._required_legs_count:
+                    self.logger.info(
+                        f"🎯 Both legs found | Creating spread instrument...",
+                        extra={
+                            "extra": {
+                                "event_type": "legs_found_complete",
+                                "found_legs_count": len(self._found_legs)
+                            }
+                        }
+                    )
                     self._create_spread_instrument()
                 else:
-                    self.logger.info(f"   ⏳ Waiting for more legs ({len(self._found_legs)}/2 found)")
+                    self.logger.info(
+                        f"⏳ Waiting for more legs | Found: {len(self._found_legs)}/{self._required_legs_count}",
+                        extra={
+                            "extra": {
+                                "event_type": "legs_found_partial",
+                                "found_legs_count": len(self._found_legs),
+                                "required_legs": self._required_legs_count
+                            }
+                        }
+                    )
         else:
-            self.logger.debug(
-                f"   → Not an option instrument (missing strike_price or option_kind)"
+            self.logger.info(
+                f"Ignored non-option instrument | {instrument.id}",
+                extra={
+                    "extra": {
+                        "event_type": "on_instrument_ignored",
+                        "reason": "not_option",
+                        "instrument_id": str(instrument.id)
+                    }
+                }
             )
 
     def _create_spread_instrument(self):
@@ -550,18 +733,27 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         ]
         
         self.logger.info(
-            f"📦 Creating spread instrument...\n"
-            f"   Long leg (BUY):  {long_inst.id}\n"
-            f"   Short leg (SELL): {short_inst.id}"
+            f"📦 Creating spread instrument | Long: {long_inst.id} (BUY) | Short: {short_inst.id} (SELL)",
+            extra={
+                "extra": {
+                    "event_type": "create_spread_instrument",
+                    "long_leg": str(long_inst.id),
+                    "short_leg": str(short_inst.id)
+                }
+            }
         )
         self.create_and_request_spread(legs)
 
     def on_spread_ready(self, instrument: Instrument):
         """Called when spread instrument is available."""
         self.logger.info(
-            f"✅ SPREAD INSTRUMENT READY\n"
-            f"   ID: {instrument.id}\n"
-            f"   Waiting for quote to validate entry price..."
+            f"✅ SPREAD INSTRUMENT READY | ID: {instrument.id} | Waiting for quote",
+            extra={
+                "extra": {
+                    "event_type": "spread_instrument_ready",
+                    "instrument_id": str(instrument.id)
+                }
+            }
         )
         # Entry will happen in _process_spread_tick when we get a quote
 
@@ -585,9 +777,18 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         target_price = -(self.min_credit_amount / 100.0)
         credit_received = abs(mid) * 100 if mid < 0 else 0
         
-        self.logger.debug(
-            f"Spread quote: Bid={bid:.4f}, Ask={ask:.4f}, Mid={mid:.4f}, "
-            f"Spread={spread_width:.4f}, Credit=${credit_received:.2f}"
+        self.logger.info(
+            f"Spread quote | Bid: {bid:.4f} | Ask: {ask:.4f} | Mid: {mid:.4f} | Credit: ${credit_received:.2f}",
+            extra={
+                "extra": {
+                    "event_type": "spread_quote_tick",
+                    "bid": bid,
+                    "ask": ask,
+                    "mid": mid,
+                    "spread_width": spread_width,
+                    "credit_received": credit_received
+                }
+            }
         )
         
         # Validate signal freshness
@@ -595,14 +796,16 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             signal_age = (self.clock.utc_now() - self._signal_time).total_seconds()
             
             if signal_age > self.signal_max_age_seconds:
-                self.logger.warning(
-                    f"═══════════════════════════════════════════════════════════════\n"
-                    f"⚠️ ENTRY CANCELLED - Signal Expired\n"
-                    f"═══════════════════════════════════════════════════════════════\n"
-                    f"   Signal age: {signal_age:.1f}s\n"
-                    f"   Max allowed: {self.signal_max_age_seconds}s\n"
-                    f"   → Entry cancelled\n"
-                    f"═══════════════════════════════════════════════════════════════"
+                self.logger.info(
+                    f"⚠️ ENTRY CANCELLED - Signal Expired | Age: {signal_age:.1f}s > {self.signal_max_age_seconds}s",
+                    extra={
+                        "extra": {
+                            "event_type": "entry_cancelled",
+                            "reason": "signal_expired",
+                            "signal_age": signal_age,
+                            "max_age": self.signal_max_age_seconds
+                        }
+                    }
                 )
                 self._cancel_entry()
                 return
@@ -616,15 +819,17 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 level_name = "High"
                 
             if price_deviation > self.max_price_deviation:
-                self.logger.warning(
-                    f"═══════════════════════════════════════════════════════════════\n"
-                    f"⚠️ ENTRY CANCELLED - SPX Price Bounce\n"
-                    f"═══════════════════════════════════════════════════════════════\n"
-                    f"   SPX bounced from {level_name}: {self.current_spx_price:.2f}\n"
-                    f"   Deviation: {price_deviation:.2f} pts\n"
-                    f"   Max allowed: {self.max_price_deviation} pts\n"
-                    f"   → Entry cancelled\n"
-                    f"═══════════════════════════════════════════════════════════════"
+                self.logger.info(
+                    f"⚠️ ENTRY CANCELLED - SPX Price Bounce | Dev: {price_deviation:.2f} > {self.max_price_deviation}",
+                    extra={
+                        "extra": {
+                            "event_type": "entry_cancelled",
+                            "reason": "price_bounce_during_entry",
+                            "current_price": self.current_spx_price,
+                            "deviation": price_deviation,
+                            "max_deviation": self.max_price_deviation
+                        }
+                    }
                 )
                 self._cancel_entry()
                 return
@@ -638,19 +843,19 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             rounded_mid = self.round_to_tick(mid, self.spread_instrument)
             
             self.logger.info(
-                f"═══════════════════════════════════════════════════════════════\n"
-                f"✅ ENTRY ORDER SUBMITTED\n"
-                f"═══════════════════════════════════════════════════════════════\n"
-                f"   Direction: {self._signal_direction.upper()}\n"
-                f"   Spread: {self.spread_instrument.id if self.spread_instrument else 'N/A'}\n"
-                f"   Quantity: {self.config_quantity}\n"
-                f"   Limit Price: {rounded_mid:.4f} (original: {mid:.4f})\n"
-                f"   Credit Received: ${abs(rounded_mid) * 100:.2f} per spread\n"
-                f"   Total Credit: ${abs(rounded_mid) * 100 * self.config_quantity:.2f}\n"
-                f"   Signal Age: {signal_age:.1f}s\n"
-                f"   Stop Loss at: ${abs(rounded_mid) * 100 * self.stop_loss_multiplier:.2f}\n"
-                f"   Take Profit at: ${self.take_profit_amount:.2f}\n"
-                f"═══════════════════════════════════════════════════════════════"
+                f"✅ ENTRY ORDER SUBMITTED | {self._signal_direction.upper()} | Qty: {self.config_quantity} | Limit: {rounded_mid:.4f} | Credit: ${abs(rounded_mid) * 100:.2f}",
+                extra={
+                    "extra": {
+                        "event_type": "entry_submitted",
+                        "direction": self._signal_direction,
+                        "quantity": self.config_quantity,
+                        "limit_price": rounded_mid,
+                        "credit_per_spread": abs(rounded_mid) * 100,
+                        "total_credit": abs(rounded_mid) * 100 * self.config_quantity,
+                        "stop_loss": abs(rounded_mid) * 100 * self.stop_loss_multiplier,
+                        "take_profit": self.take_profit_amount
+                    }
+                }
             )
             
             self.open_spread_position(
@@ -667,17 +872,31 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             self.save_state()
         else:
             # Log why we're not entering yet
-            self.logger.debug(
-                f"Waiting for better price: Mid={mid:.4f}, Target<={target_price:.4f}, "
-                f"Need credit >= ${self.min_credit_amount:.2f}, Current credit=${credit_received:.2f}"
+
+            self.logger.info(
+                f"Waiting for better price | Mid: {mid:.4f} > Target: {target_price:.4f} | Credit: ${credit_received:.2f} < Min: ${self.min_credit_amount:.2f}",
+                extra={
+                    "extra": {
+                        "event_type": "waiting_for_price",
+                        "current_mid": mid,
+                        "target_price": target_price,
+                        "credit_received": credit_received,
+                        "min_credit_required": self.min_credit_amount
+                    }
+                }
             )
 
     def _cancel_entry(self):
         """Cancel the entry process and clean up."""
         self.logger.info(
-            f"🚫 Entry process cancelled. Cleaning up...\n"
-            f"   Direction was: {self._signal_direction}\n"
-            f"   Found legs: {len(self._found_legs)}"
+            f"🚫 Entry process cancelled | Direction: {self._signal_direction} | Found legs: {len(self._found_legs)}",
+            extra={
+                "extra": {
+                    "event_type": "entry_process_cancelled",
+                    "direction": self._signal_direction,
+                    "found_legs_count": len(self._found_legs)
+                }
+            }
         )
         self.entry_in_progress = False
         self._signal_time = None
@@ -688,12 +907,28 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
     def _manage_open_position(self):
         """Monitor open position for stop loss and take profit."""
         if self._spread_entry_price is None:
-            self.logger.debug("Position management called but no entry price recorded.")
+            self.logger.info(
+                "Position management skipped | No entry price recorded",
+                extra={
+                    "extra": {
+                        "event_type": "position_management_skipped",
+                        "reason": "no_entry_price"
+                    }
+                }
+            )
             return
 
         quote = self.cache.quote_tick(self.spread_instrument.id)
         if not quote:
-            self.logger.debug("Position management: No quote available for spread.")
+            self.logger.info(
+                "Position management skipped | No quote available",
+                extra={
+                    "extra": {
+                        "event_type": "position_management_skipped",
+                        "reason": "no_quote"
+                    }
+                }
+            )
             return
 
         bid = quote.bid_price.as_double()
@@ -738,29 +973,37 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 health = "🔴 LOSS"
             
             self.logger.info(
-                f"📊 POSITION STATUS [{et_now.strftime('%H:%M:%S')}] {health}\n"
-                f"   SPX: {self.current_spx_price:.2f} | Range: [{self.or_low:.2f}-{self.or_high:.2f}]\n"
-                f"   Spread: Bid={bid:.4f}, Ask={ask:.4f}, Mid={mid:.4f}\n"
-                f"   Entry Credit: ${entry_credit * 100:.2f} | Current Cost: ${current_cost * 100:.2f}\n"
-                f"   P&L: ${total_pnl:+.2f} ({pnl_per_spread:+.2f}/spread × {self.config_quantity})\n"
-                f"   SL @ {stop_price:.4f} (distance: {distance_to_sl:.4f}) | "
-                f"TP @ {tp_price:.4f} (distance: {distance_to_tp:.4f})"
+                f"📊 POSITION STATUS | {health} | P&L: ${total_pnl:+.2f} | Mid: {mid:.4f} | SL: {stop_price:.4f} | TP: {tp_price:.4f}",
+                extra={
+                    "extra": {
+                        "event_type": "position_status",
+                        "health": health,
+                        "pnl_total": total_pnl,
+                        "current_mid": mid,
+                        "entry_credit": entry_credit,
+                        "stop_price": stop_price,
+                        "tp_price": tp_price,
+                        "distance_sl": distance_to_sl,
+                        "distance_tp": distance_to_tp
+                    }
+                }
             )
         
         # STOP LOSS
         # If mid becomes more negative (spread costs more to buy back), we're losing
         # Check STOP LOSS (stop_price already calculated above)
         if mid <= stop_price:
-            self.logger.warning(
-                f"═══════════════════════════════════════════════════════════════\n"
-                f"🛑 STOP LOSS TRIGGERED\n"
-                f"═══════════════════════════════════════════════════════════════\n"
-                f"   Entry Credit: ${entry_credit * 100:.2f}\n"
-                f"   Current Mid: {mid:.4f}\n"
-                f"   Stop Price: {stop_price:.4f}\n"
-                f"   P&L: ${total_pnl:.2f}\n"
-                f"   → Closing position\n"
-                f"═══════════════════════════════════════════════════════════════"
+            self.logger.info(
+                f"🛑 STOP LOSS TRIGGERED | Mid: {mid:.4f} <= Stop: {stop_price:.4f} | P&L: ${total_pnl:.2f}",
+                extra={
+                    "extra": {
+                        "event_type": "stop_loss_trigger",
+                        "current_mid": mid,
+                        "stop_price": stop_price,
+                        "pnl": total_pnl,
+                        "entry_credit": entry_credit
+                    }
+                }
             )
             self.close_spread_smart()
             self._spread_entry_price = None
@@ -770,15 +1013,16 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         
         if mid >= tp_price:
             self.logger.info(
-                f"═══════════════════════════════════════════════════════════════\n"
-                f"💰 TAKE PROFIT TRIGGERED\n"
-                f"═══════════════════════════════════════════════════════════════\n"
-                f"   Entry Credit: ${entry_credit * 100:.2f}\n"
-                f"   Current Mid: {mid:.4f}\n"
-                f"   TP Price: {tp_price:.4f}\n"
-                f"   P&L: ${total_pnl:.2f}\n"
-                f"   → Closing position\n"
-                f"═══════════════════════════════════════════════════════════════"
+                f"💰 TAKE PROFIT TRIGGERED | Mid: {mid:.4f} >= TP: {tp_price:.4f} | P&L: ${total_pnl:.2f}",
+                extra={
+                    "extra": {
+                        "event_type": "take_profit_trigger",
+                        "current_mid": mid,
+                        "tp_price": tp_price,
+                        "pnl": total_pnl,
+                        "entry_credit": entry_credit
+                    }
+                }
             )
             self.close_spread_smart()
             self._spread_entry_price = None
@@ -791,12 +1035,27 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         does NOT trigger on_instrument callback. So we must poll the cache.
         """
         if not self.entry_in_progress:
-            self.logger.debug("Cache poll skipped - entry no longer in progress")
+            self.logger.info(
+                "Cache poll skipped | Entry no longer in progress",
+                extra={
+                    "extra": {
+                        "event_type": "cache_poll_skipped",
+                        "reason": "entry_not_in_progress"
+                    }
+                }
+            )
             return
         
         self._cache_poll_attempt += 1
         self.logger.info(
-            f"🔍 Cache poll attempt {self._cache_poll_attempt}/{self._max_cache_poll_attempts}"
+            f"🔍 Cache poll attempt {self._cache_poll_attempt}/{self._max_cache_poll_attempts}",
+            extra={
+                "extra": {
+                    "event_type": "cache_poll_attempt",
+                    "attempt": self._cache_poll_attempt,
+                    "max_attempts": self._max_cache_poll_attempts
+                }
+            }
         )
         
         # Check cache for each expected instrument
@@ -810,19 +1069,49 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                     
                     if strike not in self._found_legs:
                         self.logger.info(
-                            f"   ✅ Found in cache: {inst_id_str} (Strike {strike})"
+                            f"✅ Found in cache: {inst_id_str} (Strike {strike})",
+                            extra={
+                                "extra": {
+                                    "event_type": "cache_hit",
+                                    "instrument_id": inst_id_str,
+                                    "strike": strike
+                                }
+                            }
                         )
                         self._found_legs[strike] = instrument
                 else:
-                    self.logger.debug(f"   ⏳ Not yet in cache: {inst_id_str}")
+                    self.logger.info(
+                        f"⏳ Not yet in cache: {inst_id_str}",
+                        extra={
+                            "extra": {
+                                "event_type": "cache_miss",
+                                "instrument_id": inst_id_str
+                            }
+                        }
+                    )
                     
             except Exception as e:
-                self.logger.warning(f"   ⚠️ Error checking cache for {inst_id_str}: {e}")
+                self.logger.info(
+                    f"⚠️ Error checking cache for {inst_id_str}: {e}",
+                    extra={
+                        "extra": {
+                            "event_type": "cache_check_error",
+                            "instrument_id": inst_id_str,
+                            "error": str(e)
+                        }
+                    }
+                )
         
-        # Check if we have both legs
-        if len(self._found_legs) >= 2:
+        if len(self._found_legs) >= self._required_legs_count:
             self.logger.info(
-                f"🎯 Both legs found in cache! Short={self._target_short_strike}, Long={self._target_long_strike}"
+                f"🎯 Both legs found in cache! Short={self._target_short_strike}, Long={self._target_long_strike}",
+                extra={
+                    "extra": {
+                        "event_type": "legs_found_cache_complete",
+                        "short_strike": self._target_short_strike,
+                        "long_strike": self._target_long_strike
+                    }
+                }
             )
             # Cancel the polling timer
             try:
@@ -837,13 +1126,22 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         if self._cache_poll_attempt < self._max_cache_poll_attempts:
             self.clock.set_time_alert(
                 name=f"{self.id}_cache_poll",
-                alert_time=self.clock.utc_now() + timedelta(seconds=2),
+                alert_time=self.clock.utc_now() + timedelta(seconds=self._cache_poll_interval_seconds),
                 callback=self._poll_cache_for_instruments
             )
         else:
-            self.logger.warning(
+            self.logger.info(
                 f"❌ Cache polling exhausted after {self._cache_poll_attempt} attempts. "
-                f"Found {len(self._found_legs)}/2 legs."
+                f"Found {len(self._found_legs)}/{self._required_legs_count} legs.",
+                extra={
+                    "extra": {
+                        "event_type": "cache_poll_exhausted",
+                        "attempts": self._cache_poll_attempt,
+                        "legs_found_count": len(self._found_legs),
+                        "required_legs": self._required_legs_count,
+                        "found_legs_strikes": list(self._found_legs.keys())
+                    }
+                }
             )
 
     def _on_entry_timeout(self, event):
@@ -852,8 +1150,14 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             legs_found = len(self._found_legs)
             if self.spread_instrument:
                 self.logger.info(
-                    f"⏱️ Entry timeout (35s) but spread is ready. "
-                    f"Continuing to wait for acceptable quote..."
+                    f"⏱️ Entry timeout ({self.entry_timeout_seconds}s) but spread is ready. Continuing to wait for acceptable quote...",
+                    extra={
+                        "extra": {
+                            "event_type": "entry_timeout_spread_ready",
+                            "timeout_seconds": self.entry_timeout_seconds,
+                            "action": "continue_waiting"
+                        }
+                    }
                 )
             else:
                 # Cancel cache polling
@@ -862,15 +1166,18 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 except Exception:
                     pass
                 
-                self.logger.warning(
-                    f"═══════════════════════════════════════════════════════════════\n"
-                    f"⏱️ ENTRY TIMEOUT - Spread Not Ready\n"
-                    f"═══════════════════════════════════════════════════════════════\n"
-                    f"   Legs found: {legs_found}/2\n"
-                    f"   Short strike {self._target_short_strike}: {'✓' if self._target_short_strike in self._found_legs else '✗'}\n"
-                    f"   Long strike {self._target_long_strike}: {'✓' if self._target_long_strike in self._found_legs else '✗'}\n"
-                    f"   → Entry cancelled\n"
-                    f"═══════════════════════════════════════════════════════════════"
+                self.logger.info(
+                    f"⏱️ ENTRY TIMEOUT - Spread Not Ready | Legs: {legs_found}/{self._required_legs_count} | Short {self._target_short_strike}: {'✓' if self._target_short_strike in self._found_legs else '✗'} | Long {self._target_long_strike}: {'✓' if self._target_long_strike in self._found_legs else '✗'}",
+                    extra={
+                        "extra": {
+                            "event_type": "entry_timeout",
+                            "reason": "spread_not_ready",
+                            "legs_found_count": legs_found,
+                            "required_legs": self._required_legs_count,
+                            "short_strike_found": self._target_short_strike in self._found_legs,
+                            "long_strike_found": self._target_long_strike in self._found_legs
+                        }
+                    }
                 )
                 self._cancel_entry()
 
@@ -892,18 +1199,18 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._signal_direction = None
         self._signal_time = None
         self._signal_close_price = None
-        self._tick_count = 0
-        self._range_tick_count = 0
         self._last_log_minute = -1
         
         self.logger.info(
-            f"═══════════════════════════════════════════════════════════════\n"
-            f"📅 NEW TRADING DAY: {new_date}\n"
-            f"═══════════════════════════════════════════════════════════════\n"
-            f"   Previous day: {old_date}\n"
-            f"   All daily state has been RESET\n"
-            f"   Range formation will begin at {self.start_time}\n"
-            f"═══════════════════════════════════════════════════════════════"
+            f"📅 NEW TRADING DAY: {new_date} | Previous: {old_date} | Range Start: {self.start_time}",
+            extra={
+                "extra": {
+                    "event_type": "new_trading_day",
+                    "date": str(new_date),
+                    "previous_date": str(old_date),
+                    "start_time": str(self.start_time)
+                }
+            }
         )
 
     def get_state(self) -> Dict[str, Any]:
@@ -933,9 +1240,17 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._signal_direction = state.get("_signal_direction")
         
         self.logger.info(
-            f"State restored: Range={self.daily_low}-{self.daily_high}, "
-            f"Calculated={self.range_calculated}, Traded={self.traded_today}, "
-            f"Direction={self._signal_direction}"
+            f"State restored | Range: {self.daily_low}-{self.daily_high} | Calculated: {self.range_calculated} | Traded: {self.traded_today} | Dir: {self._signal_direction}",
+            extra={
+                "extra": {
+                    "event_type": "state_restored",
+                    "daily_low": self.daily_low,
+                    "daily_high": self.daily_high,
+                    "range_calculated": self.range_calculated,
+                    "traded_today": self.traded_today,
+                    "signal_direction": self._signal_direction
+                }
+            }
         )
 
     def on_stop_safe(self):
@@ -943,20 +1258,35 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         position_qty = self.get_effective_spread_quantity()
         
         self.logger.info(
-            f"═══════════════════════════════════════════════════════════════\n"
-            f"🛑 STRATEGY STOPPING\n"
-            f"═══════════════════════════════════════════════════════════════\n"
-            f"   Total ticks processed: {self._tick_count}\n"
-            f"   Range ticks: {self._range_tick_count}\n"
-            f"   Traded today: {self.traded_today}\n"
-            f"   Open position: {position_qty}\n"
-            f"═══════════════════════════════════════════════════════════════"
+            f"🛑 STRATEGY STOPPING | Traded: {self.traded_today} | Pos: {position_qty}",
+            extra={
+                "extra": {
+                    "event_type": "strategy_stop",
+                    "traded_today": self.traded_today,
+                    "position_quantity": position_qty
+                }
+            }
         )
         
         # Close any open positions
         if position_qty != 0:
-            self.logger.info(f"Closing {position_qty} spread position(s) on strategy stop...")
+            self.logger.info(
+                f"🛑 Closing position on stop | Quantity: {position_qty}",
+                extra={
+                    "extra": {
+                        "event_type": "strategy_stop_close_position",
+                        "quantity": position_qty
+                    }
+                }
+            )
             self.close_spread_smart()
         
         super().on_stop_safe()
-        self.logger.info("SPX15MinRangeStrategy stopped.")
+        self.logger.info(
+            "🛑 SPX15MinRangeStrategy stopped",
+            extra={
+                "extra": {
+                    "event_type": "strategy_stopped_final"
+                }
+            }
+        )

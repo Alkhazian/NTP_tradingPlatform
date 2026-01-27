@@ -117,7 +117,15 @@ class BaseStrategy(Strategy):
         Lifecycle hook: Called when strategy is started.
         Nautilus state: INITIALIZED -> STARTING -> RUNNING
         """
-        self.logger.info(f"Strategy {self.strategy_id} starting...")
+        self.logger.info(
+            f"Strategy {self.strategy_id} starting...",
+            extra={
+                "extra": {
+                    "event_type": "strategy_starting",
+                    "strategy_id": self.strategy_id
+                }
+            }
+        )
         
         # Check if strategy is enabled in configuration
         # If disabled, stop immediately to prevent execution
@@ -141,7 +149,16 @@ class BaseStrategy(Strategy):
             self._on_instrument_ready()
         else:
             # Re-request if not in cache (may be missing from catalog)
-            self.logger.info(f"Instrument {self.instrument_id} not found in cache. Strategy is in WAITING state.")
+            self.logger.info(
+                f"Instrument {self.instrument_id} not found in cache | State: WAITING",
+                extra={
+                    "extra": {
+                        "event_type": "instrument_not_cached",
+                        "instrument_id": str(self.instrument_id),
+                        "state": "WAITING"
+                    }
+                }
+            )
             
             # Set timeout for instrument availability
             self.clock.set_time_alert(
@@ -176,7 +193,15 @@ class BaseStrategy(Strategy):
             return
 
         self._instrument_ready = True
-        self.logger.info(f"Instrument {self.instrument_id} ready")
+        self.logger.info(
+            f"Instrument {self.instrument_id} ready",
+            extra={
+                "extra": {
+                    "event_type": "instrument_ready",
+                    "instrument_id": str(self.instrument_id)
+                }
+            }
+        )
 
         try:
             # Wrap *everything* in the start path so no exception is re-raised
@@ -216,8 +241,13 @@ class BaseStrategy(Strategy):
         """Handle instrument request timeout."""
         if not self._instrument_ready:
             self.logger.error(
-                f"Timeout waiting for instrument {self.instrument_id}. "
-                "Strategy cannot start."
+                f"Timeout waiting for instrument {self.instrument_id} | Strategy cannot start",
+                extra={
+                    "extra": {
+                        "event_type": "instrument_timeout",
+                        "instrument_id": str(self.instrument_id)
+                    }
+                }
             )
 
     def _subscribe_data(self):
@@ -371,14 +401,39 @@ class BaseStrategy(Strategy):
             self._waiting_for_spread = True
             
             self.logger.info(
-                f"Generated Spread ID: {self.spread_id} "
-                f"with {len(self._spread_legs)} legs"
+                f"Generated Spread ID: {self.spread_id} | Legs: {len(self._spread_legs)}",
+                extra={
+                    "extra": {
+                        "event_type": "spread_id_generated",
+                        "spread_id": str(self.spread_id),
+                        "leg_count": len(self._spread_legs)
+                    }
+                }
             )
             
             # Log leg details
+            # Log leg details
+            legs_details = []
             for leg_id, ratio in self._spread_legs:
                 action = "BUY" if ratio > 0 else "SELL"
-                self.logger.info(f"  Leg: {leg_id} -> {action} x{abs(ratio)}")
+                legs_details.append(f"{leg_id}:{action} x{abs(ratio)}")
+                
+            self.logger.info(
+                f"Spread legs definition: {', '.join(legs_details)}",
+                extra={
+                    "extra": {
+                        "event_type": "spread_legs_definition",
+                        "legs": [
+                            {
+                                "instrument_id": str(leg_id),
+                                "ratio": ratio,
+                                "action": "BUY" if ratio > 0 else "SELL"
+                            }
+                            for leg_id, ratio in self._spread_legs
+                        ]
+                    }
+                }
+            )
             
             # Request the spread instrument from the broker (async)
             # For IBKR, this triggers creation of a BAG (combo) contract
@@ -403,8 +458,13 @@ class BaseStrategy(Strategy):
         if self._waiting_for_spread and self.spread_id:
             self._waiting_for_spread = False
             self.logger.error(
-                f"Timeout waiting for spread instrument {self.spread_id}. "
-                "Spread trading will not be available."
+                f"Timeout waiting for spread instrument {self.spread_id} | Spread trading unavailable",
+                extra={
+                    "extra": {
+                        "event_type": "spread_instrument_timeout",
+                        "spread_id": str(self.spread_id)
+                    }
+                }
             )
 
     def on_spread_ready(self, instrument: Instrument):
@@ -447,24 +507,28 @@ class BaseStrategy(Strategy):
         """
         if not self.spread_instrument:
             self.logger.error(
-                f"═══════════════════════════════════════════════════════════════\n"
-                f"❌ SPREAD ORDER FAILED - Instrument Not Loaded\n"
-                f"═══════════════════════════════════════════════════════════════\n"
-                f"   Spread ID: {self.spread_id}\n"
-                f"   Reason: spread_instrument is None\n"
-                f"   Action: Wait for on_spread_ready() callback\n"
-                f"═══════════════════════════════════════════════════════════════"
+                f"❌ SPREAD ORDER FAILED | Instrument Not Loaded | ID: {self.spread_id}",
+                extra={
+                    "extra": {
+                        "event_type": "spread_order_failed",
+                        "spread_id": str(self.spread_id),
+                        "reason": "spread_instrument is None",
+                        "action": "Wait for on_spread_ready() callback"
+                    }
+                }
             )
             return False
             
         if not self._functional_ready:
             self.logger.error(
-                f"═══════════════════════════════════════════════════════════════\n"
-                f"❌ SPREAD ORDER FAILED - Strategy Not Ready\n"
-                f"═══════════════════════════════════════════════════════════════\n"
-                f"   Spread ID: {self.spread_id}\n"
-                f"   Reason: _functional_ready is False\n"
-                f"═══════════════════════════════════════════════════════════════"
+                f"❌ SPREAD ORDER FAILED | Strategy Not Ready | ID: {self.spread_id}",
+                extra={
+                    "extra": {
+                        "event_type": "spread_order_failed",
+                        "spread_id": str(self.spread_id),
+                        "reason": "strategy not functional ready"
+                    }
+                }
             )
             return False
 
@@ -498,7 +562,13 @@ class BaseStrategy(Strategy):
             order_type = "MARKET"
             price_str = "N/A"
             self.logger.warning(
-                "⚠️ Using MARKET order for spread. Consider LIMIT order for better execution."
+                "⚠️ Using MARKET order for spread | Consider LIMIT order for better execution",
+                extra={
+                    "extra": {
+                        "event_type": "spread_order_warning",
+                        "warning_type": "market_order_usage"
+                    }
+                }
             )
         
         # Track this as a spread order
@@ -509,20 +579,21 @@ class BaseStrategy(Strategy):
         
         # Log detailed order info
         self.logger.info(
-            f"═══════════════════════════════════════════════════════════════\n"
-            f"📤 SPREAD ORDER SUBMITTED TO BROKER\n"
-            f"═══════════════════════════════════════════════════════════════\n"
-            f"   Order ID: {order.client_order_id}\n"
-            f"   Instrument: {self.spread_instrument.id}\n"
-            f"   Side: {side.name}\n"
-            f"   Quantity: {qty}\n"
-            f"   Order Type: {order_type}\n"
-            f"   Price: {price_str}\n"
-            f"   Time in Force: {time_in_force.name}\n"
-            f"   Legs:\n"
-            + "\n".join([f"      • {leg_id} x{ratio}" for leg_id, ratio in self._spread_legs]) + "\n"
-            f"   Status: PENDING (waiting for broker confirmation)\n"
-            f"═══════════════════════════════════════════════════════════════"
+            f"📤 SPREAD ORDER SUBMITTED TO BROKER| ID: {order.client_order_id} | {side.name} {qty} @ {price_str}",
+            extra={
+                "extra": {
+                    "event_type": "spread_order_submitted",
+                    "order_id": str(order.client_order_id),
+                    "instrument_id": str(self.spread_instrument.id),
+                    "side": side.name,
+                    "quantity": str(qty),
+                    "order_type": order_type,
+                    "price_details": price_str,
+                    "time_in_force": time_in_force.name,
+                    "legs": [f"{leg_id} x{ratio}" for leg_id, ratio in self._spread_legs],
+                    "status": "PENDING (waiting for broker confirmation)"
+                }
+            }
         )
         
         return True
@@ -552,15 +623,18 @@ class BaseStrategy(Strategy):
         pos_side = pos.side.name
         
         self.logger.info(
-            f"═══════════════════════════════════════════════════════════════\n"
-            f"📤 CLOSING SPREAD POSITION (Native Combo)\n"
-            f"═══════════════════════════════════════════════════════════════\n"
-            f"   Spread ID: {self.spread_id}\n"
-            f"   Position: {pos_qty} {pos_side}\n"
-            f"   Avg Entry: {pos.avg_px_open}\n"
-            f"   Method: close_all_positions()\n"
-            f"   Status: PENDING (waiting for broker confirmation)\n"
-            f"═══════════════════════════════════════════════════════════════"
+            f"📤 CLOSING SPREAD POSITION | ID: {self.spread_id} | Qty: {pos_qty}",
+            extra={
+                "extra": {
+                    "event_type": "spread_close_initiated",
+                    "spread_id": str(self.spread_id),
+                    "position_qty": pos_qty,
+                    "position_side": pos_side,
+                    "avg_entry_price": float(pos.avg_px_open),
+                    "method": "close_all_positions",
+                    "status": "PENDING (waiting for broker confirmation)"
+                }
+            }
         )
         
         self.close_all_positions(self.spread_id)
@@ -643,8 +717,13 @@ class BaseStrategy(Strategy):
         
         if is_broken:
             self.logger.critical(
-                f"BROKEN SPREAD DETECTED! Leg quantities do not match ratios. "
-                f"Implied quantities per leg: {potential_spread_qtys}"
+                f"BROKEN SPREAD DETECTED | Leg quantities do not match ratios |Implied quantities per leg: {potential_spread_qtys}",
+                extra={
+                    "extra": {
+                        "event_type": "broken_spread_detected",
+                        "implied_quantities": potential_spread_qtys
+                    }
+                }
             )
             # Тут рішення залежить від ризик-менеджменту. 
             # Безпечно повернути мінімальне значення або 0, щоб не закрити зайве.
@@ -700,17 +779,19 @@ class BaseStrategy(Strategy):
                 self.logger.warning(f"Could not get quote for spread, using market order: {e}")
         
         self.logger.info(
-            f"═══════════════════════════════════════════════════════════════\n"
-            f"📤 CLOSING SPREAD (Smart - Reverse Combo Order)\n"
-            f"═══════════════════════════════════════════════════════════════\n"
-            f"   Spread ID: {self.spread_id}\n"
-            f"   Effective Qty: {effective_qty}\n"
-            f"   Close Direction: {close_side} {close_qty}\n"
-            f"   Limit Price: {closing_limit_price if closing_limit_price else 'MARKET'}\n"
-            f"   Mode: REVERSE COMBO ORDER (atomic)\n"
-            f"   Note: IB scattered legs into individual positions,\n"
-            f"         but we close via combo order for atomicity.\n"
-            f"═══════════════════════════════════════════════════════════════"
+            f"📤 CLOSING SPREAD (Smart - Reverse Combo Order) | {close_side} {close_qty} | Limit: {closing_limit_price if closing_limit_price else 'MARKET'}",
+            extra={
+                "extra": {
+                    "event_type": "spread_close_smart_initiated",
+                    "spread_id": str(self.spread_id),
+                    "effective_qty": effective_qty,
+                    "close_direction": close_side,
+                    "close_qty": close_qty,
+                    "limit_price": closing_limit_price,
+                    "mode": "REVERSE_COMBO_ORDER",
+                    "Note": "IB scattered legs into individual positions, but we close via combo order for atomicity."
+                }
+            }
         )
         
         # Закриваємо через зворотній комбо-ордер
@@ -950,8 +1031,14 @@ class BaseStrategy(Strategy):
 
         self.submit_order(entry_order)
         self.logger.info(
-            f"📈 Entry order submitted: {entry_order.client_order_id}. "
-            f"Broker-side SL/TP will be attached upon fill."
+            f"📈 Entry order submitted: {entry_order.client_order_id} | Broker-side SL/TP pending fill",
+            extra={
+                "extra": {
+                    "event_type": "entry_order_submitted_bracket",
+                    "order_id": str(entry_order.client_order_id),
+                    "instrument_id": str(entry_order.instrument_id)
+                }
+            }
         )
         
         # Immediate save to persist the exit intent
@@ -1026,7 +1113,14 @@ class BaseStrategy(Strategy):
             )
             self.submit_order_list(order_list)
             self.logger.info(
-                f"✅ Sequential bracket legs submitted for {inst_id} (ListID: {order_list.id})"
+                f"✅ Sequential bracket legs submitted | ListID: {order_list.id}",
+                extra={
+                    "extra": {
+                        "event_type": "bracket_legs_submitted",
+                        "order_list_id": str(order_list.id),
+                        "instrument_id": str(inst_id)
+                    }
+                }
             )
             self.save_state()
 
@@ -1047,8 +1141,16 @@ class BaseStrategy(Strategy):
         # Submit to broker
         self.submit_order(order)
         self.logger.info(
-            f"Entry order submitted: {order.client_order_id} "
-            f"({order.side} {order.quantity} @ {order.order_type})"
+            f"Entry order submitted: {order.client_order_id} | {order.side} {order.quantity} @ {order.order_type}",
+            extra={
+                "extra": {
+                    "event_type": "entry_order_submitted",
+                    "order_id": str(order.client_order_id),
+                    "side": str(order.side),
+                    "quantity": str(order.quantity),
+                    "order_type": str(order.order_type)
+                }
+            }
         )
         
         return True
@@ -1070,8 +1172,16 @@ class BaseStrategy(Strategy):
         # Submit to broker
         self.submit_order(order)
         self.logger.info(
-            f"Exit order submitted: {order.client_order_id} "
-            f"({order.side} {order.quantity} @ {order.order_type})"
+            f"Exit order submitted: {order.client_order_id} | {order.side} {order.quantity} @ {order.order_type}",
+            extra={
+                "extra": {
+                    "event_type": "exit_order_submitted",
+                    "order_id": str(order.client_order_id),
+                    "side": str(order.side),
+                    "quantity": str(order.quantity),
+                    "order_type": str(order.order_type)
+                }
+            }
         )
         
         return True
@@ -1104,8 +1214,18 @@ class BaseStrategy(Strategy):
             close_qty = pos.quantity
         
         self.logger.info(
-            f"Closing position {pos.instrument_id} (Side: {pos.side.name}) on account {p_account} "
-            f"Qty: {close_qty} (Inventory: {self.signed_inventory}) Reason: {reason}"
+            f"Closing position {pos.instrument_id} | Side: {pos.side.name} | Qty: {close_qty} | Reason: {reason}",
+            extra={
+                "extra": {
+                    "event_type": "position_close_initiated",
+                    "instrument_id": str(pos.instrument_id),
+                    "side": pos.side.name,
+                    "quantity": close_qty,
+                    "inventory": self.signed_inventory,
+                    "reason": reason,
+                    "account": p_account
+                }
+            }
         )
 
         # We manually submit an offsetting order using our tradeable ID and the position's account
@@ -1126,8 +1246,17 @@ class BaseStrategy(Strategy):
         
         self.submit_order(order)
         self.logger.info(
-            f"Exit order submitted: {order.client_order_id} "
-            f"({order.side} {order.quantity} @ {order.order_type})"
+            f"Exit order submitted: {order.client_order_id} | {order.side} {order.quantity} @ {order.order_type}",
+            extra={
+                "extra": {
+                    "event_type": "exit_order_submitted_close",
+                    "order_id": str(order.client_order_id),
+                    "side": str(order.side),
+                    "quantity": str(order.quantity),
+                    "order_type": str(order.order_type),
+                    "reason": reason
+                }
+            }
         )
         
         return True
@@ -1146,11 +1275,15 @@ class BaseStrategy(Strategy):
             if order:
                 if is_spread_order:
                     self.logger.info(
-                        f"📨 SPREAD ORDER ACCEPTED BY BROKER\n"
-                        f"   Order ID: {order_id}\n"
-                        f"   Instrument: {order.instrument_id}\n"
-                        f"   Status: {order.status.name}\n"
-                        f"   Waiting for fill..."
+                        f"📨 SPREAD ORDER ACCEPTED BY BROKER| ID: {order_id} | Status: {order.status.name} | Waiting for fill...",
+                        extra={
+                            "extra": {
+                                "event_type": "spread_order_accepted",
+                                "order_id": str(order_id),
+                                "instrument_id": str(order.instrument_id),
+                                "status": order.status.name
+                            }
+                        }
                     )
                 else:
                     self.logger.debug(
@@ -1176,14 +1309,16 @@ class BaseStrategy(Strategy):
             
             if is_spread_order:
                 self.logger.error(
-                    f"═══════════════════════════════════════════════════════════════\n"
-                    f"❌ SPREAD ORDER REJECTED BY BROKER\n"
-                    f"═══════════════════════════════════════════════════════════════\n"
-                    f"   Order ID: {order_id}\n"
-                    f"   Instrument: {order.instrument_id if order else 'N/A'}\n"
-                    f"   Reason: {event.reason}\n"
-                    f"   Action Required: Check order parameters or market conditions\n"
-                    f"═══════════════════════════════════════════════════════════════"
+                    f"❌ SPREAD ORDER REJECTED BY BROKER| ID: {order_id} | Reason: {event.reason}",
+                    extra={
+                        "extra": {
+                            "event_type": "spread_order_rejected",
+                            "order_id": str(order_id),
+                            "instrument_id": str(order.instrument_id) if order else "N/A",
+                            "reason": str(event.reason),
+                            "Action Required": "Check order parameters or market conditions"
+                        }
+                    }
                 )
             elif order:
                 self.logger.error(
@@ -1210,9 +1345,13 @@ class BaseStrategy(Strategy):
             
             if is_spread_order:
                 self.logger.warning(
-                    f"⚠️ SPREAD ORDER CANCELLED\n"
-                    f"   Order ID: {order_id}\n"
-                    f"   No fill received."
+                    f"⚠️ SPREAD ORDER CANCELLED | ID: {order_id} | No fill received.",
+                    extra={
+                        "extra": {
+                            "event_type": "spread_order_cancelled",
+                            "order_id": str(order_id)
+                        }
+                    }
                 )
             else:
                 self.logger.warning(f"Order cancelled: {order_id}")
@@ -1234,9 +1373,13 @@ class BaseStrategy(Strategy):
             
             if is_spread_order:
                 self.logger.warning(
-                    f"⏰ SPREAD ORDER EXPIRED\n"
-                    f"   Order ID: {order_id}\n"
-                    f"   Time in Force reached - no fill."
+                    f"⏰ SPREAD ORDER EXPIRED | ID: {order_id} | Time in Force reached - no fill.",
+                    extra={
+                        "extra": {
+                            "event_type": "spread_order_expired",
+                            "order_id": str(order_id)
+                        }
+                    }
                 )
             else:
                 self.logger.warning(f"Order expired: {order_id}")
@@ -1312,23 +1455,33 @@ class BaseStrategy(Strategy):
             if is_spread_order and order:
                 fill_value = float(event.last_qty) * float(event.last_px) * 100  # Options multiplier
                 self.logger.info(
-                    f"═══════════════════════════════════════════════════════════════\n"
-                    f"✅ SPREAD ORDER FILLED BY BROKER\n"
-                    f"═══════════════════════════════════════════════════════════════\n"
-                    f"   Order ID: {order_id}\n"
-                    f"   Instrument: {order.instrument_id}\n"
-                    f"   Side: {order.side.name}\n"
-                    f"   Filled Qty: {event.last_qty}\n"
-                    f"   Fill Price: {event.last_px}\n"
-                    f"   Fill Value: ${abs(fill_value):.2f}\n"
-                    f"   Order Status: {order.status.name}\n"
-                    f"   Execution confirmed by IB ✓\n"
-                    f"═══════════════════════════════════════════════════════════════"
+                    f"✅ SPREAD ORDER FILLED BY BROKER | {order.instrument_id} | {order.side.name} | Qty: {event.last_qty} | Px: {event.last_px} | Val: ${abs(fill_value):.2f}",
+                    extra={
+                        "extra": {
+                            "event_type": "spread_fill",
+                            "order_id": str(order_id),
+                            "instrument_id": str(order.instrument_id),
+                            "side": order.side.name,
+                            "filled_qty": float(event.last_qty),
+                            "fill_price": float(event.last_px),
+                            "fill_value": float(abs(fill_value)),
+                            "order_status": order.status.name,
+                            "provider": "IB"
+                        }
+                    }
                 )
             elif order:
                 self.logger.info(
-                    f"Order filled: {order_id} "
-                    f"(status: {order.status.name}, qty: {event.last_qty}, price: {event.last_px})"
+                    f"Order filled: {order_id} | {order.status.name} | Qty: {event.last_qty} | Px: {event.last_px}",
+                    extra={
+                        "extra": {
+                            "event_type": "order_filled_generic",
+                            "order_id": str(order_id),
+                            "status": order.status.name,
+                            "filled_qty": float(event.last_qty),
+                            "fill_price": float(event.last_px)
+                        }
+                    }
                 )
             
             if is_entry:
@@ -1339,7 +1492,16 @@ class BaseStrategy(Strategy):
                 # Check for mapped bracket exit reason
                 mapped_reason = self._bracket_exit_map.get(order_id)
                 if mapped_reason:
-                    self.logger.info(f"Bracket exit fill detected: {mapped_reason}")
+                    self.logger.info(
+                        f"Bracket exit fill detected | Reason: {mapped_reason}",
+                        extra={
+                            "extra": {
+                                "event_type": "bracket_exit_fill_detected",
+                                "reason": mapped_reason,
+                                "order_id": str(order_id)
+                            }
+                        }
+                    )
                     self._last_exit_reason = mapped_reason
                     # Clean up map
                     self._bracket_exit_map.pop(order_id, None)
@@ -1360,7 +1522,17 @@ class BaseStrategy(Strategy):
 
     def _on_entry_filled(self, event):
         """Handle entry fill - start trade record."""
-        self.logger.info(f"Entry filled: {event.last_qty} @ {event.last_px}")
+        self.logger.info(
+            f"Entry filled | Qty: {event.last_qty} | Px: {event.last_px}",
+            extra={
+                "extra": {
+                    "event_type": "entry_filled_processed",
+                    "quantity": float(event.last_qty),
+                    "price": float(event.last_px),
+                    "order_id": str(event.client_order_id)
+                }
+            }
+        )
         
         # Update tracking
         self._last_entry_price = float(event.last_px)
@@ -1387,7 +1559,17 @@ class BaseStrategy(Strategy):
 
     def _on_exit_filled(self, event):
         """Handle exit fill - close trade record."""
-        self.logger.info(f"Exit filled: {event.last_qty} @ {event.last_px}")
+        self.logger.info(
+            f"Exit filled | Qty: {event.last_qty} | Px: {event.last_px}",
+            extra={
+                "extra": {
+                    "event_type": "exit_filled_processed",
+                    "quantity": float(event.last_qty),
+                    "price": float(event.last_px),
+                    "order_id": str(event.client_order_id)
+                }
+            }
+        )
         
         # Update inventory
         qty = float(event.last_qty)
@@ -1417,7 +1599,16 @@ class BaseStrategy(Strategy):
                 direction = "LONG" if event.order_side == OrderSide.BUY else "SHORT"
                 commission = float(event.commission) if hasattr(event, 'commission') else 0.0
                 
-                self.logger.info(f"Initiating trade record for {self.strategy_id} ({direction})")
+                self.logger.info(
+                    f"Initiating trade record for {self.strategy_id} | {direction}",
+                    extra={
+                        "extra": {
+                            "event_type": "trade_record_initiation",
+                            "strategy_id": self.strategy_id,
+                            "direction": direction
+                        }
+                    }
+                )
                 self.active_trade_id = await recorder.start_trade(
                     strategy_id=self.strategy_id,
                     instrument_id=str(self.instrument_id),
@@ -1430,7 +1621,15 @@ class BaseStrategy(Strategy):
                     trade_type="DAYTRADE"
                 )
                 self.save_state()
-                self.logger.info(f"Trade record started: ID={self.active_trade_id}")
+                self.logger.info(
+                    f"Trade record started | ID: {self.active_trade_id}",
+                    extra={
+                        "extra": {
+                            "event_type": "trade_record_started",
+                            "trade_id": str(self.active_trade_id)
+                        }
+                    }
+                )
             else:
                 self.logger.warning("No trade recorder found on integration manager")
                 # Still save state even without trade recorder
@@ -1469,7 +1668,16 @@ class BaseStrategy(Strategy):
                 commission = float(event.commission) if hasattr(event, 'commission') else 0.0
                 exit_reason = getattr(self, '_last_exit_reason', 'UNKNOWN')
                 
-                self.logger.info(f"Closing trade record ID={self.active_trade_id} for {self.strategy_id}")
+                self.logger.info(
+                    f"Closing trade record | ID: {self.active_trade_id} | Strategy: {self.strategy_id}",
+                    extra={
+                        "extra": {
+                            "event_type": "trade_record_closing",
+                            "trade_id": str(self.active_trade_id),
+                            "strategy_id": self.strategy_id
+                        }
+                    }
+                )
                 await recorder.close_trade(
                     trade_id=self.active_trade_id,
                     exit_time=self.clock.utc_now().isoformat(),
@@ -1480,7 +1688,16 @@ class BaseStrategy(Strategy):
                     raw_data=str(event)
                 )
                 
-                self.logger.info(f"Trade record closed: {self.active_trade_id}, PnL: {pnl:.2f}")
+                self.logger.info(
+                    f"Trade record closed | ID: {self.active_trade_id} | PnL: {pnl:.2f}",
+                    extra={
+                        "extra": {
+                            "event_type": "trade_record_closed",
+                            "trade_id": str(self.active_trade_id),
+                            "pnl": pnl
+                        }
+                    }
+                )
                 self.active_trade_id = None
                 self.save_state()
             else:
