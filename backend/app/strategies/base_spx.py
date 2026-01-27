@@ -81,6 +81,7 @@ class SPXBaseStrategy(BaseStrategy):
         # Minute Emulation State
         self._last_minute_idx: int = -1
         self._last_tick_price: Optional[float] = None
+        self._range_tracking_started: bool = False  # Flag to log once when tracking begins
         
         # Dictionary for parallel option premium searches
         # Key: search_id (UUID), Value: search state dict
@@ -278,6 +279,19 @@ class SPXBaseStrategy(BaseStrategy):
 
         # 5. Range formation period (logic for locking OR)
         if self.market_open_time <= current_time < range_end_time:
+            # Log once when entering range tracking window
+            if not self._range_tracking_started:
+                self._range_tracking_started = True
+                self.logger.info(
+                    f"🕘 OPENING RANGE TRACKING STARTED | Window: {self.market_open_time.strftime('%H:%M')}-{range_end_time.strftime('%H:%M')} ET",
+                    extra={"extra": {
+                        "event_type": "range_tracking_started",
+                        "current_time_et": str(current_time),
+                        "range_start": str(self.market_open_time),
+                        "range_end": str(range_end_time),
+                        "spx_price": price
+                    }}
+                )
             self.range_calculated = False
 
         # 5. Lock in range after window period
@@ -287,14 +301,27 @@ class SPXBaseStrategy(BaseStrategy):
                 self.or_low = self.daily_low
                 self.range_calculated = True
                 self.logger.info(
-                    f"📈 RANGE LOCKED ({self.opening_range_minutes}m): "
-                    f"High={self.or_high:.2f}, Low={self.or_low:.2f}, "
-                    f"Width={self.or_high - self.or_low:.2f}"
+                    f"📈 RANGE LOCKED ({self.opening_range_minutes}m) | High={self.or_high:.2f} Low={self.or_low:.2f} Width={self.or_high - self.or_low:.2f}",
+                    extra={"extra": {
+                        "event_type": "range_locked",
+                        "range_minutes": self.opening_range_minutes,
+                        "or_high": self.or_high,
+                        "or_low": self.or_low,
+                        "range_width": self.or_high - self.or_low,
+                        "lock_time_et": str(current_time)
+                    }}
                 )
                 self.save_state()
             else:
                 self.logger.error(
-                    f"❌ RANGE LOCK FAILED at {current_time}: Insufficient data."
+                    f"❌ RANGE LOCK FAILED | Insufficient data at {current_time}",
+                    extra={"extra": {
+                        "event_type": "range_lock_failed",
+                        "lock_time_et": str(current_time),
+                        "reason": "insufficient_data",
+                        "daily_high": self.daily_high,
+                        "daily_low": self.daily_low
+                    }}
                 )
                 self.range_calculated = True
 
@@ -307,6 +334,7 @@ class SPXBaseStrategy(BaseStrategy):
         self.or_high = None
         self.or_low = None
         self.range_calculated = False
+        self._range_tracking_started = False  # Reset so log fires again next day
         self._last_tick_price = None
     
     # =========================================================================
