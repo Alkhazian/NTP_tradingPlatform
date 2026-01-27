@@ -1,5 +1,13 @@
 # TODO
 
+## MUST
+- [ ] Refactor trades storage to separate transation part (orders DB) and view part (trades).
+
+## Nice to have
+
+- [ ] Integrate with exchange_calendars library or maintain a holiday list. Update strategy logic to account for holidays
+
+
 ## New strategies
 - [x] [Options] SPX ORB 15 min long call - search strike using delta value
 - [x] [Options] SPX ORB 15 min long call - search strike using $ value 
@@ -12,9 +20,8 @@
 ## Strategies enhancements
 - [x] Get first SPX option trade working
 - [x] [Options] - check bid/ask spread before posting an order, add a condition for the spread size.
-- [ ] Refactor trades storage to separate transation part (orders DB) and view part (trades).
+- [x] [Options] - for option spread instruments implement a limit order exit, instead of market order. 
 - [ ] Manage open position handling for strategies that trade the same instrument.
-- [ ] [Options] - for option spread instruments implement a limit order exit, instead of market order. E.g. post the order with mid-price as limit price and then increase steadily the limit price until the order is filled
 - [ ] Add Risk Management
     - [ ] Create RiskManager class
     - [ ] Integrate pre-order validation
@@ -36,9 +43,9 @@
     - [ ] Add cross-instrument risk checks
 
 ## UI
-- [ ] [Analytics] Add strategy analytics section: strategy selector, equity curve, statistics. Read data from trades.db
+- [x] [Analytics] Add strategy analytics section: strategy selector, equity curve, statistics. Read data from trades.db
 - [x] [Strategies] Improve logs for strategies on UI. As of now UI reads ony the first 500 lines from app.log. Hence, all logs from the strategy are not displayed
-- [ ] [Strategies] Add unrealized P&L to strategy stats/status
+- [x] [Strategies] Add unrealized P&L to strategy stats/status
 
 ## Backtesting
 - [ ] Create backtesting engine
@@ -50,9 +57,8 @@
 
 ## System
 - [ ] Fix UI status of IB connection. As of now it in not taken into account 
-- [ ] [Logging] Log more nautilus trader events in app.log. For example, issues with IBKR connection are not logged to the app.log
+- [x] [Logging] Log more nautilus trader events in app.log. For example, issues with IBKR connection are not logged to the app.log
 - [x] [Logging] Re-do logging on UI to use API and lazy-loading to search fot the full history. Implement DB storage of logs.
-- [ ] Integrate with exchange_calendars library or maintain a holiday list. Update strategy logic to account for holidays
 - [ ] [Logging] ? Remove custom logger (use inherited Nautilus logger)
 - [ ] Enhanced Configuration
     - [ ] Create strategy-specific config classes
