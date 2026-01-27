@@ -87,6 +87,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._found_legs: Dict[float, Instrument] = {}
         self._spread_entry_price: Optional[float] = None
         self._signal_direction: Optional[str] = None  # 'bearish' or 'bullish'
+        self._closing_in_progress: bool = False  # Prevents duplicate close orders and log spam
         
         # Position monitoring
         self._last_position_log_time: Optional[datetime] = None
@@ -263,9 +264,8 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 self.save_state()
 
         # Skip if already traded or entry in progress
-        # Skip if already traded or entry in progress
         if self.traded_today:
-            self.logger.info(
+            self.logger.debug(
                 f"⏭️ Already traded today | Skipping signal check",
                 extra={
                     "extra": {
@@ -276,7 +276,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             )
             return
         if self.entry_in_progress:
-            self.logger.info(
+            self.logger.debug(
                 f"⏳ Entry already in progress | Skipping signal check",
                 extra={
                     "extra": {
@@ -906,6 +906,10 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
 
     def _manage_open_position(self):
         """Monitor open position for stop loss and take profit."""
+        # Skip if close order already submitted (waiting for fill)
+        if self._closing_in_progress:
+            return
+        
         if self._spread_entry_price is None:
             self.logger.info(
                 "Position management skipped | No entry price recorded",
@@ -1005,8 +1009,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                     }
                 }
             )
+            self._closing_in_progress = True
             self.close_spread_smart()
-            self._spread_entry_price = None
+            # Note: _spread_entry_price is reset in on_order_filled_safe when close is confirmed
             return
 
         # Check TAKE PROFIT (tp_price already calculated above)
@@ -1024,8 +1029,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                     }
                 }
             )
+            self._closing_in_progress = True
             self.close_spread_smart()
-            self._spread_entry_price = None
+            # Note: _spread_entry_price is reset in on_order_filled_safe when close is confirmed
 
     def _poll_cache_for_instruments(self, event):
         """
@@ -1200,6 +1206,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._signal_time = None
         self._signal_close_price = None
         self._last_log_minute = -1
+        self._closing_in_progress = False
         
         self.logger.info(
             f"📅 NEW TRADING DAY: {new_date} | Previous: {old_date} | Range Start: {self.start_time}",
@@ -1224,6 +1231,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             "_target_short_strike": self._target_short_strike,
             "_target_long_strike": self._target_long_strike,
             "_signal_direction": self._signal_direction,
+            "_closing_in_progress": self._closing_in_progress,
         })
         return state
 
@@ -1238,6 +1246,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._target_short_strike = state.get("_target_short_strike")
         self._target_long_strike = state.get("_target_long_strike")
         self._signal_direction = state.get("_signal_direction")
+        self._closing_in_progress = state.get("_closing_in_progress", False)
         
         self.logger.info(
             f"State restored | Range: {self.daily_low}-{self.daily_high} | Calculated: {self.range_calculated} | Traded: {self.traded_today} | Dir: {self._signal_direction}",
@@ -1290,3 +1299,23 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 }
             }
         )
+
+    def on_order_filled_safe(self, event):
+        """Handle order fill events - reset closing state when close order is filled."""
+        # Check if this is a close order fill (we were in closing state)
+        if self._closing_in_progress:
+            # Verify position is now flat (close order was filled)
+            effective_qty = self.get_effective_spread_quantity()
+            if effective_qty == 0:
+                self.logger.info(
+                    "✅ Position close confirmed | Resetting spread state",
+                    extra={
+                        "extra": {
+                            "event_type": "position_close_confirmed",
+                            "previous_entry_price": self._spread_entry_price
+                        }
+                    }
+                )
+                self._spread_entry_price = None
+                self._closing_in_progress = False
+                self.save_state()
