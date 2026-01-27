@@ -210,7 +210,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         et_now = self.clock.utc_now().astimezone(self.tz)
         
         # Log every minute close with full context
-        self.logger.info(
+        # Use DEBUG level if already traded today to reduce log spam
+        log_method = self.logger.debug if self.traded_today else self.logger.info
+        log_method(
             f"⏰ MINUTE CLOSE [{et_now.strftime('%H:%M')}] | Price: {close_price:.2f} | Range: [{self.or_low:.2f}-{self.or_high:.2f}]",
             extra={
                 "extra": {
