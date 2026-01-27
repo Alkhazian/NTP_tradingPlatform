@@ -1,13 +1,21 @@
 # TODO
 
 ## MUST
-- [ ] Refactor trades storage to separate transation part (orders DB) and view part (trades).
+- [ ] Refactor trades storage to separate transation part (orders DB) and view part (trades)
+    - [ ] Create Database for Orders
+    - [ ] Create Database for Trades 
+- [ ] Fix calculation of strategy results based on trades DB
 
 ## Nice to have
 
 - [ ] Integrate with exchange_calendars library or maintain a holiday list. Update strategy logic to account for holidays
-
-
+- [ ] Telegram Bot Notifications:
+    - [ ] Strategy Start: Notify when the strategy becomes active
+    - [ ] Range Confirmation: Notify when the OR is established
+    - [ ] Breakout: Notify upon a range breakout
+    - [ ] Position Entry: Notify when entering a trade
+    - [ ] Position Exit: Notify upon closing the position, including the PnL (Profit and Loss) result
+- [ ] Integrate with IBKR reports
 ## New strategies
 - [x] [Options] SPX ORB 15 min long call - search strike using delta value
 - [x] [Options] SPX ORB 15 min long call - search strike using $ value 
