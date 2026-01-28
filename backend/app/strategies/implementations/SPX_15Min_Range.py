@@ -944,10 +944,17 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         mid = (bid + ask) / 2
         
         # Calculate current P&L
+        # CRITICAL FIX: Use actual held quantity, not config (target) quantity
+        # This handles partial fills correctly so we don't overestimate P&L
+        current_qty = abs(self.get_effective_spread_quantity())
+        if current_qty == 0:
+            # Should not happen if we are here (check in caller), but valid safety
+            return
+
         entry_credit = self._spread_entry_price
         current_cost = abs(mid)  # Cost to buy back
         pnl_per_spread = (entry_credit - current_cost) * 100
-        total_pnl = pnl_per_spread * self.config_quantity
+        total_pnl = pnl_per_spread * current_qty
         
         # Calculate SL/TP prices for logging
         stop_price = -(self._spread_entry_price * self.stop_loss_multiplier)
@@ -981,11 +988,12 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 health = "🔴 LOSS"
             
             self.logger.info(
-                f"📊 POSITION STATUS | {health} | P&L: ${total_pnl:+.2f} | Mid: {mid:.4f} | SL: {stop_price:.4f} | TP: {tp_price:.4f}",
+                f"📊 POSITION STATUS | {health} | Qty: {current_qty:.1f} | P&L: ${total_pnl:+.2f} | Mid: {mid:.4f} | SL: {stop_price:.4f} | TP: {tp_price:.4f}",
                 extra={
                     "extra": {
                         "event_type": "position_status",
                         "health": health,
+                        "quantity": current_qty,
                         "pnl_total": total_pnl,
                         "current_mid": mid,
                         "entry_credit": entry_credit,
@@ -1009,7 +1017,8 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                         "current_mid": mid,
                         "stop_price": stop_price,
                         "pnl": total_pnl,
-                        "entry_credit": entry_credit
+                        "entry_credit": entry_credit,
+                        "quantity": current_qty
                     }
                 }
             )
@@ -1029,7 +1038,8 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                         "current_mid": mid,
                         "tp_price": tp_price,
                         "pnl": total_pnl,
-                        "entry_credit": entry_credit
+                        "entry_credit": entry_credit,
+                        "quantity": current_qty
                     }
                 }
             )
