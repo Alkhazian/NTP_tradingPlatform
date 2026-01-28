@@ -1515,6 +1515,25 @@ class BaseStrategy(Strategy):
 
             # CRITICAL: Clean up tracking sets ONLY if order is fully filled
             # If PARTIALLY_FILLED, we need to keep tracking it for subsequent fills
+            if order and order.status == OrderStatus.PARTIALLY_FILLED:
+                remaining_qty = float(order.quantity) - float(order.filled_qty)
+                self.logger.warning(
+                    f"⚡ PARTIAL FILL | {order_id} | Filled: {event.last_qty} | Total Filled: {order.filled_qty} | Remaining: {remaining_qty:.1f}",
+                    extra={
+                        "extra": {
+                            "event_type": "partial_fill",
+                            "order_id": str(order_id),
+                            "instrument_id": str(order.instrument_id),
+                            "this_fill_qty": float(event.last_qty),
+                            "total_filled_qty": float(order.filled_qty),
+                            "remaining_qty": remaining_qty,
+                            "order_quantity": float(order.quantity),
+                            "fill_price": float(event.last_px),
+                            "is_spread": is_spread_order
+                        }
+                    }
+                )
+            
             if order and order.status == OrderStatus.FILLED:
                 self._pending_entry_orders.discard(order_id)
                 self._pending_exit_orders.discard(order_id)
