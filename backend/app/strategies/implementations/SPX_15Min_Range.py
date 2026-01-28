@@ -37,6 +37,7 @@ from nautilus_trader.model.instruments import Instrument
 
 from app.strategies.base_spx import SPXBaseStrategy
 from app.strategies.config import StrategyConfig
+from app.services.drawdown_recorder import DrawdownRecorder
 
 
 class SPX15MinRangeStrategy(SPXBaseStrategy):
@@ -94,6 +95,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._position_log_interval_seconds: int = 30  # Log position status every N seconds
         self._cache_poll_interval_seconds: int = 2     # Poll cache for instruments every N seconds
         self._required_legs_count: int = 2             # Number of option legs required for spread
+        
+        # Drawdown tracking
+        self._drawdown_recorder = DrawdownRecorder(db_path="data/trade_drawdowns.db")
         
         # Calculate range end time for logging
         range_end_time = "Range Close" # Will be calculated/logged by base
@@ -873,6 +877,13 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             self._spread_entry_price = abs(rounded_mid)  # Store as positive credit amount
             self._signal_time = None
             self._signal_close_price = None
+            
+            # Start drawdown tracking
+            now = self.clock.utc_now().astimezone(self.tz)
+            trade_date = now.strftime("%Y-%m-%d")
+            entry_time = now.strftime("%H:%M:%S")
+            self._drawdown_recorder.start_tracking(trade_date, entry_time)
+            
             self.save_state()
         else:
             # Log why we're not entering yet
@@ -955,6 +966,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         current_cost = abs(mid)  # Cost to buy back
         pnl_per_spread = (entry_credit - current_cost) * 100
         total_pnl = pnl_per_spread * current_qty
+        
+        # Update drawdown tracking with current P&L
+        self._drawdown_recorder.update_drawdown(total_pnl)
         
         # Calculate SL/TP prices for logging
         stop_price = -(self._spread_entry_price * self.stop_loss_multiplier)
@@ -1231,6 +1245,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._last_log_minute = -1
         self._closing_in_progress = False
         
+        # Cancel any orphaned drawdown tracking from previous day
+        self._drawdown_recorder.cancel_tracking()
+        
         self.logger.info(
             f"📅 NEW TRADING DAY: {new_date} | Previous: {old_date} | Range Start: {self.start_time}",
             extra={
@@ -1330,12 +1347,28 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             # Verify position is now flat (close order was filled)
             effective_qty = self.get_effective_spread_quantity()
             if effective_qty == 0:
+                # Calculate final P&L for drawdown record
+                quote = self.cache.quote_tick(self.spread_instrument.id) if self.spread_instrument else None
+                final_pnl = 0.0
+                if quote and self._spread_entry_price:
+                    mid = (quote.bid_price.as_double() + quote.ask_price.as_double()) / 2
+                    entry_credit = self._spread_entry_price
+                    current_cost = abs(mid)
+                    final_pnl = (entry_credit - current_cost) * 100  # P&L per spread (already closed)
+                
+                # Finish drawdown tracking and save record
+                now = self.clock.utc_now().astimezone(self.tz)
+                exit_time = now.strftime("%H:%M:%S")
+                self._drawdown_recorder.finish_tracking(exit_time, final_pnl, strategy_id=str(self.id))
+                
                 self.logger.info(
                     "✅ Position close confirmed | Resetting spread state",
                     extra={
                         "extra": {
                             "event_type": "position_close_confirmed",
-                            "previous_entry_price": self._spread_entry_price
+                            "previous_entry_price": self._spread_entry_price,
+                            "max_drawdown": self._drawdown_recorder.get_current_max_drawdown(),
+                            "final_pnl": final_pnl
                         }
                     }
                 )
