@@ -521,7 +521,7 @@ class SPXBaseStrategy(BaseStrategy):
         
         try:
             self.request_instruments(
-                venue=Venue("InteractiveBrokers"),
+                venue=Venue("CBOE"),
                 params={"ib_contracts": contracts}
             )
             
