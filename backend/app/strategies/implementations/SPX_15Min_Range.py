@@ -689,16 +689,18 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 
                 # Check if we have both legs
                 if len(self._found_legs) >= self._required_legs_count:
-                    self.logger.info(
-                        f"🎯 Both legs found | Creating spread instrument...",
-                        extra={
-                            "extra": {
-                                "event_type": "legs_found_complete",
-                                "found_legs_count": len(self._found_legs)
+                    # Prevent duplicate spread creation requests
+                    if not self._waiting_for_spread and self.spread_id is None:
+                        self.logger.info(
+                            f"🎯 Both legs found | Creating spread instrument...",
+                            extra={
+                                "extra": {
+                                    "event_type": "legs_found_complete",
+                                    "found_legs_count": len(self._found_legs)
+                                }
                             }
-                        }
-                    )
-                    self._create_spread_instrument()
+                        )
+                        self._create_spread_instrument()
                 else:
                     self.logger.info(
                         f"⏳ Waiting for more legs | Found: {len(self._found_legs)}/{self._required_legs_count}",
