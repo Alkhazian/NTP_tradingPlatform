@@ -4,7 +4,7 @@
     "enabled": false,
     "instrument_id": "MESH6.CME",
     "strategy_type": "MesOrbStrategy",
-    "order_size": 1.0,
+    "order_size": 1,
     "parameters": {
         "or_period_minutes": 15,
         "atr_period": 14,

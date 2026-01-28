@@ -8,7 +8,7 @@ class StrategyConfig(BaseModel):
     enabled: bool = Field(True, description="Whether the strategy is currently enabled")
     instrument_id: str = Field(..., description="The instrument ID to trade (e.g., MESH6.CME)")
     strategy_type: str = Field(..., description="The type/class name of the strategy to instantiate")
-    order_size: float = Field(1.0, description="Number of contracts/shares to buy/sell")
+    order_size: int = Field(1, description="Number of contracts/shares to buy/sell")
     
     # Generic parameters container
     parameters: Dict[str, Any] = Field(default_factory=dict, description="Strategy-specific parameters")

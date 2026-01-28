@@ -4,7 +4,7 @@
     "enabled": false,
     "instrument_id": "^SPX.CBOE",
     "strategy_type": "SpxStreamer",
-    "order_size": 1.0,
+    "order_size": 1,
     "parameters": {},
     "redis_url": "redis://redis:6379/0",
     "strategy_id": null,

@@ -4,7 +4,7 @@
     "enabled": false,
     "instrument_id": "MESH6.CME",
     "strategy_type": "MesOrbSimpleStrategy",
-    "order_size": 1.0,
+    "order_size": 1,
     "parameters": {
         "initial_stop_points": 15.0,
         "trailing_stop_points": 30.0,

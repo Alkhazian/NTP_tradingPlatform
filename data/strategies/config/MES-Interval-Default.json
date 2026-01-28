@@ -4,7 +4,7 @@
     "enabled": false,
     "instrument_id": "MESH6.CME",
     "strategy_type": "SimpleIntervalTrader",
-    "order_size": 1.0,
+    "order_size": 1,
     "parameters": {
         "buy_interval_minutes": 5,
         "hold_duration_minutes": 3

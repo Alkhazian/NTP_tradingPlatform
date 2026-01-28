@@ -72,7 +72,7 @@ class Orb15MinLongPutStrategy(SPXBaseStrategy):
         self.take_profit_dollars = float(params.get("take_profit_dollars", 50.0))
         self.max_spread_dollars = float(params.get("max_spread_dollars", 0.2))
         self.cutoff_time_hour = int(params.get("cutoff_time_hour", 15))
-        self.quantity = int(params.get("quantity", 1))
+        self.quantity = int(self.strategy_config.order_size)
         self.selection_delay_seconds = float(params.get("selection_delay_seconds", 5.0))
         
         self.cutoff_time = time(self.cutoff_time_hour, 0)

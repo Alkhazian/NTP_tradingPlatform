@@ -125,7 +125,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         
         # Entry parameters
         self.min_credit_amount = float(params.get("min_credit_amount", 50.0))
-        self.config_quantity = int(params.get("quantity", 2))
+        self.config_quantity = int(self.strategy_config.order_size)
         self.strike_width = int(params.get("strike_width", 5))
         
         # Risk management
