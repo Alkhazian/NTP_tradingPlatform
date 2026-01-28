@@ -1023,6 +1023,11 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 }
             )
             self._closing_in_progress = True
+            
+            # CRITICAL SAFETY: Cancel any lingering entry orders (e.g. partial fills)
+            # preventing them from filling AFTER we decided to close.
+            self.cancel_all_orders(self.spread_instrument.id)
+            
             self.close_spread_smart()
             # Note: _spread_entry_price is reset in on_order_filled_safe when close is confirmed
             return
@@ -1044,6 +1049,10 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 }
             )
             self._closing_in_progress = True
+            
+            # CRITICAL SAFETY: Cancel any lingering entry orders
+            self.cancel_all_orders(self.spread_instrument.id)
+
             self.close_spread_smart()
             # Note: _spread_entry_price is reset in on_order_filled_safe when close is confirmed
 
