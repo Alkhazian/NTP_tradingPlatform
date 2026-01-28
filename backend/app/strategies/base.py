@@ -1438,16 +1438,12 @@ class BaseStrategy(Strategy):
         """Handle order fill - update tracking and record trade."""
         try:
             order_id = event.client_order_id
-            is_spread_order = order_id in self._pending_spread_orders
             
             # Determine if entry or exit based on our tracking
+            # CRITICAL FIX: Do NOT discard here yet! Only discard if status is FILLED.
             is_entry = order_id in self._pending_entry_orders
             is_exit = order_id in self._pending_exit_orders
-            
-            # Remove from pending
-            self._pending_entry_orders.discard(order_id)
-            self._pending_exit_orders.discard(order_id)
-            self._pending_spread_orders.discard(order_id)
+            is_spread_order = order_id in self._pending_spread_orders
             
             # Get order from cache to verify status
             order = self.cache.order(order_id)
@@ -1516,6 +1512,24 @@ class BaseStrategy(Strategy):
             # Save state for non-entry/exit fills (e.g., spread fills, other order types)
             if not is_entry and not is_exit:
                 self.save_state()
+
+            # CRITICAL: Clean up tracking sets ONLY if order is fully filled
+            # If PARTIALLY_FILLED, we need to keep tracking it for subsequent fills
+            if order and order.status == OrderStatus.FILLED:
+                self._pending_entry_orders.discard(order_id)
+                self._pending_exit_orders.discard(order_id)
+                self._pending_spread_orders.discard(order_id)
+                
+                self.logger.info(
+                    f"🏁 Order fully filled | Tracking cleaned up | ID: {order_id}",
+                    extra={
+                        "extra": {
+                            "event_type": "tracking_cleanup",
+                            "order_id": str(order_id),
+                            "status": "FILLED"
+                        }
+                    }
+                )
             
         except Exception as e:
             self.on_unexpected_error(e)
