@@ -1161,6 +1161,22 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 self.clock.cancel_timer(f"{self.id}_cache_poll")
             except Exception:
                 pass
+            
+            # Guard against duplicate spread creation (same check as in on_instrument)
+            if self._waiting_for_spread or self.spread_id is not None:
+                self.logger.info(
+                    f"⏭️ Spread already being created | Skipping duplicate creation from cache poll",
+                    extra={
+                        "extra": {
+                            "event_type": "spread_creation_skipped",
+                            "reason": "already_in_progress",
+                            "waiting_for_spread": self._waiting_for_spread,
+                            "spread_id": str(self.spread_id) if self.spread_id else None
+                        }
+                    }
+                )
+                return
+            
             # Create spread
             self._create_spread_instrument()
             return
