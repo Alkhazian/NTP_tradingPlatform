@@ -218,213 +218,347 @@ export default function Analytics() {
         return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(val);
     };
 
+    // Report State
+    const [activeView, setActiveView] = useState<'stats' | 'reports'>('stats');
+    const [reportType, setReportType] = useState<string>('fills');
+    const [reportData, setReportData] = useState<any[]>([]);
+    const [reportLoading, setReportLoading] = useState(false);
+
+    // Fetch Report Data
+    useEffect(() => {
+        if (activeView !== 'reports') return;
+
+        setReportLoading(true);
+        fetch(getUrl(`/analytics/reports/${reportType}`))
+            .then(res => res.json())
+            .then(data => {
+                setReportData(Array.isArray(data) ? data : []);
+            })
+            .catch(console.error)
+            .finally(() => setReportLoading(false));
+    }, [activeView, reportType]);
+
+    // Format Report Value
+    const formatReportValue = (key: string, value: any) => {
+        if (value === null || value === undefined) return '-';
+
+        // Handle timestamps identified by key
+        if (key.toLowerCase().includes('time') || key.toLowerCase().includes('ts')) {
+            let dateVal = value;
+
+            // If it's a number, check if it's nanoseconds (Nautilus standard) or milliseconds
+            if (typeof value === 'number') {
+                if (value > 1e12) {
+                    dateVal = value / 1_000_000; // Nanoseconds to Milliseconds
+                }
+            }
+
+            const date = new Date(dateVal);
+            if (!isNaN(date.getTime())) {
+                return date.toLocaleString();
+            }
+            // Fallback for weird strings
+            return String(value);
+        }
+
+        if (typeof value === 'number') {
+            if (key.toLowerCase().includes('price') || key.toLowerCase().includes('cost') || key.toLowerCase().includes('pnl') || key.toLowerCase().includes('commission')) {
+                return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value);
+            }
+            return value.toLocaleString();
+        }
+        return String(value);
+    };
+
     return (
         <div className="space-y-6 animate-in fade-in duration-500 pb-10">
             {/* Header / Strategy Selector */}
             <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-                <div className="flex items-center gap-2 bg-black/40 p-1.5 rounded-lg border border-white/10">
-                    <span className="text-sm font-medium px-2 text-white/60">Strategy:</span>
-                    <select
-                        value={selectedStrategy}
-                        onChange={(e) => setSelectedStrategy(e.target.value)}
-                        className="bg-transparent text-white font-mono text-sm focus:outline-none min-w-[200px] [&>option]:bg-zinc-900"
-                        disabled={isLoading}
-                    >
-                        {strategies.map(s => (
-                            <option key={s.id} value={s.id}>{s.id}</option>
-                        ))}
-                    </select>
-                    {isLoading && <Activity className="w-4 h-4 animate-spin text-white/40" />}
+                <div className="flex items-center gap-4">
+                    {/* View Toggle */}
+                    <div className="flex p-1 bg-black/40 rounded-lg border border-white/10">
+                        <button
+                            onClick={() => setActiveView('stats')}
+                            className={`px-3 py-1 text-sm font-medium rounded-md transition-all ${activeView === 'stats' ? 'bg-white/10 text-white' : 'text-muted-foreground hover:text-white'}`}
+                        >
+                            Strategy Stats
+                        </button>
+                        <button
+                            onClick={() => setActiveView('reports')}
+                            className={`px-3 py-1 text-sm font-medium rounded-md transition-all ${activeView === 'reports' ? 'bg-white/10 text-white' : 'text-muted-foreground hover:text-white'}`}
+                        >
+                            Reports
+                        </button>
+                    </div>
+
+                    {activeView === 'stats' ? (
+                        <div className="flex items-center gap-2 bg-black/40 p-1.5 rounded-lg border border-white/10">
+                            <span className="text-sm font-medium px-2 text-white/60">Strategy:</span>
+                            <select
+                                value={selectedStrategy}
+                                onChange={(e) => setSelectedStrategy(e.target.value)}
+                                className="bg-transparent text-white font-mono text-sm focus:outline-none min-w-[200px] [&>option]:bg-zinc-900"
+                                disabled={isLoading}
+                            >
+                                {strategies.map(s => (
+                                    <option key={s.id} value={s.id}>{s.id}</option>
+                                ))}
+                            </select>
+                            {isLoading && <Activity className="w-4 h-4 animate-spin text-white/40" />}
+                        </div>
+                    ) : (
+                        <div className="flex items-center gap-2 bg-black/40 p-1.5 rounded-lg border border-white/10">
+                            <span className="text-sm font-medium px-2 text-white/60">Report:</span>
+                            <select
+                                value={reportType}
+                                onChange={(e) => setReportType(e.target.value)}
+                                className="bg-transparent text-white font-mono text-sm focus:outline-none min-w-[150px] [&>option]:bg-zinc-900"
+                                disabled={reportLoading}
+                            >
+                                <option value="fills">Fills</option>
+                                <option value="orders">Orders</option>
+                                <option value="positions">Positions</option>
+                            </select>
+                            {reportLoading && <Activity className="w-4 h-4 animate-spin text-white/40" />}
+                        </div>
+                    )}
                 </div>
             </div>
 
-            {/* Stats Cards */}
-            {stats && (
-                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-                    <StatsCard
-                        title="Net PnL"
-                        value={formatCurrency(stats.net_pnl)}
-                        icon={<DollarSign className="w-4 h-4" />}
-                        trend={stats.net_pnl >= 0 ? 'up' : 'down'}
-                    />
-                    <StatsCard
-                        title="Total Trades"
-                        value={stats.total_trades.toString()}
-                        icon={<Activity className="w-4 h-4 text-blue-400" />}
-                    />
-                    <StatsCard
-                        title="Win Rate"
-                        value={`${stats.win_rate}%`}
-                        icon={<Percent className="w-4 h-4" />}
-                    />
-                    <StatsCard
-                        title="Max Win"
-                        value={formatCurrency(stats.max_win)}
-                        icon={<TrendingUp className="w-4 h-4 text-emerald-400" />}
-                        trend="up"
-                        className="border-emerald-500/20"
-                    />
-                    <StatsCard
-                        title="Max Loss"
-                        value={formatCurrency(stats.max_loss)}
-                        icon={<TrendingDown className="w-4 h-4 text-red-400" />}
-                        trend="down"
-                        className="border-red-500/20"
-                    />
-                    <StatsCard
-                        title="Total Comm."
-                        value={formatCurrency(stats.total_commission)}
-                        icon={<Activity className="w-4 h-4 text-orange-400" />}
-                    />
-                </div>
-            )}
-
-            {/* Equity Graph */}
-            <Card variant="glass" className="p-1">
-                <CardHeader className="pb-2">
-                    <CardTitle className="text-lg flex items-center gap-2">
-                        <TrendingUp className="w-5 h-5 text-emerald-400" />
-                        Equity Curve
-                    </CardTitle>
-                </CardHeader>
-                <CardContent>
-                    <div ref={chartContainerRef} className="w-full h-[300px]" />
-                </CardContent>
-            </Card>
-
-            {/* Trade List */}
-            <Card variant="glass">
-                <CardHeader className="flex flex-row items-center justify-between">
-                    <CardTitle className="text-lg">Trade History</CardTitle>
-                    <div className="flex items-center gap-2">
-                        <button
-                            onClick={() => setShowFilters(!showFilters)}
-                            className={`p-2 rounded-md transition-colors ${showFilters ? 'bg-white/10 text-white' : 'text-muted-foreground hover:bg-white/5'}`}
-                        >
-                            <Filter className="w-4 h-4" />
-                        </button>
-                    </div>
-                </CardHeader>
-
-                {showFilters && (
-                    <div className="px-6 pb-4 flex gap-4 border-b border-white/5">
-                        <div className="flex flex-col gap-1">
-                            <label className="text-xs text-muted-foreground">Result</label>
-                            <select
-                                value={filterResult}
-                                onChange={(e) => setFilterResult(e.target.value)}
-                                className="bg-black/20 border border-white/10 rounded px-2 py-1 text-sm text-white"
-                            >
-                                <option value="ALL">All Outcomes</option>
-                                <option value="WIN">Win</option>
-                                <option value="LOSS">Loss</option>
-                            </select>
+            {activeView === 'stats' ? (
+                <>
+                    {/* Stats Cards */}
+                    {stats && (
+                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+                            <StatsCard
+                                title="Net PnL"
+                                value={formatCurrency(stats.net_pnl)}
+                                icon={<DollarSign className="w-4 h-4" />}
+                                trend={stats.net_pnl >= 0 ? 'up' : 'down'}
+                            />
+                            <StatsCard
+                                title="Total Trades"
+                                value={stats.total_trades.toString()}
+                                icon={<Activity className="w-4 h-4 text-blue-400" />}
+                            />
+                            <StatsCard
+                                title="Win Rate"
+                                value={`${stats.win_rate}%`}
+                                icon={<Percent className="w-4 h-4" />}
+                            />
+                            <StatsCard
+                                title="Max Win"
+                                value={formatCurrency(stats.max_win)}
+                                icon={<TrendingUp className="w-4 h-4 text-emerald-400" />}
+                                trend="up"
+                                className="border-emerald-500/20"
+                            />
+                            <StatsCard
+                                title="Max Loss"
+                                value={formatCurrency(stats.max_loss)}
+                                icon={<TrendingDown className="w-4 h-4 text-red-400" />}
+                                trend="down"
+                                className="border-red-500/20"
+                            />
+                            <StatsCard
+                                title="Total Comm."
+                                value={formatCurrency(stats.total_commission)}
+                                icon={<Activity className="w-4 h-4 text-orange-400" />}
+                            />
                         </div>
-                    </div>
-                )}
+                    )}
 
-                <CardContent className="p-0">
-                    <div className="overflow-x-auto">
-                        <table className="w-full text-sm text-left">
-                            <thead className="bg-white/5 text-muted-foreground font-medium uppercase text-xs">
-                                <tr>
-                                    <th className="px-4 py-3 cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('entry_time')}>
-                                        <div className="flex items-center gap-1">Time {sortConfig.key === 'entry_time' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
-                                    </th>
-                                    <th className="px-4 py-3 cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('instrument_id')}>
-                                        <div className="flex items-center gap-1">Symbol {sortConfig.key === 'instrument_id' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
-                                    </th>
-                                    <th className="px-4 py-3 cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('direction')}>
-                                        <div className="flex items-center gap-1">Side {sortConfig.key === 'direction' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
-                                    </th>
-                                    <th className="px-4 py-3 text-right cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('entry_price')}>
-                                        <div className="flex items-center justify-end gap-1">Entry {sortConfig.key === 'entry_price' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
-                                    </th>
-                                    <th className="px-4 py-3 text-right cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('exit_price')}>
-                                        <div className="flex items-center justify-end gap-1">Exit {sortConfig.key === 'exit_price' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
-                                    </th>
-                                    <th className="px-4 py-3 text-right cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('net_pnl')}>
-                                        <div className="flex items-center justify-end gap-1">PnL (Net) {sortConfig.key === 'net_pnl' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
-                                    </th>
-                                    <th className="px-4 py-3 cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('exit_reason')}>
-                                        <div className="flex items-center gap-1">Exit Reason {sortConfig.key === 'exit_reason' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
-                                    </th>
-                                    <th className="px-4 py-3 text-center cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('result')}>
-                                        <div className="flex items-center justify-center gap-1">Result {sortConfig.key === 'result' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
-                                    </th>
-                                </tr>
-                            </thead>
-                            <tbody className="divide-y divide-white/5">
-                                {sortedTrades.map((trade) => {
-                                    const netPnl = (trade.pnl || 0) - (trade.commission || 0);
-                                    const isWin = netPnl > 0;
+                    {/* Equity Graph */}
+                    <Card variant="glass" className="p-1">
+                        <CardHeader className="pb-2">
+                            <CardTitle className="text-lg flex items-center gap-2">
+                                <TrendingUp className="w-5 h-5 text-emerald-400" />
+                                Equity Curve
+                            </CardTitle>
+                        </CardHeader>
+                        <CardContent>
+                            <div ref={chartContainerRef} className="w-full h-[300px]" />
+                        </CardContent>
+                    </Card>
 
-                                    return (
-                                        <tr key={trade.id} className="hover:bg-white/5 transition-colors">
-                                            <td className="px-4 py-3 font-mono text-xs text-white/60">
-                                                {new Date(trade.entry_time).toLocaleString()}
-                                            </td>
-                                            <td className="px-4 py-3 font-medium text-white/90">
-                                                {trade.instrument_id.split('=')[0]}
-                                                <span className="text-xs text-muted-foreground ml-1 opacity-50">
-                                                    {trade.instrument_id.split('.')[1]}
-                                                </span>
-                                            </td>
-                                            <td className="px-4 py-3">
-                                                <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${trade.direction === 'BUY'
-                                                    ? 'bg-orange-500/10 text-orange-400'
-                                                    : 'bg-blue-500/10 text-blue-400'
-                                                    }`}>
-                                                    {trade.direction}
-                                                </span>
-                                            </td>
-                                            <td className="px-4 py-3 text-right font-mono">
-                                                {trade.entry_price.toFixed(2)}
-                                            </td>
-                                            <td className="px-4 py-3 text-right font-mono text-white/60">
-                                                {trade.exit_price !== null ? trade.exit_price.toFixed(2) : '-'}
-                                            </td>
-                                            <td className={`px-4 py-3 text-right font-mono font-medium ${isWin ? 'text-emerald-400' : (netPnl < 0 ? 'text-red-400' : 'text-gray-400')
-                                                }`}>
-                                                {netPnl !== 0 ? (isWin ? '+' : '') + formatCurrency(netPnl) : '-'}
-                                            </td>
-                                            <td className="px-4 py-3">
-                                                {trade.exit_reason ? (
-                                                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-white/5 text-white/80">
-                                                        {trade.exit_reason}
-                                                    </span>
-                                                ) : (
-                                                    <span className="text-white/20">-</span>
-                                                )}
-                                            </td>
-                                            <td className="px-4 py-3 text-center">
-                                                {trade.result ? (
-                                                    <span className={`inline-flex items-center gap-1 text-xs ${trade.result === 'WIN' ? 'text-emerald-400' :
-                                                        trade.result === 'LOSS' ? 'text-red-400' : 'text-yellow-400'
+                    {/* Trade List */}
+                    <Card variant="glass">
+                        <CardHeader className="flex flex-row items-center justify-between">
+                            <CardTitle className="text-lg">Trade History</CardTitle>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={() => setShowFilters(!showFilters)}
+                                    className={`p-2 rounded-md transition-colors ${showFilters ? 'bg-white/10 text-white' : 'text-muted-foreground hover:bg-white/5'}`}
+                                >
+                                    <Filter className="w-4 h-4" />
+                                </button>
+                            </div>
+                        </CardHeader>
+
+                        {showFilters && (
+                            <div className="px-6 pb-4 flex gap-4 border-b border-white/5">
+                                <div className="flex flex-col gap-1">
+                                    <label className="text-xs text-muted-foreground">Result</label>
+                                    <select
+                                        value={filterResult}
+                                        onChange={(e) => setFilterResult(e.target.value)}
+                                        className="bg-black/20 border border-white/10 rounded px-2 py-1 text-sm text-white"
+                                    >
+                                        <option value="ALL">All Outcomes</option>
+                                        <option value="WIN">Win</option>
+                                        <option value="LOSS">Loss</option>
+                                    </select>
+                                </div>
+                            </div>
+                        )}
+
+                        <CardContent className="p-0">
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm text-left">
+                                    <thead className="bg-white/5 text-muted-foreground font-medium uppercase text-xs">
+                                        <tr>
+                                            <th className="px-4 py-3 cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('entry_time')}>
+                                                <div className="flex items-center gap-1">Time {sortConfig.key === 'entry_time' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
+                                            </th>
+                                            <th className="px-4 py-3 cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('instrument_id')}>
+                                                <div className="flex items-center gap-1">Symbol {sortConfig.key === 'instrument_id' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
+                                            </th>
+                                            <th className="px-4 py-3 cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('direction')}>
+                                                <div className="flex items-center gap-1">Side {sortConfig.key === 'direction' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
+                                            </th>
+                                            <th className="px-4 py-3 text-right cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('entry_price')}>
+                                                <div className="flex items-center justify-end gap-1">Entry {sortConfig.key === 'entry_price' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
+                                            </th>
+                                            <th className="px-4 py-3 text-right cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('exit_price')}>
+                                                <div className="flex items-center justify-end gap-1">Exit {sortConfig.key === 'exit_price' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
+                                            </th>
+                                            <th className="px-4 py-3 text-right cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('net_pnl')}>
+                                                <div className="flex items-center justify-end gap-1">PnL (Net) {sortConfig.key === 'net_pnl' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
+                                            </th>
+                                            <th className="px-4 py-3 cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('exit_reason')}>
+                                                <div className="flex items-center gap-1">Exit Reason {sortConfig.key === 'exit_reason' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
+                                            </th>
+                                            <th className="px-4 py-3 text-center cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('result')}>
+                                                <div className="flex items-center justify-center gap-1">Result {sortConfig.key === 'result' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
+                                            </th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-white/5">
+                                        {sortedTrades.map((trade) => {
+                                            const netPnl = (trade.pnl || 0) - (trade.commission || 0);
+                                            const isWin = netPnl > 0;
+
+                                            return (
+                                                <tr key={trade.id} className="hover:bg-white/5 transition-colors">
+                                                    <td className="px-4 py-3 font-mono text-xs text-white/60">
+                                                        {new Date(trade.entry_time).toLocaleString()}
+                                                    </td>
+                                                    <td className="px-4 py-3 font-medium text-white/90">
+                                                        {trade.instrument_id.split('=')[0]}
+                                                        <span className="text-xs text-muted-foreground ml-1 opacity-50">
+                                                            {trade.instrument_id.split('.')[1]}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${trade.direction === 'BUY'
+                                                            ? 'bg-orange-500/10 text-orange-400'
+                                                            : 'bg-blue-500/10 text-blue-400'
+                                                            }`}>
+                                                            {trade.direction}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-right font-mono">
+                                                        {trade.entry_price.toFixed(2)}
+                                                    </td>
+                                                    <td className="px-4 py-3 text-right font-mono text-white/60">
+                                                        {trade.exit_price !== null ? trade.exit_price.toFixed(2) : '-'}
+                                                    </td>
+                                                    <td className={`px-4 py-3 text-right font-mono font-medium ${isWin ? 'text-emerald-400' : (netPnl < 0 ? 'text-red-400' : 'text-gray-400')
                                                         }`}>
-                                                        {trade.result === 'WIN' ? <ArrowUpRight className="w-3 h-3" /> :
-                                                            trade.result === 'LOSS' ? <ArrowDownRight className="w-3 h-3" /> : null}
-                                                        {trade.result}
-                                                    </span>
-                                                ) : (
-                                                    <span className="text-white/20">-</span>
-                                                )}
+                                                        {netPnl !== 0 ? (isWin ? '+' : '') + formatCurrency(netPnl) : '-'}
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        {trade.exit_reason ? (
+                                                            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-white/5 text-white/80">
+                                                                {trade.exit_reason}
+                                                            </span>
+                                                        ) : (
+                                                            <span className="text-white/20">-</span>
+                                                        )}
+                                                    </td>
+                                                    <td className="px-4 py-3 text-center">
+                                                        {trade.result ? (
+                                                            <span className={`inline-flex items-center gap-1 text-xs ${trade.result === 'WIN' ? 'text-emerald-400' :
+                                                                trade.result === 'LOSS' ? 'text-red-400' : 'text-yellow-400'
+                                                                }`}>
+                                                                {trade.result === 'WIN' ? <ArrowUpRight className="w-3 h-3" /> :
+                                                                    trade.result === 'LOSS' ? <ArrowDownRight className="w-3 h-3" /> : null}
+                                                                {trade.result}
+                                                            </span>
+                                                        ) : (
+                                                            <span className="text-white/20">-</span>
+                                                        )}
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                        {sortedTrades.length === 0 && (
+                                            <tr>
+                                                <td colSpan={8} className="px-4 py-8 text-center text-muted-foreground italic">
+                                                    No trades found for this strategy.
+                                                </td>
+                                            </tr>
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </CardContent>
+                    </Card>
+                </>
+            ) : (
+                <Card variant="glass">
+                    <CardHeader className="flex flex-row items-center justify-between">
+                        <CardTitle className="text-lg capitalize">{reportType} Report</CardTitle>
+                        <div className="text-xs text-muted-foreground">Generated from live cache</div>
+                    </CardHeader>
+                    <CardContent className="p-0">
+                        <div className="overflow-x-auto max-w-[calc(100vw-300px)]">
+                            <table className="w-full text-sm text-left">
+                                <thead className="bg-white/5 text-muted-foreground font-medium uppercase text-xs">
+                                    <tr>
+                                        {reportData.length > 0 ? (
+                                            Object.keys(reportData[0]).map(key => (
+                                                <th key={key} className="px-4 py-3 whitespace-nowrap">{key.replace(/_/g, ' ')}</th>
+                                            ))
+                                        ) : (
+                                            <th className="px-4 py-3">No Data</th>
+                                        )}
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-white/5">
+                                    {reportData.length > 0 ? (
+                                        reportData.map((row, i) => (
+                                            <tr key={i} className="hover:bg-white/5 transition-colors">
+                                                {Object.entries(row).map(([key, val], idx) => (
+                                                    <td key={idx} className="px-4 py-3 whitespace-nowrap text-xs font-mono text-white/80">
+                                                        {formatReportValue(key, val)}
+                                                    </td>
+                                                ))}
+                                            </tr>
+                                        ))
+                                    ) : (
+                                        <tr>
+                                            <td className="px-4 py-8 text-center text-muted-foreground">
+                                                No data available for this report type.
                                             </td>
                                         </tr>
-                                    );
-                                })}
-                                {sortedTrades.length === 0 && (
-                                    <tr>
-                                        <td colSpan={8} className="px-4 py-8 text-center text-muted-foreground italic">
-                                            No trades found for this strategy.
-                                        </td>
-                                    </tr>
-                                )}
-                            </tbody>
-                        </table>
-                    </div>
-                </CardContent>
-            </Card>
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </CardContent>
+                </Card>
+            )}
         </div>
     );
 }

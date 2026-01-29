@@ -17,7 +17,10 @@ from .adapters.custom_ib import CustomInteractiveBrokersLiveDataClientFactory
 from .actors.spx_streamer import SpxStreamer, SpxStreamerConfig
 from nautilus_trader.config import (
     TradingNodeConfig,
-    RoutingConfig
+    RoutingConfig,
+    CacheConfig,
+    MessageBusConfig,
+    DatabaseConfig
 )
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import AccountId, Venue, Symbol
@@ -156,9 +159,24 @@ class NautilusManager:
             )
 
 
+            # Redis Configuration
+            redis_config = DatabaseConfig(
+                type="redis",
+                host=os.getenv("REDIS_HOST", "redis"),
+                port=int(os.getenv("REDIS_PORT", "6379")),
+            )
 
-            # Create TradingNode configuration
             config = TradingNodeConfig(
+                # Enable Object Cache (Orders, Positions)
+                cache=CacheConfig(
+                    database=redis_config,
+                    timestamps_as_iso8601=True,
+                ),
+                # Enable Message Bus (UI Streaming)
+                message_bus=MessageBusConfig(
+                    database=redis_config,
+                    stream_per_topic=True,
+                ),
                 data_clients={
                     "CME": ib_data_config,
                     "CBOE": ib_data_config,
@@ -734,6 +752,190 @@ class NautilusManager:
             "strategies": strategies,
         }
 
+    async def get_generated_report(self, report_type: str = "fills") -> list:
+        """
+        Generate a report from the current cache using NautilusTrader's ReportProvider.
+        """
+        if not self.node:
+            return []
+            
+        try:
+            # Import on demand to avoid circular deps if any, though likely fine at top
+            from nautilus_trader.analysis.reporter import ReportProvider
+            import pandas as pd
+            import numpy as np
+
+            df = None
+            
+            trader = self.node.trader
+            
+            if report_type == "fills":
+                # Recommended helper method
+                df = trader.generate_fills_report()
+                if df.empty:
+                    # Fallback to order fills if fills is empty
+                    df = trader.generate_order_fills_report()
+            
+            elif report_type == "orders":
+                df = trader.generate_orders_report()
+            
+            elif report_type == "positions":
+                # Recommended for netting OMS as it includes snapshots
+                df = trader.generate_positions_report()
+                    
+                
+            if df is not None and not df.empty:
+                # Sanitize for JSON: Replace NaN/Infinity with None
+                df = df.replace({np.nan: None, np.inf: None, -np.inf: None})
+                
+                # Convert Nautilus Objects and Timestamps to JSON friendly types
+                def sanitize_value(val):
+                    import math
+                    
+                    # Check for None first
+                    if val is None:
+                        return None
+                    
+                    # Check for NaN using pandas (handles both numpy and python floats)
+                    try:
+                        if pd.isna(val):
+                            return None
+                    except (TypeError, ValueError):
+                        pass
+                    
+                    # Additional NaN check for regular floats
+                    if isinstance(val, float):
+                        if math.isnan(val) or math.isinf(val):
+                            return None
+                    
+                    val_type_str = str(type(val))
+                    
+                    # Handle NautilusTrader custom types
+                    if "nautilus_trader" in val_type_str:
+                        # Price and Quantity -> float (use as_double() method if available)
+                        if "Price" in val_type_str or "Quantity" in val_type_str:
+                            try:
+                                if hasattr(val, 'as_double'):
+                                    result = val.as_double()
+                                    # Check if result is NaN
+                                    if isinstance(result, float) and (math.isnan(result) or math.isinf(result)):
+                                        return None
+                                    return result
+                                else:
+                                    result = float(val)
+                                    if math.isnan(result) or math.isinf(result):
+                                        return None
+                                    return result
+                            except Exception:
+                                return str(val)
+                        # Timestamps -> ISO string
+                        if "Timestamp" in val_type_str:
+                            try:
+                                return val.isoformat()
+                            except Exception:
+                                return str(val)
+                        # Other types (Venue, AccountType, etc) -> string
+                        return str(val)
+                    
+                    # Handle standard datetime objects
+                    if hasattr(val, 'isoformat'):
+                        try:
+                            return val.isoformat()
+                        except Exception:
+                            return str(val)
+                        
+                    return val
+
+                # Apply sanitization to every cell in the dataframe
+                # This is safer than column-wise checks which can miss objects
+                for col in df.columns:
+                    df[col] = df[col].apply(sanitize_value)
+                    
+                    # Extra heuristic: if column name contains "time" or "ts" 
+                    # and it's still numeric, it might be nanoseconds
+                    col_lower = col.lower()
+                    if ("time" in col_lower or "ts" in col_lower) and df[col].dtype in [np.int64, np.float64]:
+                        def format_numeric_ts(x):
+                            if x is None or pd.isna(x): return None
+                            if x > 1e15: # Nanoseconds
+                                return pd.to_datetime(x, unit='ns').isoformat()
+                            if x > 1e12: # Milliseconds
+                                return pd.to_datetime(x, unit='ms').isoformat()
+                            return x
+                        df[col] = df[col].apply(format_numeric_ts)
+
+                # Convert to dict
+                records = df.to_dict('records')
+                
+                # Final deep sanitization pass to catch any remaining NaN values and Nautilus objects
+                def deep_sanitize(obj):
+                    """Recursively sanitize nested structures to remove NaN/Inf values and convert Nautilus objects"""
+                    import math
+                    
+                    if obj is None:
+                        return None
+                    
+                    # Check for Nautilus objects first (before type checks)
+                    obj_type_str = str(type(obj))
+                    if "nautilus_trader" in obj_type_str:
+                        # Handle Price and Quantity objects
+                        if "Price" in obj_type_str or "Quantity" in obj_type_str:
+                            try:
+                                if hasattr(obj, 'as_double'):
+                                    result = obj.as_double()
+                                    # Check if result is NaN/Inf
+                                    if isinstance(result, float) and (math.isnan(result) or math.isinf(result)):
+                                        return None
+                                    return result
+                                else:
+                                    result = float(obj)
+                                    if math.isnan(result) or math.isinf(result):
+                                        return None
+                                    return result
+                            except Exception:
+                                return str(obj)
+                        
+                        # Handle Timestamp objects
+                        if "Timestamp" in obj_type_str:
+                            try:
+                                return obj.isoformat()
+                            except Exception:
+                                return str(obj)
+                        
+                        # All other Nautilus types -> string
+                        return str(obj)
+                    
+                    # Check for NaN/Inf in floats
+                    if isinstance(obj, float):
+                        if math.isnan(obj) or math.isinf(obj):
+                            return None
+                        return obj
+                    
+                    # Handle datetime objects
+                    if hasattr(obj, 'isoformat'):
+                        try:
+                            return obj.isoformat()
+                        except Exception:
+                            return str(obj)
+                    
+                    # Recursively sanitize dicts
+                    if isinstance(obj, dict):
+                        return {k: deep_sanitize(v) for k, v in obj.items()}
+                    
+                    # Recursively sanitize lists
+                    if isinstance(obj, list):
+                        return [deep_sanitize(item) for item in obj]
+                    
+                    return obj
+                
+                return deep_sanitize(records)
+            
+            return []
+            
+        except Exception as e:
+            logger.error(f"Error generating {report_type} report: {e}", exc_info=True)
+            return []
+        
     async def update_status(self):
         """Update account state and connection health check"""
         if self.node:

@@ -32,6 +32,13 @@ class RedisManager:
             return pubsub
         return None
 
+    async def psubscribe(self, *patterns: str):
+        if self.redis:
+            pubsub = self.redis.pubsub()
+            await pubsub.psubscribe(*patterns)
+            return pubsub
+        return None
+
     async def close(self):
         if self.redis:
             await self.redis.close()

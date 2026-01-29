@@ -102,6 +102,9 @@ IB_HOST = os.getenv("IB_GATEWAY_HOST", "ib-gateway")
 IB_PORT = int(os.getenv("IB_GATEWAY_PORT", "4002"))
 nautilus_manager = NautilusManager(host=IB_HOST, port=IB_PORT)
 
+# Event to trigger immediate status updates
+update_trigger = asyncio.Event()
+
 @app.on_event("startup")
 async def startup_event():
     await redis_manager.connect()
@@ -116,12 +119,45 @@ async def startup_event():
             
     asyncio.create_task(start_nautilus())
     asyncio.create_task(broadcast_status())
+    asyncio.create_task(nautilus_event_listener())
 
 @app.on_event("shutdown")
 async def shutdown_event():
     logger.info("Shutting down NautilusTrader...")
     await nautilus_manager.stop()
     await redis_manager.close()
+
+async def nautilus_event_listener():
+    """Listen for NautilusTrader events on Redis and trigger UI updates"""
+    while True:
+        try:
+            if not redis_manager.redis:
+                await asyncio.sleep(1)
+                continue
+                
+            # Subscribe to all keys (or specific Nautilus patterns)
+            # Nautilus usually publishes to capitalized class names e.g. "OrderFilled", "PositionChanged"
+            # We listen to everything to be sure we catch state changes
+            pubsub = await redis_manager.psubscribe("*")
+            if not pubsub:
+                await asyncio.sleep(1)
+                continue
+                
+            logger.info("Started listening for Nautilus events on Redis...")
+            
+            async for message in pubsub.listen():
+                if message["type"] == "pmessage":
+                    channel = message["channel"]
+                    # Ignore our own system_status channel to prevent loops
+                    if channel == "system_status" or channel == "spx_stream_price":
+                        continue
+                        
+                    # logger.info(f"Received Redis event on {channel}, triggering update...")
+                    update_trigger.set()
+                    
+        except Exception as e:
+            logger.error(f"Error in event listener: {e}")
+            await asyncio.sleep(5)
 
 async def broadcast_status():
     while True:
@@ -148,7 +184,21 @@ async def broadcast_status():
         except Exception as e:
             logger.error(f"Error in broadcast loop: {e}")
         
-        await asyncio.sleep(30)
+        # Wait for trigger OR 30 seconds (Heartbeat)
+        try:
+            # Debounce: If triggered, wait at least 500ms to aggregate multiple rapid events
+            # But here we just wait for the next trigger
+            await asyncio.wait_for(update_trigger.wait(), timeout=30.0)
+            
+            # If we woke up due to trigger, verify it's not a spam loop
+            # and maybe debounce slightly if needed.
+            # Simple debounce: wait 200ms and clear trigger
+            await asyncio.sleep(0.2) 
+            update_trigger.clear()
+            
+        except asyncio.TimeoutError:
+            # Timeout reached, run loop again (Heartbeat)
+            pass
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -360,4 +410,19 @@ async def stop_spx_stream():
         return {"status": "stopped", "id": id}
     except Exception as e:
         logger.error(f"Error stopping SPX stream: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/analytics/reports/{report_type}")
+async def get_report(report_type: str):
+    """
+    Generate and retrieve a specific type of report (fills, orders, positions).
+    """
+    try:
+        if report_type not in ["fills", "orders", "positions"]:
+             raise HTTPException(status_code=400, detail="Invalid report type. options: fills, orders, positions")
+             
+        data = await nautilus_manager.get_generated_report(report_type)
+        return data
+    except Exception as e:
+        logger.error(f"Error generating report: {e}")
         raise HTTPException(status_code=500, detail=str(e))
