@@ -99,8 +99,9 @@ class Orb15MinLongPutStrategy(SPXBaseStrategy):
             )
 
         # Check for breakout (tick-by-tick breakout detection)
-        if self.is_opening_range_complete() and not self.breakout_detected:
-            self._check_breakout()
+        # REMOVED: Aligning with SPX_15Min_Range to check only on minute close
+        # if self.is_opening_range_complete() and not self.breakout_detected:
+        #     self._check_breakout()
         
         # Monitor active position for exit conditions
         if self.active_option_id:

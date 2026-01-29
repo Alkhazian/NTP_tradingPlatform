@@ -131,3 +131,17 @@ Automatic run:
 ```bash
 echo "0 * * * * root /usr/local/bin/ssh-attack-monitor.sh" > /etc/cron.d/ssh-attack-monitor
 ```
+
+
+## Security Layer 5: Stability (Swap File)
+CRITICAL: The server has NO SWAP configured and is crashing (OOM) when RAM fills up. We must add swap to prevent crashes.
+
+# Create 4GB swap file
+```bash
+fallocate -l 4G /swapfile
+chmod 600 /swapfile
+mkswap /swapfile
+swapon /swapfile
+# Make permanent
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+```

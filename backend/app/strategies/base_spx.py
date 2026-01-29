@@ -415,7 +415,7 @@ class SPXBaseStrategy(BaseStrategy):
         target_premium: float,
         option_kind: OptionKind,
         expiry_date: Optional[str] = None,
-        strike_range: int = 7,
+        strike_range: int = 15,
         strike_step: int = 5,
         max_spread: Optional[float] = None,
         selection_delay_seconds: float = 10.0,
