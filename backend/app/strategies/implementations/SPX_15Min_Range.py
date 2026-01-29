@@ -546,21 +546,22 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             }
         )
         
-        # Start polling cache for instruments (since on_instrument callback doesn't work for request_instruments)
+        # Schedule fallback polling to start in 7 seconds (only if on_instrument doesn't find legs)
+        # Primary mechanism is on_instrument callback; polling is backup only
         self._cache_poll_attempt = 0
         self._max_cache_poll_attempts = 15  # 15 attempts * 2 seconds = 30 seconds total
+        self._fallback_polling_delay_seconds = 7
         self.clock.set_time_alert(
-            name=f"{self.id}_cache_poll",
-            alert_time=self.clock.utc_now() + timedelta(seconds=self._cache_poll_interval_seconds),
-            callback=self._poll_cache_for_instruments
+            name=f"{self.id}_fallback_poll_start",
+            alert_time=self.clock.utc_now() + timedelta(seconds=self._fallback_polling_delay_seconds),
+            callback=self._start_fallback_polling
         )
         self.logger.info(
-            f"🔄 Started cache polling | Interval: {self._cache_poll_interval_seconds}s | Max Attempts: {self._max_cache_poll_attempts}",
+            f"⏳ Fallback polling scheduled | Delay: {self._fallback_polling_delay_seconds}s | Will start only if on_instrument fails",
             extra={
                 "extra": {
-                    "event_type": "cache_polling_start",
-                    "interval_seconds": self._cache_poll_interval_seconds,
-                    "max_attempts": self._max_cache_poll_attempts
+                    "event_type": "fallback_polling_scheduled",
+                    "delay_seconds": self._fallback_polling_delay_seconds
                 }
             }
         )
@@ -695,12 +696,23 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 if len(self._found_legs) >= self._required_legs_count:
                     # Prevent duplicate spread creation requests
                     if not self._waiting_for_spread and self.spread_id is None:
+                        # Cancel fallback polling timer since we found legs via on_instrument
+                        try:
+                            self.clock.cancel_timer(f"{self.id}_fallback_poll_start")
+                        except Exception:
+                            pass
+                        try:
+                            self.clock.cancel_timer(f"{self.id}_cache_poll")
+                        except Exception:
+                            pass
+                        
                         self.logger.info(
-                            f"🎯 Both legs found | Creating spread instrument...",
+                            f"🎯 Both legs found via on_instrument | Creating spread instrument...",
                             extra={
                                 "extra": {
                                     "event_type": "legs_found_complete",
-                                    "found_legs_count": len(self._found_legs)
+                                    "found_legs_count": len(self._found_legs),
+                                    "source": "on_instrument_callback"
                                 }
                             }
                         )
@@ -1070,12 +1082,76 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             self.close_spread_smart()
             # Note: _spread_entry_price is reset in on_order_filled_safe when close is confirmed
 
+    def _start_fallback_polling(self, event):
+        """
+        Start cache polling only if on_instrument callback hasn't found all legs yet.
+        
+        This is called after a 7-second delay to give on_instrument priority.
+        If legs are already found, polling is skipped entirely.
+        """
+        if not self.entry_in_progress:
+            self.logger.info(
+                "Fallback polling skipped | Entry no longer in progress",
+                extra={
+                    "extra": {
+                        "event_type": "fallback_polling_skipped",
+                        "reason": "entry_not_in_progress"
+                    }
+                }
+            )
+            return
+        
+        # Check if on_instrument already found all legs
+        if len(self._found_legs) >= self._required_legs_count:
+            self.logger.info(
+                f"Fallback polling skipped | Legs already found via on_instrument",
+                extra={
+                    "extra": {
+                        "event_type": "fallback_polling_skipped",
+                        "reason": "legs_already_found",
+                        "found_legs_count": len(self._found_legs)
+                    }
+                }
+            )
+            return
+        
+        # Check if spread is already being created
+        if self._waiting_for_spread or self.spread_id is not None:
+            self.logger.info(
+                f"Fallback polling skipped | Spread already in progress",
+                extra={
+                    "extra": {
+                        "event_type": "fallback_polling_skipped",
+                        "reason": "spread_in_progress",
+                        "waiting_for_spread": self._waiting_for_spread,
+                        "spread_id": str(self.spread_id) if self.spread_id else None
+                    }
+                }
+            )
+            return
+        
+        # on_instrument didn't find all legs in 7 seconds - start fallback polling
+        self.logger.warning(
+            f"⚠️ Starting fallback polling | on_instrument found {len(self._found_legs)}/{self._required_legs_count} legs after {self._fallback_polling_delay_seconds}s",
+            extra={
+                "extra": {
+                    "event_type": "fallback_polling_started",
+                    "legs_found_count": len(self._found_legs),
+                    "required_legs": self._required_legs_count,
+                    "delay_elapsed": self._fallback_polling_delay_seconds
+                }
+            }
+        )
+        
+        # Start the first poll immediately
+        self._poll_cache_for_instruments(event)
+
     def _poll_cache_for_instruments(self, event):
         """
         Poll cache for requested instruments.
         
-        NautilusTrader's request_instruments() adds instruments to cache but
-        does NOT trigger on_instrument callback. So we must poll the cache.
+        This is a FALLBACK mechanism that runs only if on_instrument callback
+        doesn't find all legs within 7 seconds.
         """
         if not self.entry_in_progress:
             self.logger.info(
@@ -1219,7 +1295,11 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                     }
                 )
             else:
-                # Cancel cache polling
+                # Cancel cache polling and fallback timers
+                try:
+                    self.clock.cancel_timer(f"{self.id}_fallback_poll_start")
+                except Exception:
+                    pass
                 try:
                     self.clock.cancel_timer(f"{self.id}_cache_poll")
                 except Exception:
