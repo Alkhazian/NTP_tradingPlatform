@@ -384,6 +384,20 @@ class BaseStrategy(Strategy):
             `on_spread_ready(instrument)` callback to know when it's ready.
         """
         try:
+            # Guard against duplicate spread creation requests
+            if self._waiting_for_spread:
+                self.logger.warning(
+                    f"Spread creation already in progress | Existing spread_id: {self.spread_id}",
+                    extra={
+                        "extra": {
+                            "event_type": "spread_creation_skipped",
+                            "reason": "already_in_progress",
+                            "existing_spread_id": str(self.spread_id) if self.spread_id else None
+                        }
+                    }
+                )
+                return self.spread_id
+            
             # Import the spread ID generator
             from nautilus_trader.model.identifiers import new_generic_spread_id
             
