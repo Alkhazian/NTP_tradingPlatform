@@ -967,8 +967,8 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         pnl_per_spread = (entry_credit - current_cost) * 100
         total_pnl = pnl_per_spread * current_qty
         
-        # Update drawdown tracking with current P&L
-        self._drawdown_recorder.update_drawdown(total_pnl)
+        # Update drawdown tracking with per-contract P&L (not total)
+        self._drawdown_recorder.update_drawdown(pnl_per_spread)
         
         # Calculate SL/TP prices for logging
         stop_price = -(self._spread_entry_price * self.stop_loss_multiplier)
