@@ -5,6 +5,7 @@
     - [ ] Create Database for Orders
     - [ ] Create Database for Trades 
 - [ ] Fix calculation of strategy results based on trades DB
+- [ ] Add security layer - login page etc.
 
 ## Nice to have
 
