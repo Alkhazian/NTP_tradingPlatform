@@ -1443,14 +1443,12 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             # Verify position is now flat (close order was filled)
             effective_qty = self.get_effective_spread_quantity()
             if effective_qty == 0:
-                # Calculate final P&L for drawdown record
-                quote = self.cache.quote_tick(self.spread_instrument.id) if self.spread_instrument else None
-                final_pnl = 0.0
-                if quote and self._spread_entry_price:
-                    mid = (quote.bid_price.as_double() + quote.ask_price.as_double()) / 2
-                    entry_credit = self._spread_entry_price
-                    current_cost = abs(mid)
-                    final_pnl = (entry_credit - current_cost) * 100  # P&L per spread (already closed)
+                # Use actual fill price from the event for accurate P&L
+                # event.last_px is the price at which the close order was filled
+                fill_price = event.last_px.as_double() if hasattr(event.last_px, "as_double") else float(event.last_px)
+                entry_credit = self._spread_entry_price
+                current_cost = abs(fill_price)
+                final_pnl = (entry_credit - current_cost) * 100  # P&L per spread (already closed)
                 
                 # Finish drawdown tracking and save record
                 now = self.clock.utc_now().astimezone(self.tz)
