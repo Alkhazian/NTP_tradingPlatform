@@ -890,11 +890,28 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             self._signal_time = None
             self._signal_close_price = None
             
-            # Start drawdown tracking
+            # Start drawdown tracking with strikes and premium info
             now = self.clock.utc_now().astimezone(self.tz)
             trade_date = now.strftime("%Y-%m-%d")
             entry_time = now.strftime("%H:%M:%S")
-            self._drawdown_recorder.start_tracking(trade_date, entry_time)
+            
+            # Safely capture strike and premium info (may be None if something went wrong)
+            try:
+                short_strike = self._target_short_strike
+                long_strike = self._target_long_strike
+                entry_premium = abs(rounded_mid) * 100  # Premium in dollars per spread
+            except Exception:
+                short_strike = None
+                long_strike = None
+                entry_premium = None
+            
+            self._drawdown_recorder.start_tracking(
+                trade_date=trade_date,
+                entry_time=entry_time,
+                short_strike=short_strike,
+                long_strike=long_strike,
+                entry_premium=entry_premium
+            )
             
             self.save_state()
         else:

@@ -24,6 +24,9 @@ class DrawdownRecorder:
     - exit_time: Time position was closed (HH:MM:SS)
     - max_drawdown: Maximum negative P&L reached during the trade (in dollars)
     - final_result: Final P&L when trade was closed (in dollars)
+    - short_strike: Strike price of the short leg (sold option)
+    - long_strike: Strike price of the long leg (protection option)
+    - entry_premium: Premium received at entry (in dollars per spread)
     """
     
     def __init__(self, db_path: str = "data/trade_drawdowns.db"):
@@ -36,6 +39,11 @@ class DrawdownRecorder:
         self._current_entry_time: Optional[str] = None
         self._max_drawdown: float = 0.0  # Track minimum P&L (most negative)
         self._is_tracking: bool = False
+        
+        # New fields for strike and premium tracking
+        self._short_strike: Optional[float] = None
+        self._long_strike: Optional[float] = None
+        self._entry_premium: Optional[float] = None
     
     def _init_db(self):
         """Initialize the database with the drawdowns table."""
@@ -55,25 +63,64 @@ class DrawdownRecorder:
                 )
             """)
             
+            # Add new columns if they don't exist (backwards compatible migration)
+            self._add_column_if_not_exists(cursor, "trade_drawdowns", "short_strike", "REAL")
+            self._add_column_if_not_exists(cursor, "trade_drawdowns", "long_strike", "REAL")
+            self._add_column_if_not_exists(cursor, "trade_drawdowns", "entry_premium", "REAL")
+            
             conn.commit()
             conn.close()
             logger.info(f"Drawdown database initialized at {self.db_path}")
         except Exception as e:
             logger.error(f"Failed to initialize drawdown database: {e}")
     
-    def start_tracking(self, trade_date: str, entry_time: str):
+    def _add_column_if_not_exists(self, cursor, table: str, column: str, column_type: str):
+        """Safely add a column to a table if it doesn't already exist."""
+        try:
+            # Check if column exists using PRAGMA table_info
+            cursor.execute(f"PRAGMA table_info({table})")
+            columns = [row[1] for row in cursor.fetchall()]
+            
+            if column not in columns:
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+                logger.info(f"Added column '{column}' to table '{table}'")
+        except Exception as e:
+            # Log but don't fail - column might already exist
+            logger.warning(f"Could not add column '{column}' to '{table}': {e}")
+    
+    def start_tracking(
+        self, 
+        trade_date: str, 
+        entry_time: str,
+        short_strike: Optional[float] = None,
+        long_strike: Optional[float] = None,
+        entry_premium: Optional[float] = None
+    ):
         """
         Start tracking drawdown for a new trade.
         
         Args:
             trade_date: Trade date in YYYY-MM-DD format
             entry_time: Entry time in HH:MM:SS format
+            short_strike: Strike price of the short leg (optional)
+            long_strike: Strike price of the long leg (optional)
+            entry_premium: Premium received at entry in dollars per spread (optional)
         """
         self._current_trade_date = trade_date
         self._current_entry_time = entry_time
         self._max_drawdown = 0.0  # Reset to 0 (no drawdown yet)
         self._is_tracking = True
-        logger.info(f"Started drawdown tracking | Date: {trade_date} | Entry: {entry_time}")
+        
+        # Store optional strike and premium info (safely handle None)
+        self._short_strike = short_strike
+        self._long_strike = long_strike
+        self._entry_premium = entry_premium
+        
+        logger.info(
+            f"Started drawdown tracking | Date: {trade_date} | Entry: {entry_time} | "
+            f"Short: {short_strike} | Long: {long_strike} | Premium: ${entry_premium:.2f}" if entry_premium else
+            f"Started drawdown tracking | Date: {trade_date} | Entry: {entry_time}"
+        )
     
     def update_drawdown(self, current_pnl: float):
         """
@@ -110,25 +157,38 @@ class DrawdownRecorder:
             
             cursor.execute("""
                 INSERT INTO trade_drawdowns 
-                (trade_date, entry_time, exit_time, max_drawdown, final_result, strategy_id)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (trade_date, entry_time, exit_time, max_drawdown, final_result, strategy_id,
+                 short_strike, long_strike, entry_premium)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 self._current_trade_date,
                 self._current_entry_time,
                 exit_time,
                 self._max_drawdown,
                 final_result,
-                strategy_id
+                strategy_id,
+                self._short_strike,
+                self._long_strike,
+                self._entry_premium
             ))
             
             conn.commit()
             conn.close()
             
-            logger.info(
+            # Build log message with optional strike/premium info
+            log_msg = (
                 f"Saved drawdown record | Date: {self._current_trade_date} | "
                 f"Entry: {self._current_entry_time} | Exit: {exit_time} | "
                 f"Max Drawdown: ${self._max_drawdown:.2f} | Final: ${final_result:.2f}"
             )
+            if self._short_strike is not None:
+                log_msg += f" | Short: {self._short_strike}"
+            if self._long_strike is not None:
+                log_msg += f" | Long: {self._long_strike}"
+            if self._entry_premium is not None:
+                log_msg += f" | Premium: ${self._entry_premium:.2f}"
+            logger.info(log_msg)
+            
         except Exception as e:
             logger.error(f"Failed to save drawdown record: {e}")
         finally:
@@ -137,6 +197,9 @@ class DrawdownRecorder:
             self._current_trade_date = None
             self._current_entry_time = None
             self._max_drawdown = 0.0
+            self._short_strike = None
+            self._long_strike = None
+            self._entry_premium = None
     
     def get_current_max_drawdown(self) -> float:
         """Get the current maximum drawdown for the active trade."""
@@ -154,3 +217,6 @@ class DrawdownRecorder:
         self._current_trade_date = None
         self._current_entry_time = None
         self._max_drawdown = 0.0
+        self._short_strike = None
+        self._long_strike = None
+        self._entry_premium = None

@@ -4,7 +4,7 @@
     "enabled": true,
     "instrument_id": "^SPX.CBOE",
     "strategy_type": "SPX15MinRangeStrategy",
-    "order_size": 12,
+    "order_size": 5,
     "parameters": {
         "timezone": "US/Eastern",
         "start_time_str": "09:30:03",
@@ -13,7 +13,7 @@
         "min_credit_amount": 50,
         "strike_width": 5,
         "stop_loss_multiplier": 2,
-        "take_profit_amount": 35,
+        "take_profit_amount": 40,
         "strike_step": 5,
         "signal_max_age_seconds": 5,
         "max_price_deviation": 10,
