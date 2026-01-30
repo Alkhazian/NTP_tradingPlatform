@@ -1443,9 +1443,14 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             # Verify position is now flat (close order was filled)
             effective_qty = self.get_effective_spread_quantity()
             if effective_qty == 0:
-                # Use actual fill price from the event for accurate P&L
-                # event.last_px is the price at which the close order was filled
-                fill_price = event.last_px.as_double() if hasattr(event.last_px, "as_double") else float(event.last_px)
+                # Get the order to find the average fill price (handles partial fills correctly)
+                order = self.cache.order(event.client_order_id)
+                if order and hasattr(order, "avg_px"):
+                     # avg_px is the weighted average price of all fills for this order
+                     fill_price = order.avg_px.as_double() if hasattr(order.avg_px, "as_double") else float(order.avg_px)
+                else:
+                     # Fallback to last_px if order not found (should not happen)
+                     fill_price = event.last_px.as_double() if hasattr(event.last_px, "as_double") else float(event.last_px)
                 entry_credit = self._spread_entry_price
                 current_cost = abs(fill_price)
                 final_pnl = (entry_credit - current_cost) * 100  # P&L per spread (already closed)
