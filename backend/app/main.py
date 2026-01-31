@@ -277,6 +277,120 @@ async def websocket_logs(websocket: WebSocket):
 async def health():
     return {"status": "ok"}
 
+@app.get("/trades/all")
+async def get_all_trades(limit: int = 1000):
+    """Get trades for all strategies from TradingDataService."""
+    if not nautilus_manager.strategy_manager:
+        return []
+    
+    trading_data = getattr(nautilus_manager, 'trading_data_service', None)
+    if not trading_data:
+        return []
+    
+    try:
+        with trading_data._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT 
+                    id, trade_id, strategy_id, instrument_id, trade_type,
+                    entry_time, exit_time, duration_seconds,
+                    entry_price, exit_price, quantity, direction,
+                    pnl, commission, net_pnl, result,
+                    max_unrealized_profit, max_unrealized_loss,
+                    strikes, exit_reason, status
+                FROM trades 
+                ORDER BY entry_time DESC
+                LIMIT ?
+            """, (limit,))
+            
+            rows = cursor.fetchall()
+            
+        result = []
+        for row in rows:
+            trade_dict = {
+                "id": row["id"],
+                "trade_id": row["trade_id"],
+                "strategy_id": row["strategy_id"],
+                "instrument_id": row["instrument_id"],
+                "trade_type": row["trade_type"],
+                "entry_time": row["entry_time"],
+                "exit_time": row["exit_time"],
+                "duration_seconds": row["duration_seconds"],
+                "entry_price": row["entry_price"],
+                "exit_price": row["exit_price"],
+                "quantity": row["quantity"],
+                "direction": row["direction"],
+                "pnl": row["pnl"],
+                "commission": row["commission"],
+                "net_pnl": row["net_pnl"],
+                "result": row["result"],
+                "max_profit": row["max_unrealized_profit"],
+                "max_drawdown": row["max_unrealized_loss"],
+                "strikes": row["strikes"],
+                "exit_reason": row["exit_reason"],
+                "status": row["status"]
+            }
+            result.append(trade_dict)
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error getting all trades: {e}")
+        return []
+
+@app.get("/stats/all")
+async def get_all_stats():
+    """Get aggregated statistics for all strategies from TradingDataService."""
+    if not nautilus_manager.strategy_manager:
+        return {}
+        
+    trading_data = getattr(nautilus_manager, 'trading_data_service', None)
+    if not trading_data:
+        return {}
+        
+    try:
+        with trading_data._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_trades,
+                    SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN result = 'LOSS' THEN 1 ELSE 0 END) as losses,
+                    SUM(net_pnl) as total_net_pnl,
+                    SUM(commission) as total_commission,
+                    AVG(net_pnl) as avg_net_pnl,
+                    MAX(net_pnl) as best_trade,
+                    MIN(net_pnl) as worst_trade,
+                    AVG(max_unrealized_loss) as avg_max_drawdown,
+                    MIN(max_unrealized_loss) as worst_drawdown
+                FROM trades 
+                WHERE status = 'CLOSED'
+            """)
+            
+            row = cursor.fetchone()
+            if not row or row["total_trades"] == 0:
+                return {"total_trades": 0, "win_rate": 0}
+            
+            return {
+                "total_trades": row["total_trades"],
+                "wins": row["wins"] or 0,
+                "losses": row["losses"] or 0,
+                "win_rate": round(100 * (row["wins"] or 0) / row["total_trades"], 1),
+                "net_pnl": round(row["total_net_pnl"] or 0, 2),
+                "total_pnl": round(row["total_net_pnl"] or 0, 2),
+                "total_commission": round(row["total_commission"] or 0, 2),
+                "avg_net_pnl": round(row["avg_net_pnl"] or 0, 2),
+                "max_win": round(row["best_trade"] or 0, 2),
+                "max_loss": round(row["worst_trade"] or 0, 2),
+                "avg_max_drawdown": round(row["avg_max_drawdown"] or 0, 2),
+                "worst_drawdown": round(row["worst_drawdown"] or 0, 2),
+            }
+            
+    except Exception as e:
+        logger.error(f"Error getting all stats: {e}")
+        return {"total_trades": 0, "error": str(e)}
+
+
 @app.get("/strategies/{strategy_id}/trades")
 async def get_strategy_trades(strategy_id: str, limit: int = 100):
     """Get trades for a strategy from TradingDataService."""

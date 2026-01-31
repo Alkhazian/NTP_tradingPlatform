@@ -51,7 +51,7 @@ const getUrl = (path: string) => {
 
 export default function Analytics() {
     const [strategies, setStrategies] = useState<Strategy[]>([]);
-    const [selectedStrategy, setSelectedStrategy] = useState<string>('');
+    const [selectedStrategy, setSelectedStrategy] = useState<string>('all');
     const [stats, setStats] = useState<Stats | null>(null);
     const [trades, setTrades] = useState<Trade[]>([]);
     const [isLoading, setIsLoading] = useState(false);
@@ -70,9 +70,8 @@ export default function Analytics() {
             .then(data => {
                 const strats = Array.isArray(data) ? data : [];
                 setStrategies(strats);
-                if (strats.length > 0) {
-                    setSelectedStrategy(strats[0].id);
-                }
+                // Default to "All Strategies"
+                setSelectedStrategy('all');
             })
             .catch(console.error);
     }, []);
@@ -83,9 +82,18 @@ export default function Analytics() {
 
         // eslint-disable-next-line react-hooks/set-state-in-effect
         setIsLoading(true);
+
+        // Use different endpoints for "all" vs specific strategy
+        const statsUrl = selectedStrategy === 'all'
+            ? getUrl('/stats/all')
+            : getUrl(`/strategies/${selectedStrategy}/stats`);
+        const tradesUrl = selectedStrategy === 'all'
+            ? getUrl('/trades/all?limit=1000')
+            : getUrl(`/strategies/${selectedStrategy}/trades?limit=1000`);
+
         Promise.all([
-            fetch(getUrl(`/strategies/${selectedStrategy}/stats`)).then(res => res.json()),
-            fetch(getUrl(`/strategies/${selectedStrategy}/trades?limit=1000`)).then(res => res.json())
+            fetch(statsUrl).then(res => res.json()),
+            fetch(tradesUrl).then(res => res.json())
         ]).then(([statsData, tradesData]) => {
             setStats(statsData);
             setTrades(tradesData);
@@ -306,6 +314,7 @@ export default function Analytics() {
                                 className="bg-transparent text-white font-mono text-sm focus:outline-none min-w-[200px] [&>option]:bg-zinc-900"
                                 disabled={isLoading}
                             >
+                                <option value="all">All Strategies</option>
                                 {strategies.map(s => (
                                     <option key={s.id} value={s.id}>{s.id}</option>
                                 ))}
