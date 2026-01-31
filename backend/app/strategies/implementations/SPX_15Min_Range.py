@@ -95,10 +95,11 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._position_log_interval_seconds: int = 30  # Log position status every N seconds
         self._cache_poll_interval_seconds: int = 2     # Poll cache for instruments every N seconds
         self._required_legs_count: int = 2             # Number of option legs required for spread
-        
+
         # Trading data service (orders + trades + drawdown tracking)
         self._trading_data = TradingDataService(db_path="data/trading.db")
         self._current_trade_id: Optional[str] = None
+        self._total_commission: float = 0.0  # Track total commission for the trade
         
         # Calculate range end time for logging
         range_end_time = "Range Close" # Will be calculated/logged by base
@@ -1461,6 +1462,8 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         if self._current_trade_id:
             self._trading_data.cancel_trade(self._current_trade_id)
             self._current_trade_id = None
+        
+        self._total_commission = 0.0
 
         
         self.logger.info(
@@ -1488,6 +1491,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             "_signal_direction": self._signal_direction,
             "_closing_in_progress": self._closing_in_progress,
             "_current_trade_id": self._current_trade_id,
+            "_total_commission": self._total_commission,
         })
         return state
 
@@ -1504,6 +1508,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._signal_direction = state.get("_signal_direction")
         self._closing_in_progress = state.get("_closing_in_progress", False)
         self._current_trade_id = state.get("_current_trade_id")
+        self._total_commission = state.get("_total_commission", 0.0)
         
         self.logger.info(
             f"State restored | Range: {self.daily_low}-{self.daily_high} | Calculated: {self.range_calculated} | Traded: {self.traded_today} | Dir: {self._signal_direction}",
@@ -1559,6 +1564,16 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
 
     def on_order_filled_safe(self, event):
         """Handle order fill events - reset closing state when close order is filled."""
+        
+        # Track commission from any fill (Entry or Exit)
+        if event.commission:
+            try:
+                comm = event.commission.as_double()
+                self._total_commission += comm
+                self.logger.info(f"💵 Commission captured: ${comm:.2f} | Total: ${self._total_commission:.2f}")
+            except Exception as e:
+                self.logger.warning(f"Failed to capture commission: {e}")
+
         # Check if this is a close order fill (we were in closing state)
         if self._closing_in_progress:
             # Verify position is now flat (close order was filled)
@@ -1604,7 +1619,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                         exit_price=fill_price,
                         exit_reason=exit_reason,
                         exit_time=exit_time_iso,
-                        commission=0.0,  # TODO: Get actual commission from IBKR
+                        commission=self._total_commission,
                     )
                     
                     # Record exit order
@@ -1648,5 +1663,6 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 self._spread_entry_price = None
                 self._closing_in_progress = False
                 self._current_trade_id = None
+                self._total_commission = 0.0  # Reset for next time (though typically once per day)
                 self.save_state()
 

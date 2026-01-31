@@ -650,6 +650,7 @@ class TradingDataService:
                         SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as wins,
                         SUM(CASE WHEN result = 'LOSS' THEN 1 ELSE 0 END) as losses,
                         SUM(net_pnl) as total_net_pnl,
+                        SUM(commission) as total_commission,
                         AVG(net_pnl) as avg_net_pnl,
                         MAX(net_pnl) as best_trade,
                         MIN(net_pnl) as worst_trade,
@@ -668,10 +669,12 @@ class TradingDataService:
                     "wins": row["wins"] or 0,
                     "losses": row["losses"] or 0,
                     "win_rate": round(100 * (row["wins"] or 0) / row["total_trades"], 1),
-                    "total_net_pnl": round(row["total_net_pnl"] or 0, 2),
+                    "net_pnl": round(row["total_net_pnl"] or 0, 2),
+                    "total_pnl": round(row["total_net_pnl"] or 0, 2), # Alias for legacy
+                    "total_commission": round(row["total_commission"] or 0, 2),
                     "avg_net_pnl": round(row["avg_net_pnl"] or 0, 2),
-                    "best_trade": round(row["best_trade"] or 0, 2),
-                    "worst_trade": round(row["worst_trade"] or 0, 2),
+                    "max_win": round(row["best_trade"] or 0, 2),
+                    "max_loss": round(row["worst_trade"] or 0, 2),
                     "avg_max_drawdown": round(row["avg_max_drawdown"] or 0, 2),
                     "worst_drawdown": round(row["worst_drawdown"] or 0, 2),
                 }
