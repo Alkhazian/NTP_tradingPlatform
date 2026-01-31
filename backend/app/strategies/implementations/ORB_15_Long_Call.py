@@ -281,6 +281,9 @@ class Orb15MinLongCallStrategy(SPXBaseStrategy):
 
     def on_order_filled_safe(self, event: OrderFilled):
         """Called when an order is filled."""
+        # IMPORTANT: Call base class to enable trade recording
+        super().on_order_filled_safe(event)
+        
         order_id = event.client_order_id
         
         # Check if this was our active option exit
