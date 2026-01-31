@@ -1,11 +1,14 @@
 # TODO
 
 ## MUST
-- [ ] Refactor trades storage to separate transation part (orders DB) and view part (trades)
-    - [ ] Create Database for Orders
-    - [ ] Create Database for Trades 
+- [x] Refactor trades storage to separate transation part (orders DB) and view part (trades)
+    - [x] Create Database for Orders 
+    - [x] Create Database for Trades
+    - [x] Create TradingDataService (unified replacement for TradeRecorder + DrawdownRecorder)
+    - [x] Integrate into SPX_15Min_Range strategy
 - [ ] Fix calculation of strategy results based on trades DB
 - [ ] Add security layer - login page etc.
+
 
 ## Nice to have
 

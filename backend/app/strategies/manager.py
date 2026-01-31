@@ -245,12 +245,12 @@ class StrategyManager:
             "total_pnl": 0.0 # Renamed from realized_pnl to match DB
         }
         
-        # Fetch from TradeRecorder if available
+        # Fetch from TradingDataService if available
         if self.integration_manager:
-            recorder = getattr(self.integration_manager, 'trade_recorder', None)
-            if recorder:
+            trading_data = getattr(self.integration_manager, 'trading_data_service', None)
+            if trading_data:
                 try:
-                    stats = await recorder.get_strategy_stats(strategy_id)
+                    stats = trading_data.get_strategy_stats(strategy_id)
                     metrics.update(stats)
                 except Exception as e:
                     logger.error(f"Failed to fetch stats for {strategy_id}: {e}")

@@ -279,55 +279,91 @@ async def health():
 
 @app.get("/strategies/{strategy_id}/trades")
 async def get_strategy_trades(strategy_id: str, limit: int = 100):
+    """Get trades for a strategy from TradingDataService."""
     if not nautilus_manager.strategy_manager:
         return []
     
-    # Access TradeRecorder through NautilusManager
-    recorder = getattr(nautilus_manager, 'trade_recorder', None)
-    if not recorder:
+    # Access TradingDataService through NautilusManager
+    trading_data = getattr(nautilus_manager, 'trading_data_service', None)
+    if not trading_data:
         return []
-        
-    trades = await recorder.get_trades_for_strategy(strategy_id, limit)
     
-    # Convert tuples to dicts for JSON response
-    # Actual DB Schema finding: 
-    # 0:id, 1:strategy_id, 2:instrument_id, 3:entry_time, 4:entry_price, 5:exit_time, 
-    # 6:exit_price, 7:exit_reason, 8:trade_type, 9:quantity, 10:direction, 11:pnl, 
-    # 12:raw_data, 13:commission, 14:result
-    result = []
-    for t in trades:
-        # Safety check for tuple length in case of schema drifts
-        t_len = len(t)
-        trade_dict = {
-            "id": t[0],
-            "strategy_id": t[1],
-            "instrument_id": t[2],
-            "entry_time": t[3],
-            "entry_price": t[4],
-            "exit_time": t[5],
-            "exit_price": t[6],
-            "exit_reason": t[7],
-            "trade_type": t[8],
-            "quantity": t[9],
-            "direction": t[10],
-            "pnl": t[11],
-            "raw_data": t[12] if t_len > 12 else None,
-            "commission": t[13] if t_len > 13 else 0.0,
-            "result": t[14] if t_len > 14 else None
-        }
-        result.append(trade_dict)
-    return result
+    try:
+        # Get trades from trading_data_service
+        with trading_data._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT 
+                    id, trade_id, strategy_id, instrument_id, trade_type,
+                    entry_time, exit_time, duration_seconds,
+                    entry_price, exit_price, quantity, direction,
+                    pnl, commission, net_pnl, result,
+                    max_unrealized_profit, max_unrealized_loss,
+                    strikes, exit_reason, status
+                FROM trades 
+                WHERE strategy_id = ?
+                ORDER BY entry_time DESC
+                LIMIT ?
+            """, (strategy_id, limit))
+            
+            rows = cursor.fetchall()
+            
+        result = []
+        for row in rows:
+            trade_dict = {
+                "id": row["id"],
+                "trade_id": row["trade_id"],
+                "strategy_id": row["strategy_id"],
+                "instrument_id": row["instrument_id"],
+                "trade_type": row["trade_type"],
+                "entry_time": row["entry_time"],
+                "exit_time": row["exit_time"],
+                "duration_seconds": row["duration_seconds"],
+                "entry_price": row["entry_price"],
+                "exit_price": row["exit_price"],
+                "quantity": row["quantity"],
+                "direction": row["direction"],
+                "pnl": row["pnl"],
+                "commission": row["commission"],
+                "net_pnl": row["net_pnl"],
+                "result": row["result"],
+                "max_profit": row["max_unrealized_profit"],
+                "max_drawdown": row["max_unrealized_loss"],
+                "strikes": row["strikes"],
+                "exit_reason": row["exit_reason"],
+                "status": row["status"]
+            }
+            result.append(trade_dict)
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error getting trades: {e}")
+        return []
 
 @app.get("/strategies/{strategy_id}/stats")
 async def get_strategy_stats(strategy_id: str):
+    """Get aggregated statistics for a strategy from TradingDataService."""
     if not nautilus_manager.strategy_manager:
         return {}
         
-    recorder = getattr(nautilus_manager, 'trade_recorder', None)
-    if not recorder:
+    trading_data = getattr(nautilus_manager, 'trading_data_service', None)
+    if not trading_data:
         return {}
         
-    return await recorder.get_strategy_stats(strategy_id)
+    return trading_data.get_strategy_stats(strategy_id)
+
+@app.get("/strategies/{strategy_id}/drawdown-analysis")
+async def get_drawdown_analysis(strategy_id: str):
+    """Get drawdown analysis for stop-loss tuning."""
+    if not nautilus_manager.strategy_manager:
+        return []
+        
+    trading_data = getattr(nautilus_manager, 'trading_data_service', None)
+    if not trading_data:
+        return []
+        
+    return trading_data.get_drawdown_analysis(strategy_id)
+
 
 # Strategy Management Endpoints
 

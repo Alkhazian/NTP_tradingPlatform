@@ -26,7 +26,7 @@ from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import AccountId, Venue, Symbol
 from nautilus_trader.model.enums import OrderSide, PositionSide
 from nautilus_trader.model.data import BarType
-from .services.trade_recorder import TradeRecorder
+from .services.trading_data_service import TradingDataService
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ class NautilusManager:
         self._margin_usage_percent = "0.0"
         self._recent_trades = []
         self.strategy_manager = None
-        self.trade_recorder = None # Initialize lazily or here
+        self.trading_data_service = None  # Unified trading data service
 
     @property
     def nautilus_account_id(self) -> Optional[AccountId]:
@@ -71,8 +71,8 @@ class NautilusManager:
     async def start(self):
         """Initialize and start the NautilusTrader TradingNode"""
         try:
-            # Initialize TradeRecorder
-            self.trade_recorder = TradeRecorder() # Sync init for now, lightweight
+            # Initialize TradingDataService (replaces TradeRecorder)
+            self.trading_data_service = TradingDataService(db_path="data/trading.db")
             
             # Get account ID from environment
             account_id = os.getenv("TWS_ACCOUNT")

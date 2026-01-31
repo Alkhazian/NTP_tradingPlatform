@@ -1635,16 +1635,21 @@ class BaseStrategy(Strategy):
 
 
     async def _start_trade_record_async(self, event):
-        """Async handler for starting trade record."""
+        """Async handler for starting trade record using TradingDataService."""
         if not self._integration_manager:
             self.logger.warning("No integration manager available to start trade record")
             return
         
         try:
-            recorder = getattr(self._integration_manager, 'trade_recorder', None)
-            if recorder:
+            trading_data = getattr(self._integration_manager, 'trading_data_service', None)
+            if trading_data:
                 direction = "LONG" if event.order_side == OrderSide.BUY else "SHORT"
-                commission = float(event.commission) if hasattr(event, 'commission') else 0.0
+                entry_time = self.clock.utc_now().isoformat()
+                
+                # Generate trade ID
+                from datetime import datetime
+                now = datetime.now()
+                self.active_trade_id = f"T-{self.strategy_id[:8]}-{now.strftime('%Y%m%d-%H%M%S')}"
                 
                 self.logger.info(
                     f"Initiating trade record for {self.strategy_id} | {direction}",
@@ -1656,16 +1661,17 @@ class BaseStrategy(Strategy):
                         }
                     }
                 )
-                self.active_trade_id = await recorder.start_trade(
+                
+                # Use synchronous start_trade from TradingDataService
+                trading_data.start_trade(
+                    trade_id=self.active_trade_id,
                     strategy_id=self.strategy_id,
                     instrument_id=str(self.instrument_id),
-                    entry_time=self.clock.utc_now().isoformat(),
+                    trade_type="DAYTRADE",
                     entry_price=float(event.last_px),
                     quantity=float(event.last_qty),
                     direction=direction,
-                    commission=commission,
-                    raw_data=str(event),
-                    trade_type="DAYTRADE"
+                    entry_time=entry_time,
                 )
                 self.save_state()
                 self.logger.info(
@@ -1678,8 +1684,8 @@ class BaseStrategy(Strategy):
                     }
                 )
             else:
-                self.logger.warning("No trade recorder found on integration manager")
-                # Still save state even without trade recorder
+                self.logger.warning("No trading_data_service found on integration manager")
+                # Still save state even without service
                 self.save_state()
         except Exception as e:
             self.logger.error(f"Failed to start trade record: {e}", exc_info=True)
@@ -1687,7 +1693,7 @@ class BaseStrategy(Strategy):
             self.save_state()
 
     async def _close_trade_record_async(self, event):
-        """Async handler for closing trade record."""
+        """Async handler for closing trade record using TradingDataService."""
         if not self._integration_manager:
             self.logger.warning("No integration manager available to close trade record")
             return
@@ -1697,8 +1703,8 @@ class BaseStrategy(Strategy):
             return
         
         try:
-            recorder = getattr(self._integration_manager, 'trade_recorder', None)
-            if recorder:
+            trading_data = getattr(self._integration_manager, 'trading_data_service', None)
+            if trading_data:
                 # Calculate PnL
                 exit_price = float(event.last_px)
                 entry_price = self._last_entry_price or 0.0
@@ -1725,14 +1731,14 @@ class BaseStrategy(Strategy):
                         }
                     }
                 )
-                await recorder.close_trade(
+                
+                # Use synchronous close_trade from TradingDataService
+                trading_data.close_trade(
                     trade_id=self.active_trade_id,
-                    exit_time=self.clock.utc_now().isoformat(),
                     exit_price=exit_price,
                     exit_reason=exit_reason,
-                    pnl=pnl,
+                    exit_time=self.clock.utc_now().isoformat(),
                     commission=commission,
-                    raw_data=str(event)
                 )
                 
                 self.logger.info(
@@ -1748,7 +1754,7 @@ class BaseStrategy(Strategy):
                 self.active_trade_id = None
                 self.save_state()
             else:
-                self.logger.warning("No trade recorder found on integration manager")
+                self.logger.warning("No trading_data_service found on integration manager")
         except Exception as e:
             self.logger.error(f"Failed to close trade record: {e}", exc_info=True)
 
@@ -1758,20 +1764,24 @@ class BaseStrategy(Strategy):
             return
         
         try:
-            recorder = getattr(self._integration_manager, 'trade_recorder', None)
-            if recorder:
+            trading_data = getattr(self._integration_manager, 'trading_data_service', None)
+            if trading_data:
                 direction = "LONG" if position.side == PositionSide.LONG else "SHORT"
                 
-                self.active_trade_id = await recorder.start_trade(
+                # Generate trade ID for reconciled position
+                from datetime import datetime
+                now = datetime.now()
+                self.active_trade_id = f"T-REC-{self.strategy_id[:8]}-{now.strftime('%Y%m%d-%H%M%S')}"
+                
+                trading_data.start_trade(
+                    trade_id=self.active_trade_id,
                     strategy_id=self.strategy_id,
                     instrument_id=str(self.instrument_id),
-                    entry_time=self.clock.utc_now().isoformat(),
+                    trade_type="RECONCILED",
                     entry_price=float(position.avg_px_open),
                     quantity=float(position.quantity),
                     direction=direction,
-                    commission=0.0,
-                    raw_data=f"RECONCILED: {position}",
-                    trade_type="DAYTRADE"
+                    entry_time=self.clock.utc_now().isoformat(),
                 )
                 self.save_state()
                 self.logger.info(f"Trade record started for reconciled position: {self.active_trade_id}")
