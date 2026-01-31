@@ -1718,7 +1718,11 @@ class BaseStrategy(Strategy):
                 else:
                     pnl = (entry_price - exit_price) * quantity * multiplier
                 
-                commission = float(event.commission) if hasattr(event, 'commission') else 0.0
+                # Commission is a Money object in Nautilus Trader
+                if hasattr(event, 'commission') and event.commission is not None:
+                    commission = event.commission.as_double()
+                else:
+                    commission = 0.0
                 exit_reason = getattr(self, '_last_exit_reason', 'UNKNOWN')
                 
                 self.logger.info(
