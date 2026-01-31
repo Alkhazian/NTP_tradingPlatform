@@ -81,10 +81,11 @@ export default function Analytics() {
     useEffect(() => {
         if (!selectedStrategy) return;
 
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         setIsLoading(true);
         Promise.all([
             fetch(getUrl(`/strategies/${selectedStrategy}/stats`)).then(res => res.json()),
-            fetch(getUrl(`/strategies/${selectedStrategy}/trades?limit=0`)).then(res => res.json())
+            fetch(getUrl(`/strategies/${selectedStrategy}/trades?limit=1000`)).then(res => res.json())
         ]).then(([statsData, tradesData]) => {
             setStats(statsData);
             setTrades(tradesData);
@@ -103,11 +104,13 @@ export default function Analytics() {
                 const net = (t.pnl || 0) - (t.commission || 0);
                 runningPnL += net;
                 return {
-                    time: new Date(t.exit_time || t.entry_time).getTime() / 1000 as any,
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    time: (new Date(t.exit_time || t.entry_time).getTime() / 1000) as any,
                     value: runningPnL
                 };
             });
 
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const uniqueData: { time: any, value: number }[] = [];
         data.forEach(point => {
             if (uniqueData.length > 0 && uniqueData[uniqueData.length - 1].time >= point.time) {
@@ -190,7 +193,9 @@ export default function Analytics() {
 
         // Sorting
         items.sort((a, b) => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             let aValue: any = a[sortConfig.key as keyof Trade];
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             let bValue: any = b[sortConfig.key as keyof Trade];
 
             // Handle computed Net PnL
@@ -221,13 +226,14 @@ export default function Analytics() {
     // Report State
     const [activeView, setActiveView] = useState<'stats' | 'reports'>('stats');
     const [reportType, setReportType] = useState<string>('fills');
-    const [reportData, setReportData] = useState<any[]>([]);
+    const [reportData, setReportData] = useState<Record<string, unknown>[]>([]);
     const [reportLoading, setReportLoading] = useState(false);
 
     // Fetch Report Data
     useEffect(() => {
         if (activeView !== 'reports') return;
 
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         setReportLoading(true);
         fetch(getUrl(`/analytics/reports/${reportType}`))
             .then(res => res.json())
@@ -239,7 +245,7 @@ export default function Analytics() {
     }, [activeView, reportType]);
 
     // Format Report Value
-    const formatReportValue = (key: string, value: any) => {
+    const formatReportValue = (key: string, value: unknown) => {
         if (value === null || value === undefined) return '-';
 
         // Handle timestamps identified by key
@@ -253,7 +259,7 @@ export default function Analytics() {
                 }
             }
 
-            const date = new Date(dateVal);
+            const date = new Date(dateVal as string | number | Date);
             if (!isNaN(date.getTime())) {
                 return date.toLocaleString();
             }
@@ -454,10 +460,7 @@ export default function Analytics() {
                                                         {new Date(trade.entry_time).toLocaleString()}
                                                     </td>
                                                     <td className="px-4 py-3 font-medium text-white/90">
-                                                        {trade.instrument_id.split('=')[0]}
-                                                        <span className="text-xs text-muted-foreground ml-1 opacity-50">
-                                                            {trade.instrument_id.split('.')[1]}
-                                                        </span>
+                                                        {parseInstrument(trade.instrument_id)}
                                                     </td>
                                                     <td className="px-4 py-3">
                                                         <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${trade.direction === 'BUY'
@@ -563,7 +566,16 @@ export default function Analytics() {
     );
 }
 
-function StatsCard({ title, value, icon, subtext, trend, className = '' }: any) {
+interface StatsCardProps {
+    title: string;
+    value: string;
+    icon?: React.ReactNode;
+    subtext?: string;
+    trend?: 'up' | 'down';
+    className?: string;
+}
+
+function StatsCard({ title, value, icon, subtext, trend, className = '' }: StatsCardProps) {
     return (
         <Card variant="glass" className={`p-4 flex flex-col justify-between ${className}`}>
             <div className="flex justify-between items-start mb-2">
@@ -580,4 +592,48 @@ function StatsCard({ title, value, icon, subtext, trend, className = '' }: any) 
             </div>
         </Card>
     );
+}
+
+function parseInstrument(id: string): string {
+    if (!id) return '-';
+
+    // Handle Nautilus Spread Match
+    // Example: ((1))SPXW260130C06965000___(1)SPXW260130C06970000.CBOE
+    const spreadMatch = id.match(/\(\(\d+\)\)([A-Z0-9]+)___\(\d+\)([A-Z0-9]+)/);
+
+    // Normalize Helper
+    const formatLeg = (leg: string) => {
+        // SPXW 26 01 30 C 06965000
+        const match = leg.match(/^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/);
+        if (match) {
+            const [, root, yy, mm, dd, side, strikeRaw] = match;
+            const strike = parseInt(strikeRaw) / 1000;
+            const date = new Date(2000 + parseInt(yy), parseInt(mm) - 1, parseInt(dd));
+            const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            return { root, dateStr, strike, side };
+        }
+        return null;
+    };
+
+    if (spreadMatch) {
+        const leg1 = formatLeg(spreadMatch[1]);
+        const leg2 = formatLeg(spreadMatch[2]);
+
+        if (leg1 && leg2) {
+            const typeStr = leg1.side === 'C' ? 'Call' : 'Put';
+            // Determine spread type often implied, but just showing strikes is good
+            // "SPXW Jan 30 6965/6970 Call Spread"
+            return `${leg1.root} ${leg1.dateStr} ${leg1.strike}/${leg2.strike} ${typeStr} Spread`;
+        }
+    } else {
+        // Try single leg
+        const leg = formatLeg(id.split('.')[0]);
+        if (leg) {
+            const typeStr = leg.side === 'C' ? 'Call' : 'Put';
+            return `${leg.root} ${leg.dateStr} ${leg.strike} ${typeStr}`;
+        }
+    }
+
+    // Fallback: cleanup ugly chars
+    return id.replace(/\(\(\d+\)\)/g, '').replace(/___\(\d+\)/g, '/').split('.')[0];
 }
