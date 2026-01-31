@@ -1678,10 +1678,34 @@ class BaseStrategy(Strategy):
                     f"Trade record started | ID: {self.active_trade_id}",
                     extra={
                         "extra": {
-                            "event_type": "trade_record_started",
+                            "event_type": "trade_record_created",
                             "trade_id": str(self.active_trade_id)
                         }
                     }
+                )
+                
+                
+                # Get order status for partial fill handling
+                order = self.cache.order(event.client_order_id)
+                status = order.status.name if order else "FILLED"
+                
+                # Record ENTRY order execution
+                trading_data.record_order(
+                    strategy_id=self.strategy_id,
+                    instrument_id=str(self.instrument_id),
+                    trade_type="DAYTRADE", 
+                    trade_direction="ENTRY",
+                    order_side=event.order_side.name,
+                    order_type="MARKET",
+                    quantity=float(event.last_qty), # Record this FILL quantity, not total
+                    status=status,
+                    submitted_time=entry_time,
+                    trade_id=self.active_trade_id,
+                    client_order_id=str(event.client_order_id),
+                    filled_time=entry_time,
+                    filled_quantity=float(event.last_qty),
+                    filled_price=float(event.last_px),
+                    commission=0.0, 
                 )
             else:
                 self.logger.warning("No trading_data_service found on integration manager")
@@ -1742,6 +1766,29 @@ class BaseStrategy(Strategy):
                     exit_price=exit_price,
                     exit_reason=exit_reason,
                     exit_time=self.clock.utc_now().isoformat(),
+                    commission=commission,
+                )
+                
+                # Get order status
+                order = self.cache.order(event.client_order_id)
+                status = order.status.name if order else "FILLED"
+                
+                # Record EXIT order execution
+                trading_data.record_order(
+                    strategy_id=self.strategy_id,
+                    instrument_id=str(self.instrument_id),
+                    trade_type="DAYTRADE", 
+                    trade_direction="EXIT",
+                    order_side=event.order_side.name,
+                    order_type="MARKET",
+                    quantity=float(event.last_qty),
+                    status=status,
+                    submitted_time=self.clock.utc_now().isoformat(),
+                    trade_id=self.active_trade_id,
+                    client_order_id=str(event.client_order_id),
+                    filled_time=self.clock.utc_now().isoformat(),
+                    filled_quantity=float(event.last_qty),
+                    filled_price=float(event.last_px),
                     commission=commission,
                 )
                 
