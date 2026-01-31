@@ -432,11 +432,17 @@ export default function Analytics() {
                                             <th className="px-4 py-3 cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('direction')}>
                                                 <div className="flex items-center gap-1">Side {sortConfig.key === 'direction' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
                                             </th>
+                                            <th className="px-4 py-3 text-right cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('quantity')}>
+                                                <div className="flex items-center justify-end gap-1">Qty {sortConfig.key === 'quantity' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
+                                            </th>
                                             <th className="px-4 py-3 text-right cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('entry_price')}>
                                                 <div className="flex items-center justify-end gap-1">Entry {sortConfig.key === 'entry_price' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
                                             </th>
                                             <th className="px-4 py-3 text-right cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('exit_price')}>
                                                 <div className="flex items-center justify-end gap-1">Exit {sortConfig.key === 'exit_price' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
+                                            </th>
+                                            <th className="px-4 py-3 text-right cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('commission')}>
+                                                <div className="flex items-center justify-end gap-1">Comm. {sortConfig.key === 'commission' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
                                             </th>
                                             <th className="px-4 py-3 text-right cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('net_pnl')}>
                                                 <div className="flex items-center justify-end gap-1">PnL (Net) {sortConfig.key === 'net_pnl' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
@@ -470,11 +476,17 @@ export default function Analytics() {
                                                             {trade.direction}
                                                         </span>
                                                     </td>
+                                                    <td className="px-4 py-3 text-right font-mono text-white/80">
+                                                        {trade.quantity}
+                                                    </td>
                                                     <td className="px-4 py-3 text-right font-mono">
                                                         {trade.entry_price.toFixed(2)}
                                                     </td>
                                                     <td className="px-4 py-3 text-right font-mono text-white/60">
                                                         {trade.exit_price !== null ? trade.exit_price.toFixed(2) : '-'}
+                                                    </td>
+                                                    <td className="px-4 py-3 text-right font-mono text-white/60">
+                                                        {formatCurrency(trade.commission || 0)}
                                                     </td>
                                                     <td className={`px-4 py-3 text-right font-mono font-medium ${isWin ? 'text-emerald-400' : (netPnl < 0 ? 'text-red-400' : 'text-gray-400')
                                                         }`}>
@@ -598,8 +610,8 @@ function parseInstrument(id: string): string {
     if (!id) return '-';
 
     // Handle Nautilus Spread Match
-    // Example: ((1))SPXW260130C06965000___(1)SPXW260130C06970000.CBOE
-    const spreadMatch = id.match(/\(\(\d+\)\)([A-Z0-9]+)___\(\d+\)([A-Z0-9]+)/);
+    // Matches: ((1))SYMBOL___(1)SYMBOL or (1)SYMBOL___SYMBOL etc.
+    const spreadMatch = id.match(/(?:(?:\(\(?\d+\)\)?))?([A-Z0-9]+)___(?:(?:\(\(?\d+\)\)?))?([A-Z0-9]+)/);
 
     // Normalize Helper
     const formatLeg = (leg: string) => {
@@ -635,5 +647,5 @@ function parseInstrument(id: string): string {
     }
 
     // Fallback: cleanup ugly chars
-    return id.replace(/\(\(\d+\)\)/g, '').replace(/___\(\d+\)/g, '/').split('.')[0];
+    return id.replace(/(?:\(\(?\d+\)\)?)/g, '').replace(/___/g, '/').split('.')[0];
 }
