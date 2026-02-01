@@ -210,7 +210,7 @@ export default function Dashboard() {
                 <SidebarItem
                     icon="database"
                     label="VictoriaLogs"
-                    onClick={() => window.open(`http://${window.location.hostname}:9428/select/vmui/`, '_blank')}
+                    onClick={() => window.open(`${window.location.origin}/vmui/`, '_blank')}
                 />
             </Sidebar>
 
