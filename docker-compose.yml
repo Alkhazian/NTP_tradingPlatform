@@ -40,6 +40,8 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+      - ./backend/app:/app/app
+      - ./backend/tests:/app/tests
 
   frontend:
     build: ./frontend

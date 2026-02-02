@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, Dict, Any, List
 
 class StrategyConfig(BaseModel):
@@ -13,5 +13,4 @@ class StrategyConfig(BaseModel):
     # Generic parameters container
     parameters: Dict[str, Any] = Field(default_factory=dict, description="Strategy-specific parameters")
 
-    class Config:
-        extra = "allow" # Allow extra fields for flexibility
+    model_config = ConfigDict(extra="allow")
