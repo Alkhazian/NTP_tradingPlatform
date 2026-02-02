@@ -143,8 +143,6 @@ class TradingDataService:
                         max_unrealized_loss REAL DEFAULT 0.0,
                         max_unrealized_loss_time TEXT,
                         entry_premium_per_contract REAL,
-                        sl_distance_at_max_dd REAL,
-                        dd_recovery_time_seconds INTEGER,
                         pnl_snapshots TEXT,
                         status TEXT NOT NULL DEFAULT 'OPEN',
                         exit_reason TEXT,
@@ -375,23 +373,8 @@ class TradingDataService:
                 except:
                     duration_seconds = None
                 
-                # Calculate SL distance at max drawdown
-                sl_distance = None
-                if entry_stop_loss is not None and trade_data.get("max_unrealized_loss") is not None:
-                    # Distance from max DD to stop loss (positive = still had room)
-                    max_dd = trade_data.get("max_unrealized_loss", 0)
-                    sl_level = abs(entry_stop_loss) * 100 * quantity  # SL in dollars
-                    sl_distance = sl_level - abs(max_dd)
-                
-                # Calculate DD recovery time
-                dd_recovery_time = None
-                if max_dd_time and trade_data.get("max_unrealized_loss", 0) < 0:
-                    try:
-                        dd_dt = datetime.fromisoformat(max_dd_time.replace("Z", "+00:00"))
-                        dd_recovery_time = int((exit_dt - dd_dt).total_seconds())
-                    except:
-                        pass
-                
+
+
                 # Commission
                 total_commission = commission or 0.0
                 net_pnl = pnl - total_commission
@@ -418,8 +401,6 @@ class TradingDataService:
                         max_unrealized_profit = ?,
                         max_unrealized_loss = ?,
                         max_unrealized_loss_time = ?,
-                        sl_distance_at_max_dd = ?,
-                        dd_recovery_time_seconds = ?,
                         pnl_snapshots = ?,
                         status = 'CLOSED',
                         updated_at = datetime('now')
@@ -436,8 +417,6 @@ class TradingDataService:
                     trade_data.get("max_unrealized_profit", 0),
                     trade_data.get("max_unrealized_loss", 0),
                     max_dd_time,
-                    sl_distance,
-                    dd_recovery_time,
                     self._safe_json(trade_data.get("pnl_snapshots", [])),
                     trade_id,
                 ))
@@ -708,8 +687,6 @@ class TradingDataService:
                         entry_stop_loss,
                         max_unrealized_loss,
                         max_unrealized_loss_time,
-                        sl_distance_at_max_dd,
-                        dd_recovery_time_seconds,
                         pnl,
                         net_pnl,
                         result,

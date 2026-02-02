@@ -106,6 +106,9 @@ class BaseStrategy(Strategy):
         # Sequential bracket tracking (intent to submit exits after entry fill)
         # Entry ClientOrderId -> {sl_price, tp_price, ...}
         self._pending_bracket_exits: Dict[ClientOrderId, Dict[str, Any]] = {}
+        
+        # Track active orders limit prices for DB reconciliation
+        self._active_spread_order_limits: Dict[ClientOrderId, float] = {}
 
 
     # =========================================================================
@@ -565,6 +568,9 @@ class BaseStrategy(Strategy):
             )
             order_type = "LIMIT"
             price_str = f"{rounded_price:.4f} (original: {limit_price:.4f})"
+            
+            # TRACK LIMIT PRICE
+            self._active_spread_order_limits[order.client_order_id] = rounded_price
         else:
             # Market order (use with caution for spreads)
             order = self.order_factory.market(
@@ -1463,9 +1469,15 @@ class BaseStrategy(Strategy):
             order = self.cache.order(order_id)
             
             if is_spread_order and order:
-                fill_value = float(event.last_qty) * float(event.last_px) * 100  # Options multiplier
+                # Use tracked limit price if available to report accurate spread price
+                display_price = float(event.last_px)
+                tracked_limit = self._active_spread_order_limits.get(order_id)
+                if tracked_limit is not None:
+                     display_price = tracked_limit
+                
+                fill_value = float(event.last_qty) * display_price * 100  # Options multiplier
                 self.logger.info(
-                    f"✅ SPREAD ORDER FILLED BY BROKER | {order.instrument_id} | {order.side.name} | Qty: {event.last_qty} | Px: {event.last_px} | Val: ${abs(fill_value):.2f}",
+                    f"✅ SPREAD ORDER FILLED BY BROKER | {order.instrument_id} | {order.side.name} | Qty: {event.last_qty} | Px: {display_price} | Val: ${abs(fill_value):.2f}",
                     extra={
                         "extra": {
                             "event_type": "spread_fill",
@@ -1473,7 +1485,7 @@ class BaseStrategy(Strategy):
                             "instrument_id": str(order.instrument_id),
                             "side": order.side.name,
                             "filled_qty": float(event.last_qty),
-                            "fill_price": float(event.last_px),
+                            "fill_price": float(display_price), # Use display price here too
                             "fill_value": float(abs(fill_value)),
                             "order_status": order.status.name,
                             "provider": "IB"
