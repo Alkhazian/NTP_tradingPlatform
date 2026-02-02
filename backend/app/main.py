@@ -356,6 +356,7 @@ async def get_all_stats():
                     COUNT(*) as total_trades,
                     SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as wins,
                     SUM(CASE WHEN result = 'LOSS' THEN 1 ELSE 0 END) as losses,
+                    SUM(pnl) as total_gross_pnl,
                     SUM(net_pnl) as total_net_pnl,
                     SUM(commission) as total_commission,
                     AVG(net_pnl) as avg_net_pnl,
@@ -369,13 +370,14 @@ async def get_all_stats():
             
             row = cursor.fetchone()
             if not row or row["total_trades"] == 0:
-                return {"total_trades": 0, "win_rate": 0}
+                return {"total_trades": 0, "win_rate": 0, "gross_pnl": 0.0, "net_pnl": 0.0, "total_commission": 0.0}
             
             return {
                 "total_trades": row["total_trades"],
                 "wins": row["wins"] or 0,
                 "losses": row["losses"] or 0,
                 "win_rate": round(100 * (row["wins"] or 0) / row["total_trades"], 1),
+                "gross_pnl": round(row["total_gross_pnl"] or 0, 2),
                 "net_pnl": round(row["total_net_pnl"] or 0, 2),
                 "total_pnl": round(row["total_net_pnl"] or 0, 2),
                 "total_commission": round(row["total_commission"] or 0, 2),

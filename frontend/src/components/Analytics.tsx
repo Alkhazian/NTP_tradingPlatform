@@ -38,6 +38,7 @@ interface Stats {
     total_trades: number;
     win_rate: number;
     total_pnl: number;
+    gross_pnl: number;
     total_commission: number;
     net_pnl: number;
     max_win: number;
@@ -344,13 +345,7 @@ export default function Analytics() {
                 <>
                     {/* Stats Cards */}
                     {stats && (
-                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-                            <StatsCard
-                                title="Net PnL"
-                                value={formatCurrency(stats.net_pnl)}
-                                icon={<DollarSign className="w-4 h-4" />}
-                                trend={stats.net_pnl >= 0 ? 'up' : 'down'}
-                            />
+                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
                             <StatsCard
                                 title="Total Trades"
                                 value={stats.total_trades.toString()}
@@ -362,23 +357,21 @@ export default function Analytics() {
                                 icon={<Percent className="w-4 h-4" />}
                             />
                             <StatsCard
-                                title="Max Win"
-                                value={formatCurrency(stats.max_win)}
-                                icon={<TrendingUp className="w-4 h-4 text-emerald-400" />}
-                                trend="up"
-                                className="border-emerald-500/20"
-                            />
-                            <StatsCard
-                                title="Max Loss"
-                                value={formatCurrency(stats.max_loss)}
-                                icon={<TrendingDown className="w-4 h-4 text-red-400" />}
-                                trend="down"
-                                className="border-red-500/20"
+                                title="Gross PnL"
+                                value={formatCurrency(stats.gross_pnl)}
+                                icon={<DollarSign className="w-4 h-4" />}
+                                trend={stats.gross_pnl >= 0 ? 'up' : 'down'}
                             />
                             <StatsCard
                                 title="Total Comm."
                                 value={formatCurrency(stats.total_commission)}
                                 icon={<Activity className="w-4 h-4 text-orange-400" />}
+                            />
+                            <StatsCard
+                                title="Net PnL"
+                                value={formatCurrency(stats.net_pnl)}
+                                icon={<DollarSign className="w-4 h-4" />}
+                                trend={stats.net_pnl >= 0 ? 'up' : 'down'}
                             />
                         </div>
                     )}
