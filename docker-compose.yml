@@ -2,13 +2,19 @@ services:
   nginx:
     image: nginx:alpine
     container_name: ntd-nginx
+    entrypoint: ["/docker-entrypoint.sh"]
     ports:
       - "80:80"
+    environment:
+      - DASHBOARD_USER=${DASHBOARD_USER:-admin}
+      - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD}
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/docker-entrypoint.sh:/docker-entrypoint.sh:ro
     depends_on:
       - frontend
       - backend
+      - victorialogs
     networks:
       - ntd-network
 
@@ -86,9 +92,7 @@ services:
     ports:
       # VNC port for 2FA access (use VNC client)
       - "5900:5900"
-      # IB API port - mapped to standard 4001/4002 on host
-      - "4001:4003"
-      - "4002:4004"
+      # IB API ports removed - backend uses internal Docker network
     networks:
       - ntd-network
 
@@ -102,8 +106,8 @@ services:
       - -httpListenAddr=:9428
     volumes:
       - victorialogs-data:/data
-    ports:
-      - "9428:9428"
+    expose:
+      - "9428"
     networks:
       - ntd-network
     restart: unless-stopped
