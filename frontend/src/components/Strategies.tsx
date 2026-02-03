@@ -21,6 +21,7 @@ interface StrategyStatus {
     metrics?: {
         total_trades: number;
         win_rate: number;
+        gross_pnl: number;
         total_pnl: number;
         total_commission: number;
         net_pnl: number;
@@ -239,8 +240,8 @@ export default function Strategies() {
                                             </div>
                                             <div className="space-y-1">
                                                 <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-widest">Gross PnL</p>
-                                                <p className={`text-xl font-bold ${(strategy.metrics?.total_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                                    {(strategy.metrics?.total_pnl || 0) < 0 ? '-' : ''}${Math.abs(strategy.metrics?.total_pnl || 0).toFixed(2)}
+                                                <p className={`text-xl font-bold ${(strategy.metrics?.gross_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                                    {(strategy.metrics?.gross_pnl || 0) < 0 ? '-' : ''}${Math.abs(strategy.metrics?.gross_pnl || 0).toFixed(2)}
                                                 </p>
                                             </div>
                                             <div className="space-y-1">

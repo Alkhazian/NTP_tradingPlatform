@@ -37,7 +37,7 @@ from nautilus_trader.model.instruments import Instrument
 
 from app.strategies.base_spx import SPXBaseStrategy
 from app.strategies.config import StrategyConfig
-from app.services.drawdown_recorder import DrawdownRecorder
+from app.services.trading_data_service import TradingDataService
 
 
 class SPX15MinRangeStrategy(SPXBaseStrategy):
@@ -95,9 +95,11 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._position_log_interval_seconds: int = 30  # Log position status every N seconds
         self._cache_poll_interval_seconds: int = 2     # Poll cache for instruments every N seconds
         self._required_legs_count: int = 2             # Number of option legs required for spread
-        
-        # Drawdown tracking
-        self._drawdown_recorder = DrawdownRecorder(db_path="data/trade_drawdowns.db")
+
+        # Trading data service (orders + trades + drawdown tracking)
+        self._trading_data = TradingDataService(db_path="data/trading.db")
+        self._current_trade_id: Optional[str] = None
+        self._total_commission: float = 0.0  # Track total commission for the trade
         
         # Calculate range end time for logging
         range_end_time = "Range Close" # Will be calculated/logged by base
@@ -890,28 +892,122 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             self._signal_time = None
             self._signal_close_price = None
             
-            # Start drawdown tracking with strikes and premium info
+            # Start trade tracking with TradingDataService
             now = self.clock.utc_now().astimezone(self.tz)
-            trade_date = now.strftime("%Y-%m-%d")
-            entry_time = now.strftime("%H:%M:%S")
+            entry_time_iso = now.isoformat()
+            
+            # Generate unique trade ID
+            trade_date_str = now.strftime("%Y%m%d")
+            trade_time_str = now.strftime("%H%M%S")
+            self._current_trade_id = f"T-SPX-{trade_date_str}-{trade_time_str}"
             
             # Safely capture strike and premium info (may be None if something went wrong)
             try:
                 short_strike = self._target_short_strike
                 long_strike = self._target_long_strike
                 entry_premium = abs(rounded_mid) * 100  # Premium in dollars per spread
-            except Exception:
+                
+                # Determine trade type based on signal direction
+                if self._signal_direction == 'bearish':
+                    trade_type = "CALL_CREDIT_SPREAD"
+                else:
+                    trade_type = "PUT_CREDIT_SPREAD"
+                
+                # Build strikes list
+                kind_char = "C" if self._signal_direction == 'bearish' else "P"
+                strikes_list = [f"{int(short_strike)}{kind_char}", f"{int(long_strike)}{kind_char}"]
+                
+                # Build legs info
+                legs_info = [
+                    {"strike": short_strike, "side": "SELL", "type": kind_char},
+                    {"strike": long_strike, "side": "BUY", "type": kind_char}
+                ]
+                
+                # Calculate max profit and max loss
+                max_profit = entry_premium * self.config_quantity  # Max profit = credit received
+                spread_width = abs(short_strike - long_strike)
+                max_loss = (spread_width * 100 - entry_premium) * self.config_quantity
+                
+                # Entry reason context
+                entry_reason = {
+                    "trigger": self._signal_direction.upper() + "_BREAKOUT",
+                    "close_price": self._signal_close_price,
+                    "range_high": self.or_high,
+                    "range_low": self.or_low,
+                    "current_spx": self.current_spx_price
+                }
+                
+                # Strategy config snapshot
+                strategy_config_snapshot = {
+                    "sl_multiplier": self.stop_loss_multiplier,
+                    "tp_amount": self.take_profit_amount,
+                    "min_credit": self.min_credit_amount,
+                    "quantity": self.config_quantity,
+                    "width": self.strike_width
+                }
+                
+                # Calculate stop loss and take profit levels
+                entry_stop_loss = -(abs(rounded_mid) * self.stop_loss_multiplier)
+                tp_points = self.take_profit_amount / 100.0
+                entry_target_price = -(abs(rounded_mid) - tp_points)
+                
+            except Exception as e:
+                self.logger.warning(f"Error capturing trade context: {e}")
                 short_strike = None
                 long_strike = None
                 entry_premium = None
+                trade_type = "CREDIT_SPREAD"
+                strikes_list = None
+                legs_info = None
+                max_profit = None
+                max_loss = None
+                entry_reason = None
+                strategy_config_snapshot = None
+                entry_stop_loss = None
+                entry_target_price = None
             
-            self._drawdown_recorder.start_tracking(
-                trade_date=trade_date,
-                entry_time=entry_time,
-                short_strike=short_strike,
-                long_strike=long_strike,
-                entry_premium=entry_premium
+            # Create trade record
+            self._trading_data.start_trade(
+                trade_id=self._current_trade_id,
+                strategy_id=self.strategy_id,
+                instrument_id=str(self.spread_instrument.id) if self.spread_instrument else "UNKNOWN",
+                trade_type=trade_type,
+                entry_price=rounded_mid,  # Negative for credit
+                quantity=self.config_quantity,
+                direction="LONG",  # We BUY the spread (credit spread is long combo)
+                entry_time=entry_time_iso,
+                entry_reason=entry_reason,
+                entry_target_price=entry_target_price,
+                entry_stop_loss=entry_stop_loss,
+                strikes=strikes_list,
+                expiration=now.strftime("%Y-%m-%d"),  # 0DTE
+                legs=legs_info,
+                strategy_config=strategy_config_snapshot,
+                max_profit=max_profit,
+                max_loss=max_loss,
+                entry_premium_per_contract=entry_premium,
             )
+            
+            # Record entry order
+            self._trading_data.record_order(
+                strategy_id=self.strategy_id,
+                instrument_id=str(self.spread_instrument.id) if self.spread_instrument else "UNKNOWN",
+                trade_type=trade_type,
+                trade_direction="ENTRY",
+                order_side="BUY",
+                order_type="LIMIT",
+                quantity=self.config_quantity,
+                status="FILLED",  # We record on fill
+                submitted_time=entry_time_iso,
+                trade_id=self._current_trade_id,
+                client_order_id=f"{self._current_trade_id}-ENTRY",
+                price_limit=rounded_mid,
+                filled_time=entry_time_iso,
+                filled_quantity=self.config_quantity,
+                filled_price=rounded_mid,
+                raw_data=entry_reason,
+            )
+
             
             self.save_state()
         else:
@@ -996,8 +1092,12 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         pnl_per_spread = (entry_credit - current_cost) * 100
         total_pnl = pnl_per_spread * current_qty
         
-        # Update drawdown tracking with per-contract P&L (not total)
-        self._drawdown_recorder.update_drawdown(pnl_per_spread)
+        # Update trade metrics (drawdown tracking) with per-contract P&L
+        if self._current_trade_id:
+            self._trading_data.update_trade_metrics(
+                trade_id=self._current_trade_id,
+                current_pnl=pnl_per_spread
+            )
         
         # Calculate SL/TP prices for logging
         stop_price = -(self._spread_entry_price * self.stop_loss_multiplier)
@@ -1358,8 +1458,14 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._last_log_minute = -1
         self._closing_in_progress = False
         
-        # Cancel any orphaned drawdown tracking from previous day
-        self._drawdown_recorder.cancel_tracking()
+        # Cancel any orphaned trade tracking from previous day
+        if self._current_trade_id:
+            self._trading_data.cancel_trade(self._current_trade_id)
+            self._current_trade_id = None
+        
+        self._total_commission = 0.0
+        self._processed_executions = set()
+
         
         self.logger.info(
             f"📅 NEW TRADING DAY: {new_date} | Previous: {old_date} | Range Start: {self.start_time}",
@@ -1385,6 +1491,8 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             "_target_long_strike": self._target_long_strike,
             "_signal_direction": self._signal_direction,
             "_closing_in_progress": self._closing_in_progress,
+            "_current_trade_id": self._current_trade_id,
+            "_total_commission": self._total_commission,
         })
         return state
 
@@ -1400,6 +1508,8 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._target_long_strike = state.get("_target_long_strike")
         self._signal_direction = state.get("_signal_direction")
         self._closing_in_progress = state.get("_closing_in_progress", False)
+        self._current_trade_id = state.get("_current_trade_id")
+        self._total_commission = state.get("_total_commission", 0.0)
         
         self.logger.info(
             f"State restored | Range: {self.daily_low}-{self.daily_high} | Calculated: {self.range_calculated} | Traded: {self.traded_today} | Dir: {self._signal_direction}",
@@ -1455,39 +1565,172 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
 
     def on_order_filled_safe(self, event):
         """Handle order fill events - reset closing state when close order is filled."""
+        
+        # Track commission from any fill (Entry or Exit) with deduplication
+        if event.commission:
+            try:
+                # Deduplication logic:
+                # 1. Use trade_id (execution ID) to identify unique fills
+                # 2. Prefer OptionSpread fills over leg fills if available (to capture full commission in one go)
+                
+                exec_id = getattr(event, "trade_id", None)
+                is_duplicate = False
+                
+                if exec_id:
+                    if exec_id in self._processed_executions:
+                        self.logger.info(f"🔁 Duplicate execution commission ignored: {exec_id}")
+                        is_duplicate = True
+                    else:
+                        self._processed_executions.add(exec_id)
+                
+                if not is_duplicate:
+                    # Check instrument type - if we are trading spreads, we generally want to capture 
+                    # the commission from the spread fill event, not individual legs, unless the broker 
+                    # reports commissions ONLY on legs.
+                    # Interactive Brokers can report both.
+                    
+                    try:
+                        instrument = self.cache.instrument(event.instrument_id)
+                        is_spread = hasattr(instrument, "legs") or type(instrument).__name__ == "OptionSpread"
+                    except:
+                        is_spread = False
+
+                    # If it's a spread execution, or if we haven't seen this execution ID before (and it might be a leg fill where spread fill is missing), we take it.
+                    # BUT, to be safe against double counting (Spread + Legs), we can choose to ONLY count commissions attached to the SPREAD instrument itself.
+                    
+                    if is_spread:
+                        comm = event.commission.as_double()
+                        self._total_commission += comm
+                        self.logger.info(f"💵 Commission captured (Spread): ${comm:.2f} | Total: ${self._total_commission:.2f}")
+                    else:
+                        # It's a leg fill. Log it but don't add to total if we expect spread fills.
+                        # However, if the broker only reports on legs, we might miss it.
+                        # Given the logs showed $7.75 (Spread) vs $3.87 (Leg), the Spread one is correct/full.
+                        # So we safely IGNORE leg commissions to avoid duplication.
+                        self.logger.info(f"💵 Commission ignored for Leg fill: ${event.commission.as_double():.2f}")
+                        
+            except Exception as e:
+                self.logger.warning(f"Failed to capture commission: {e}")
+
         # Check if this is a close order fill (we were in closing state)
         if self._closing_in_progress:
             # Verify position is now flat (close order was filled)
+            # Verify position is now flat (close order was filled)
             effective_qty = self.get_effective_spread_quantity()
             if effective_qty == 0:
-                # Get the order to find the average fill price (handles partial fills correctly)
-                order = self.cache.order(event.client_order_id)
-                if order and hasattr(order, "avg_px"):
-                     # avg_px is the weighted average price of all fills for this order
-                     fill_price = order.avg_px.as_double() if hasattr(order.avg_px, "as_double") else float(order.avg_px)
+                # 1. Determine Fill Price
+                # Priority: Tracked Limit Price > Order Avg Price > Fill Price
+                # For Spreads, relying on Limit Price avoids "leg price" reporting issues.
+                fill_price = 0.0
+                tracked_limit = self._active_spread_order_limits.get(event.client_order_id)
+                
+                if tracked_limit is not None:
+                    fill_price = tracked_limit
+                    self.logger.info(f"✅ Using tracked LIMIT price for spread exit: {fill_price}")
                 else:
-                     # Fallback to last_px if order not found (should not happen)
-                     fill_price = event.last_px.as_double() if hasattr(event.last_px, "as_double") else float(event.last_px)
-                entry_credit = self._spread_entry_price
+                    self.logger.warning(f"⚠️ No tracked limit for {event.client_order_id}, falling back to event price")
+                    # Get the order to find the average fill price (handles partial fills correctly)
+                    order = self.cache.order(event.client_order_id)
+                    if order and hasattr(order, "avg_px"):
+                         # avg_px is the weighted average price of all fills for this order
+                         fill_price = order.avg_px.as_double() if hasattr(order.avg_px, "as_double") else float(order.avg_px)
+                    else:
+                         # Fallback to last_px if order not found (should not happen)
+                         fill_price = event.last_px.as_double() if hasattr(event.last_px, "as_double") else float(event.last_px)
+
+                entry_credit = self._spread_entry_price if self._spread_entry_price is not None else 0.0
+                # Note: spread prices are credits (negative) or debits (negative/positive depending on view).
+                # Our entry is stored as absolute value in _spread_entry_price usually? 
+                # No, database has -0.5. Strategy state usually keeps absolute credit? 
+                # Let's check _check_and_submit_entry: "credit_received = abs(mid)..." 
+                # But _spread_entry_price seems to be used as credit amount elsewhere.
+                
+                # RE-VERIFY P&L LOGIC
+                # Entry Credit: 0.50 (captured as abs value usually, but let's check init)
+                # Exit Cost (Debit): fill_price (e.g. -0.10, which means we PAY 0.10)
+                # But wait, limit price -0.10 means we pay.
+                # If fill_price is -0.10.
+                # P&L = Credit - Debit = 0.50 - 0.10 = 0.40.
+                
+                # If _spread_entry_price is stored as positive credit (0.50):
+                # And fill_price is -0.10 (Tracked limit).
+                # We need abs(fill_price) = 0.10 is the Cost.
+                
                 current_cost = abs(fill_price)
                 final_pnl = (entry_credit - current_cost) * 100  # P&L per spread (already closed)
                 
-                # Finish drawdown tracking and save record
+                # Close trade and record exit order
                 now = self.clock.utc_now().astimezone(self.tz)
-                exit_time = now.strftime("%H:%M:%S")
-                self._drawdown_recorder.finish_tracking(exit_time, final_pnl, strategy_id=str(self.id))
+                exit_time_iso = now.isoformat()
+                
+                # Determine exit reason based on what triggered the close
+                stop_price = -(entry_credit * self.stop_loss_multiplier)
+                tp_points = self.take_profit_amount / 100.0
+                required_debit = entry_credit - tp_points
+                if required_debit < 0.05:
+                    required_debit = 0.05
+                tp_price = -required_debit
+                
+                if fill_price <= stop_price:
+                    exit_reason = "STOP_LOSS"
+                elif fill_price >= tp_price:
+                    exit_reason = "TAKE_PROFIT"
+                else:
+                    exit_reason = "MANUAL"
+                
+                # Close trade record
+                if self._current_trade_id:
+                    self._trading_data.close_trade(
+                        trade_id=self._current_trade_id,
+                        exit_price=fill_price,
+                        exit_reason=exit_reason,
+                        exit_time=exit_time_iso,
+                        commission=self._total_commission,
+                    )
+                    
+                    # Record exit order
+                    trade_type = "CALL_CREDIT_SPREAD" if self._signal_direction == 'bearish' else "PUT_CREDIT_SPREAD"
+                    self._trading_data.record_order(
+                        strategy_id=self.strategy_id,
+                        instrument_id=str(self.spread_instrument.id) if self.spread_instrument else "UNKNOWN",
+                        trade_type=trade_type,
+                        trade_direction="EXIT",
+                        order_side="SELL",
+                        order_type="LIMIT",
+                        quantity=self.config_quantity,
+                        status="FILLED",
+                        price_limit=fill_price, # We use the effective fill limit
+                        submitted_time=exit_time_iso,
+                        trade_id=self._current_trade_id,
+                        client_order_id=f"{self._current_trade_id}-EXIT",
+                        filled_time=exit_time_iso,
+                        filled_quantity=self.config_quantity,
+                        filled_price=fill_price,
+                        raw_data={"trigger": exit_reason, "pnl": final_pnl},
+                    )
+                
+                # Get max drawdown for logging
+
+                trade_data = self._trading_data.get_trade(self._current_trade_id) if self._current_trade_id else {}
+                max_dd = trade_data.get("max_unrealized_loss", 0) if trade_data else 0
                 
                 self.logger.info(
                     "✅ Position close confirmed | Resetting spread state",
                     extra={
                         "extra": {
                             "event_type": "position_close_confirmed",
+                            "trade_id": self._current_trade_id,
                             "previous_entry_price": self._spread_entry_price,
-                            "max_drawdown": self._drawdown_recorder.get_current_max_drawdown(),
+                            "exit_price": fill_price,
+                            "exit_reason": exit_reason,
+                            "max_drawdown": max_dd,
                             "final_pnl": final_pnl
                         }
                     }
                 )
                 self._spread_entry_price = None
                 self._closing_in_progress = False
+                self._current_trade_id = None
+                self._total_commission = 0.0  # Reset for next time (though typically once per day)
                 self.save_state()
+

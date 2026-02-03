@@ -38,6 +38,7 @@ interface Stats {
     total_trades: number;
     win_rate: number;
     total_pnl: number;
+    gross_pnl: number;
     total_commission: number;
     net_pnl: number;
     max_win: number;
@@ -51,7 +52,7 @@ const getUrl = (path: string) => {
 
 export default function Analytics() {
     const [strategies, setStrategies] = useState<Strategy[]>([]);
-    const [selectedStrategy, setSelectedStrategy] = useState<string>('');
+    const [selectedStrategy, setSelectedStrategy] = useState<string>('all');
     const [stats, setStats] = useState<Stats | null>(null);
     const [trades, setTrades] = useState<Trade[]>([]);
     const [isLoading, setIsLoading] = useState(false);
@@ -70,9 +71,8 @@ export default function Analytics() {
             .then(data => {
                 const strats = Array.isArray(data) ? data : [];
                 setStrategies(strats);
-                if (strats.length > 0) {
-                    setSelectedStrategy(strats[0].id);
-                }
+                // Default to "All Strategies"
+                setSelectedStrategy('all');
             })
             .catch(console.error);
     }, []);
@@ -81,10 +81,20 @@ export default function Analytics() {
     useEffect(() => {
         if (!selectedStrategy) return;
 
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         setIsLoading(true);
+
+        // Use different endpoints for "all" vs specific strategy
+        const statsUrl = selectedStrategy === 'all'
+            ? getUrl('/stats/all')
+            : getUrl(`/strategies/${selectedStrategy}/stats`);
+        const tradesUrl = selectedStrategy === 'all'
+            ? getUrl('/trades/all?limit=1000')
+            : getUrl(`/strategies/${selectedStrategy}/trades?limit=1000`);
+
         Promise.all([
-            fetch(getUrl(`/strategies/${selectedStrategy}/stats`)).then(res => res.json()),
-            fetch(getUrl(`/strategies/${selectedStrategy}/trades?limit=0`)).then(res => res.json())
+            fetch(statsUrl).then(res => res.json()),
+            fetch(tradesUrl).then(res => res.json())
         ]).then(([statsData, tradesData]) => {
             setStats(statsData);
             setTrades(tradesData);
@@ -103,11 +113,13 @@ export default function Analytics() {
                 const net = (t.pnl || 0) - (t.commission || 0);
                 runningPnL += net;
                 return {
-                    time: new Date(t.exit_time || t.entry_time).getTime() / 1000 as any,
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    time: (new Date(t.exit_time || t.entry_time).getTime() / 1000) as any,
                     value: runningPnL
                 };
             });
 
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const uniqueData: { time: any, value: number }[] = [];
         data.forEach(point => {
             if (uniqueData.length > 0 && uniqueData[uniqueData.length - 1].time >= point.time) {
@@ -190,7 +202,9 @@ export default function Analytics() {
 
         // Sorting
         items.sort((a, b) => {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             let aValue: any = a[sortConfig.key as keyof Trade];
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             let bValue: any = b[sortConfig.key as keyof Trade];
 
             // Handle computed Net PnL
@@ -221,13 +235,14 @@ export default function Analytics() {
     // Report State
     const [activeView, setActiveView] = useState<'stats' | 'reports'>('stats');
     const [reportType, setReportType] = useState<string>('fills');
-    const [reportData, setReportData] = useState<any[]>([]);
+    const [reportData, setReportData] = useState<Record<string, unknown>[]>([]);
     const [reportLoading, setReportLoading] = useState(false);
 
     // Fetch Report Data
     useEffect(() => {
         if (activeView !== 'reports') return;
 
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         setReportLoading(true);
         fetch(getUrl(`/analytics/reports/${reportType}`))
             .then(res => res.json())
@@ -239,7 +254,7 @@ export default function Analytics() {
     }, [activeView, reportType]);
 
     // Format Report Value
-    const formatReportValue = (key: string, value: any) => {
+    const formatReportValue = (key: string, value: unknown) => {
         if (value === null || value === undefined) return '-';
 
         // Handle timestamps identified by key
@@ -253,7 +268,7 @@ export default function Analytics() {
                 }
             }
 
-            const date = new Date(dateVal);
+            const date = new Date(dateVal as string | number | Date);
             if (!isNaN(date.getTime())) {
                 return date.toLocaleString();
             }
@@ -300,6 +315,7 @@ export default function Analytics() {
                                 className="bg-transparent text-white font-mono text-sm focus:outline-none min-w-[200px] [&>option]:bg-zinc-900"
                                 disabled={isLoading}
                             >
+                                <option value="all">All Strategies</option>
                                 {strategies.map(s => (
                                     <option key={s.id} value={s.id}>{s.id}</option>
                                 ))}
@@ -329,13 +345,7 @@ export default function Analytics() {
                 <>
                     {/* Stats Cards */}
                     {stats && (
-                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-                            <StatsCard
-                                title="Net PnL"
-                                value={formatCurrency(stats.net_pnl)}
-                                icon={<DollarSign className="w-4 h-4" />}
-                                trend={stats.net_pnl >= 0 ? 'up' : 'down'}
-                            />
+                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
                             <StatsCard
                                 title="Total Trades"
                                 value={stats.total_trades.toString()}
@@ -347,23 +357,21 @@ export default function Analytics() {
                                 icon={<Percent className="w-4 h-4" />}
                             />
                             <StatsCard
-                                title="Max Win"
-                                value={formatCurrency(stats.max_win)}
-                                icon={<TrendingUp className="w-4 h-4 text-emerald-400" />}
-                                trend="up"
-                                className="border-emerald-500/20"
-                            />
-                            <StatsCard
-                                title="Max Loss"
-                                value={formatCurrency(stats.max_loss)}
-                                icon={<TrendingDown className="w-4 h-4 text-red-400" />}
-                                trend="down"
-                                className="border-red-500/20"
+                                title="Gross PnL"
+                                value={formatCurrency(stats.gross_pnl)}
+                                icon={<DollarSign className="w-4 h-4" />}
+                                trend={stats.gross_pnl >= 0 ? 'up' : 'down'}
                             />
                             <StatsCard
                                 title="Total Comm."
                                 value={formatCurrency(stats.total_commission)}
                                 icon={<Activity className="w-4 h-4 text-orange-400" />}
+                            />
+                            <StatsCard
+                                title="Net PnL"
+                                value={formatCurrency(stats.net_pnl)}
+                                icon={<DollarSign className="w-4 h-4" />}
+                                trend={stats.net_pnl >= 0 ? 'up' : 'down'}
                             />
                         </div>
                     )}
@@ -426,11 +434,17 @@ export default function Analytics() {
                                             <th className="px-4 py-3 cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('direction')}>
                                                 <div className="flex items-center gap-1">Side {sortConfig.key === 'direction' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
                                             </th>
+                                            <th className="px-4 py-3 text-right cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('quantity')}>
+                                                <div className="flex items-center justify-end gap-1">Qty {sortConfig.key === 'quantity' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
+                                            </th>
                                             <th className="px-4 py-3 text-right cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('entry_price')}>
                                                 <div className="flex items-center justify-end gap-1">Entry {sortConfig.key === 'entry_price' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
                                             </th>
                                             <th className="px-4 py-3 text-right cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('exit_price')}>
                                                 <div className="flex items-center justify-end gap-1">Exit {sortConfig.key === 'exit_price' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
+                                            </th>
+                                            <th className="px-4 py-3 text-right cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('commission')}>
+                                                <div className="flex items-center justify-end gap-1">Comm. {sortConfig.key === 'commission' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
                                             </th>
                                             <th className="px-4 py-3 text-right cursor-pointer hover:text-white transition-colors" onClick={() => handleSort('net_pnl')}>
                                                 <div className="flex items-center justify-end gap-1">PnL (Net) {sortConfig.key === 'net_pnl' && (sortConfig.direction === 'asc' ? '↑' : '↓')}</div>
@@ -454,10 +468,7 @@ export default function Analytics() {
                                                         {new Date(trade.entry_time).toLocaleString()}
                                                     </td>
                                                     <td className="px-4 py-3 font-medium text-white/90">
-                                                        {trade.instrument_id.split('=')[0]}
-                                                        <span className="text-xs text-muted-foreground ml-1 opacity-50">
-                                                            {trade.instrument_id.split('.')[1]}
-                                                        </span>
+                                                        {parseInstrument(trade.instrument_id)}
                                                     </td>
                                                     <td className="px-4 py-3">
                                                         <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${trade.direction === 'BUY'
@@ -467,11 +478,17 @@ export default function Analytics() {
                                                             {trade.direction}
                                                         </span>
                                                     </td>
+                                                    <td className="px-4 py-3 text-right font-mono text-white/80">
+                                                        {trade.quantity}
+                                                    </td>
                                                     <td className="px-4 py-3 text-right font-mono">
                                                         {trade.entry_price.toFixed(2)}
                                                     </td>
                                                     <td className="px-4 py-3 text-right font-mono text-white/60">
                                                         {trade.exit_price !== null ? trade.exit_price.toFixed(2) : '-'}
+                                                    </td>
+                                                    <td className="px-4 py-3 text-right font-mono text-white/60">
+                                                        {formatCurrency(trade.commission || 0)}
                                                     </td>
                                                     <td className={`px-4 py-3 text-right font-mono font-medium ${isWin ? 'text-emerald-400' : (netPnl < 0 ? 'text-red-400' : 'text-gray-400')
                                                         }`}>
@@ -563,7 +580,16 @@ export default function Analytics() {
     );
 }
 
-function StatsCard({ title, value, icon, subtext, trend, className = '' }: any) {
+interface StatsCardProps {
+    title: string;
+    value: string;
+    icon?: React.ReactNode;
+    subtext?: string;
+    trend?: 'up' | 'down';
+    className?: string;
+}
+
+function StatsCard({ title, value, icon, subtext, trend, className = '' }: StatsCardProps) {
     return (
         <Card variant="glass" className={`p-4 flex flex-col justify-between ${className}`}>
             <div className="flex justify-between items-start mb-2">
@@ -580,4 +606,48 @@ function StatsCard({ title, value, icon, subtext, trend, className = '' }: any) 
             </div>
         </Card>
     );
+}
+
+function parseInstrument(id: string): string {
+    if (!id) return '-';
+
+    // Handle Nautilus Spread Match
+    // Matches: ((1))SYMBOL___(1)SYMBOL or (1)SYMBOL___SYMBOL etc.
+    const spreadMatch = id.match(/(?:(?:\(\(?\d+\)\)?))?([A-Z0-9]+)___(?:(?:\(\(?\d+\)\)?))?([A-Z0-9]+)/);
+
+    // Normalize Helper
+    const formatLeg = (leg: string) => {
+        // SPXW 26 01 30 C 06965000
+        const match = leg.match(/^([A-Z]+)(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/);
+        if (match) {
+            const [, root, yy, mm, dd, side, strikeRaw] = match;
+            const strike = parseInt(strikeRaw) / 1000;
+            const date = new Date(2000 + parseInt(yy), parseInt(mm) - 1, parseInt(dd));
+            const dateStr = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            return { root, dateStr, strike, side };
+        }
+        return null;
+    };
+
+    if (spreadMatch) {
+        const leg1 = formatLeg(spreadMatch[1]);
+        const leg2 = formatLeg(spreadMatch[2]);
+
+        if (leg1 && leg2) {
+            const typeStr = leg1.side === 'C' ? 'Call' : 'Put';
+            // Determine spread type often implied, but just showing strikes is good
+            // "SPXW Jan 30 6965/6970 Call Spread"
+            return `${leg1.root} ${leg1.dateStr} ${leg1.strike}/${leg2.strike} ${typeStr} Spread`;
+        }
+    } else {
+        // Try single leg
+        const leg = formatLeg(id.split('.')[0]);
+        if (leg) {
+            const typeStr = leg.side === 'C' ? 'Call' : 'Put';
+            return `${leg.root} ${leg.dateStr} ${leg.strike} ${typeStr}`;
+        }
+    }
+
+    // Fallback: cleanup ugly chars
+    return id.replace(/(?:\(\(?\d+\)\)?)/g, '').replace(/___/g, '/').split('.')[0];
 }
