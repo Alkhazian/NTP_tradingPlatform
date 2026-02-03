@@ -39,6 +39,7 @@ Thumbs.db
 *.bak
 *.tmp
 trades.db
+trade_drawdowns.db
 
 # Data
 data/historical_data
