@@ -23,6 +23,7 @@ from nautilus_trader.model.instruments import Instrument
 
 from app.strategies.base_spx import SPXBaseStrategy
 from app.strategies.config import StrategyConfig
+from app.strategies.greeks import BlackScholes
 
 
 class Orb15MinLongCallDeltaStrategy(SPXBaseStrategy):
@@ -105,6 +106,7 @@ class Orb15MinLongCallDeltaStrategy(SPXBaseStrategy):
         # Check for breakout (tick-by-tick breakout detection)
         if self.is_opening_range_complete() and not self.breakout_detected:
             self._check_breakout()
+
         
         # Monitor active position for exit conditions
         if self.active_option_id:
@@ -168,6 +170,7 @@ class Orb15MinLongCallDeltaStrategy(SPXBaseStrategy):
             # Check entry conditions
             can_enter, reason = self._can_enter()
             if can_enter:
+                self.logger.info("Entry conditions met. Preparing entry...")
                 self._prepare_entry()
             else:
                 self.logger.warning(f"Cannot enter: {reason}")
@@ -289,6 +292,30 @@ class Orb15MinLongCallDeltaStrategy(SPXBaseStrategy):
                     "multiplier": "100"
                 })
             
+            self.received_options.clear()  # Clear previous results to avoid duplicates
+            
+            # CRITICAL FIX: Check if instruments are ALREADY in cache
+            # request_instruments only triggers on_instrument for NEW instruments
+            now_ny = self.clock.utc_now().astimezone(pytz.timezone('US/Eastern'))
+            expiry_str = now_ny.strftime("%Y%m%d")
+            
+            for instrument in self.cache.instruments():
+                id_str = str(instrument.id)
+                symbol_str = str(instrument.symbol)
+                is_spx = "SPX" in symbol_str or "SPX" in id_str
+                is_call = hasattr(instrument, 'option_kind') and getattr(instrument, 'option_kind', None) == OptionKind.CALL
+                
+                if is_spx and is_call:
+                    try:
+                        k = float(instrument.strike_price.as_double())
+                        if k in strikes_to_request and expiry_str[2:] in id_str:
+                            if not any(opt.id == instrument.id for opt in self.received_options):
+                                self.logger.info(f"Found cached option: {id_str} (Strike={k})")
+                                self.received_options.append(instrument)
+                                self.subscribe_quote_ticks(instrument.id)
+                    except:
+                        pass
+
             self.request_instruments(
                 venue=Venue("CBOE"),
                 params={"ib_contracts": contracts}
@@ -297,7 +324,7 @@ class Orb15MinLongCallDeltaStrategy(SPXBaseStrategy):
             self.options_requested = True
             self.requested_strikes = strikes_to_request
             
-            self.logger.info(f"✅ Requested {len(contracts)} SPX Call options")
+            self.logger.info(f"✅ Requested {len(contracts)} SPX Call options (Found {len(self.received_options)} in cache)")
             
         except Exception as e:
             self.logger.error(f"❌ Failed to request Call options: {e}", exc_info=True)
@@ -306,25 +333,15 @@ class Orb15MinLongCallDeltaStrategy(SPXBaseStrategy):
         """Called when new instrument is added to cache."""
         super().on_instrument(instrument)
         
-        # Diagnostic: Log every instrument received during selection window
-        if self.options_requested and not self.active_option_id:
-            kind_str = "OTHER"
-            if hasattr(instrument, 'option_kind'):
-                kind_str = "CALL" if instrument.option_kind == OptionKind.CALL else "PUT"
-            
-            self.logger.info(
-                f"📥 Received instrument: {instrument.id} (Kind={kind_str}, "
-                f"Strike={getattr(instrument, 'strike_price', 'N/A')})"
-            )
-        
         # Collect all received options for selection
         if (self.options_requested and
             not self.active_option_id and
             hasattr(instrument, 'option_kind') and
             instrument.option_kind == OptionKind.CALL):
             
-            self.logger.info(f"Received option: {instrument.id}, Strike: {instrument.strike_price}")
-            self.received_options.append(instrument)
+            # Check if we already have this option (by ID) to avoid duplicates
+            if not any(opt.id == instrument.id for opt in self.received_options):
+                self.received_options.append(instrument)
             
             # Subscribe to option quotes immediately so Greeks can be calculated
             self.subscribe_quote_ticks(instrument.id)
@@ -366,11 +383,9 @@ class Orb15MinLongCallDeltaStrategy(SPXBaseStrategy):
             except Exception:
                 pass  # Already subscribed
             
-            # Use GreeksCalculator
+            # Use custom BlackScholes calculator (more reliable for 0DTE)
             try:
                 quote = self.cache.quote_tick(option.id)
-                greeks = self.greeks.instrument_greeks(option.id)
-                
                 mid = 0.0
                 spread = 0.0
                 if quote:
@@ -380,31 +395,47 @@ class Orb15MinLongCallDeltaStrategy(SPXBaseStrategy):
                         mid = (bid + ask) / 2
                         spread = ask - bid
                 else:
-                    self.logger.warning(f"  Strike ${float(option.strike_price.as_double()):.0f}: No quote yet")
+                    self.logger.warning(f"Strike ${float(option.strike_price.as_double()):.0f}: No quote yet")
 
-                if greeks and greeks.delta:
-                    delta = abs(float(greeks.delta))
-                    gamma = float(greeks.gamma) if greeks.gamma else 0.0
-                    theta = float(greeks.theta) if greeks.theta else 0.0
-                    vega = float(greeks.vega) if greeks.vega else 0.0
-                    
-                    option_data.append({
-                        'option': option,
-                        'delta': delta,
-                        'mid': mid,
-                        'spread': spread
-                    })
-                    
-                    self.logger.info(
-                        f"  Strike ${float(option.strike_price.as_double()):.0f}: "
-                        f"Delta={delta:.3f} (γ={gamma:.4f}, θ={theta:.2f}, ν={vega:.2f}) | "
-                        f"Mid=${mid:.2f}, Spread=${spread:.2f}"
-                    )
+                if self.current_spx_price > 0 and mid > 0:
+                    try:
+                        # 1. Calculate Time to Expiry (T)
+                        now = self.clock.utc_now()
+                        ny_tz = pytz.timezone('US/Eastern')
+                        today_ny = now.astimezone(ny_tz).date()
+                        expiry_dt = ny_tz.localize(datetime.combine(today_ny, time(16, 0, 0)))
+                        seconds_to_expiry = max(60.0, (expiry_dt - now).total_seconds())
+                        T = seconds_to_expiry / (365.0 * 24.0 * 3600.0)
+                        
+                        # 2. Get params
+                        r = 0.045
+                        K = float(option.strike_price.as_double())
+                        S = self.current_spx_price
+                        
+                        # 3. Calculate IV and Delta
+                        iv = BlackScholes.implied_volatility(
+                            target_price=mid, option_type='call', S=S, K=K, T=T, r=r
+                        )
+                        calc_delta = BlackScholes.delta(
+                            option_type='call', S=S, K=K, T=T, r=r, sigma=iv
+                        )
+                        
+                        self.logger.info(
+                            f"📊 OPTION DATA: {option.id} | Price=${mid:.2f} (S=${spread:.2f}) | "
+                            f"Delta={calc_delta:.3f} | IV={iv:.1%} | Source: CUSTOM BS"
+                        )
+                        
+                        option_data.append({
+                            'option': option,
+                            'delta': calc_delta,
+                            'mid': mid,
+                            'spread': spread
+                        })
+                    except Exception as calc_err:
+                        self.logger.error(f"Greeks calculation failed for {option.id}: {calc_err}")
                 else:
-                    reason = "Greeks missing" if greeks else "No response for Greeks yet"
                     self.logger.warning(
-                        f"  Strike ${float(option.strike_price.as_double()):.0f}: {reason} | "
-                        f"Mid=${mid:.2f}"
+                        f"📊 OPTION DATA: {option.id} | Price=${mid:.2f} | SKIPPED: Missing Price/Quote"
                     )
             except Exception as e:
                 self.logger.warning(f"Could not calculate Greeks for {option.id}: {e}")
@@ -594,6 +625,10 @@ class Orb15MinLongCallDeltaStrategy(SPXBaseStrategy):
                 self.unsubscribe_quote_ticks(self.active_option_id)
             except Exception as e:
                 self.logger.error(f"Failed to unsubscribe from option: {e}")
+
+    # =========================================================================
+    # STATE PERSISTENCE
+    # =========================================================================
 
     # =========================================================================
     # STATE PERSISTENCE

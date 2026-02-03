@@ -56,7 +56,7 @@ logger.info("--- Log Stream Initialized ---")
 # Configure VictoriaLogs handler (fire-and-forget)
 # If VictoriaLogs isn't running, logs are silently dropped - trading unaffected
 try:
-    from .logging import VictoriaLogsHandler
+    from .ntp_logging import VictoriaLogsHandler
     VICTORIALOGS_URL = os.getenv("VICTORIALOGS_URL", "http://victorialogs:9428")
     
     victorialogs_handler = VictoriaLogsHandler(
@@ -205,21 +205,21 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     logger.info("WebSocket connection accepted")
     
-    # Send initial status immediately
-    status = await nautilus_manager.get_status()
     try:
+        # Send initial status immediately
+        status = await nautilus_manager.get_status()
+        try:
+            if redis_manager.redis:
+                status["redis_connected"] = await redis_manager.redis.ping()
+        except:
+            status["redis_connected"] = False
+        
+        await websocket.send_text(json.dumps(status))
+        
+        pubsub = None
         if redis_manager.redis:
-            status["redis_connected"] = await redis_manager.redis.ping()
-    except:
-        status["redis_connected"] = False
-    
-    await websocket.send_text(json.dumps(status))
-    
-    pubsub = None
-    if redis_manager.redis:
-        pubsub = await redis_manager.subscribe("system_status", "spx_stream_price", "spx_stream_log")
+            pubsub = await redis_manager.subscribe("system_status", "spx_stream_price", "spx_stream_log")
 
-    try:
         if pubsub:
             async for message in pubsub.listen():
                 if message["type"] == "message":

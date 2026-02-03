@@ -106,6 +106,13 @@ class BaseStrategy(Strategy):
         # Sequential bracket tracking (intent to submit exits after entry fill)
         # Entry ClientOrderId -> {sl_price, tp_price, ...}
         self._pending_bracket_exits: Dict[ClientOrderId, Dict[str, Any]] = {}
+        
+        # SL order monitoring for software fallback
+        # Tracks the SL order so we can detect if it's lost/cancelled/rejected
+        self._sl_order_id: Optional[ClientOrderId] = None
+        self._sl_order_active: bool = False
+        self._software_sl_enabled: bool = False
+        self._software_sl_price: Optional[float] = None
 
 
     # =========================================================================
@@ -1078,29 +1085,27 @@ class BaseStrategy(Strategy):
 
         orders = []
 
-        # 1. Stop Loss (STOP_LIMIT)
+        # 1. Stop Loss (STOP_MARKET - more reliable for SPX options)
         if sl_price_val is not None:
             rounded_sl = self.round_to_tick(sl_price_val, instrument)
             sl_trigger = instrument.make_price(rounded_sl)
-            limit_offset = 0.05 if abs(rounded_sl) < 3.0 else 0.10
-            if exit_side == OrderSide.SELL:
-                sl_limit_val = max(0.01, rounded_sl - limit_offset)
-            else:
-                sl_limit_val = rounded_sl + limit_offset
-            sl_limit = instrument.make_price(sl_limit_val)
             
-            sl_order = self.order_factory.stop_limit(
+            sl_order = self.order_factory.stop_market(
                 instrument_id=inst_id,
                 order_side=exit_side,
                 quantity=qty,
                 trigger_price=sl_trigger,
-                price=sl_limit,
                 time_in_force=tif,
                 reduce_only=True
             )
             orders.append(sl_order)
             self._bracket_exit_map[sl_order.client_order_id] = "STOP_LOSS"
             self._pending_exit_orders.add(sl_order.client_order_id)
+            
+            # Track SL order for health monitoring
+            self._sl_order_id = sl_order.client_order_id
+            self._sl_order_active = True
+            self._software_sl_price = sl_price_val
 
         # 2. Take Profit (LIMIT)
         if tp_price_val is not None:
@@ -1137,6 +1142,103 @@ class BaseStrategy(Strategy):
                 }
             )
             self.save_state()
+
+    def _check_sl_order_health(self):
+        """
+        Verify SL order is still active. Called periodically (e.g., every minute).
+        If SL order is missing/cancelled/rejected, enable software fallback.
+        
+        Safe for non-bracket strategies: returns early if no SL order was created.
+        """
+        # Early exit if no SL order was created (non-bracket strategies)
+        if not self._sl_order_id or self._software_sl_enabled:
+            return
+        
+        order = self.cache.order(self._sl_order_id)
+        
+        if order is None:
+            # Order not in cache - likely lost or never registered
+            self.logger.error(
+                f"⚠️ SL ORDER NOT FOUND IN CACHE - Enabling software fallback | "
+                f"Order ID: {self._sl_order_id} | SL Price: ${self._software_sl_price:.2f}",
+                extra={
+                    "extra": {
+                        "event_type": "sl_order_missing",
+                        "sl_order_id": str(self._sl_order_id),
+                        "sl_price": self._software_sl_price
+                    }
+                }
+            )
+            self._sl_order_active = False
+            self._software_sl_enabled = True
+            return
+        
+        # Check if order is in a terminal state that means no protection
+        terminal_states = {
+            OrderStatus.CANCELED, 
+            OrderStatus.REJECTED, 
+            OrderStatus.EXPIRED,
+            OrderStatus.DENIED
+        }
+        
+        if order.status in terminal_states:
+            self.logger.error(
+                f"⚠️ SL ORDER IN TERMINAL STATE ({order.status.name}) - Enabling software fallback | "
+                f"Order ID: {self._sl_order_id} | SL Price: ${self._software_sl_price:.2f}",
+                extra={
+                    "extra": {
+                        "event_type": "sl_fallback_enabled",
+                        "sl_order_id": str(self._sl_order_id),
+                        "status": order.status.name,
+                        "sl_price": self._software_sl_price
+                    }
+                }
+            )
+            self._sl_order_active = False
+            self._software_sl_enabled = True
+        else:
+            # SL order is healthy - log at DEBUG level for traceability
+            self.logger.debug(
+                f"✓ SL heartbeat OK | Order: {self._sl_order_id} | Status: {order.status.name} | SL: ${self._software_sl_price:.2f}",
+                extra={
+                    "extra": {
+                        "event_type": "sl_heartbeat_ok",
+                        "sl_order_id": str(self._sl_order_id),
+                        "status": order.status.name,
+                        "sl_price": self._software_sl_price
+                    }
+                }
+            )
+
+    def _execute_software_sl(self, current_price: float):
+        """
+        Execute SL via market order when broker SL is unavailable.
+        
+        This is the "software fallback" that triggers when the broker SL order
+        was lost, rejected, or cancelled without our knowledge.
+        
+        Args:
+            current_price: Current option mid price
+        """
+        if not self._software_sl_enabled or self._software_sl_price is None:
+            return
+        
+        if current_price > self._software_sl_price:
+            return  # Price hasn't hit SL yet
+        
+        self.logger.warning(
+            f"🛑 SOFTWARE SL TRIGGERED @ ${current_price:.2f} <= ${self._software_sl_price:.2f}",
+            extra={
+                "extra": {
+                    "event_type": "software_sl_triggered",
+                    "current_price": current_price,
+                    "sl_price": self._software_sl_price
+                }
+            }
+        )
+        self._software_sl_enabled = False  # Prevent multiple triggers
+        self.close_strategy_position(reason="SOFTWARE_STOP_LOSS")
+
 
     def submit_entry_order(self, order: Order) -> bool:
         """
@@ -1200,20 +1302,40 @@ class BaseStrategy(Strategy):
         
         return True
 
-    def close_strategy_position(self, reason: str = "STRATEGY_EXIT"):
+    def close_strategy_position(self, reason: str = "STRATEGY_EXIT", 
+                                  override_instrument_id: Optional[InstrumentId] = None):
         """
         Close all positions for this instrument.
         Stores exit reason for trade recording.
-        """
-        # Check if we can submit an exit order (includes position check and duplicate prevention)
-        can_submit, reason_msg = self.can_submit_exit_order()
-        if not can_submit:
-            # If position exists but order is pending, we don't need to log a warning every time, 
-            # but for manual trigger it's useful.
-            self.logger.info(f"Skipping position close: {reason_msg}")
-            return
         
-        pos = self._get_open_position() # Guaranteed to exist due to can_submit_exit_order
+        Args:
+            reason: Exit reason for trade recording
+            override_instrument_id: Optional instrument ID to use instead of default lookup.
+                                    Useful for option strategies where instrument_id differs.
+        """
+        # If override provided, look up position directly by that instrument
+        if override_instrument_id:
+            # Find position for the override instrument
+            all_open_positions = self.cache.positions_open()
+            pos = next(
+                (p for p in all_open_positions if p.instrument_id == override_instrument_id),
+                None
+            )
+            if not pos:
+                self.logger.warning(
+                    f"Skipping position close: No position found for override instrument {override_instrument_id}"
+                )
+                return False
+            target_instrument_id = override_instrument_id
+        else:
+            # Default behavior - check if we can submit an exit order
+            can_submit, reason_msg = self.can_submit_exit_order()
+            if not can_submit:
+                self.logger.info(f"Skipping position close: {reason_msg}")
+                return False
+            pos = self._get_open_position()  # Guaranteed to exist due to can_submit_exit_order
+            target_instrument_id = self.instrument_id
+        
         self._last_exit_reason = reason
         
         # Determine the side and account to close this position
@@ -1242,13 +1364,17 @@ class BaseStrategy(Strategy):
             }
         )
 
-        # We manually submit an offsetting order using our tradeable ID and the position's account
-        # This is more robust than close_all_positions for external/recovered positions.
+        # Get the instrument for making qty - use override if provided
+        target_instrument = self.cache.instrument(target_instrument_id)
+        if not target_instrument:
+            self.logger.error(f"Cannot close position: instrument {target_instrument_id} not in cache")
+            return False
+
+        # We manually submit an offsetting order using the target instrument ID
         order = self.order_factory.market(
-            instrument_id=self.instrument_id,
+            instrument_id=target_instrument_id,
             order_side=side,
-            quantity=self.instrument.make_qty(close_qty),
-            # account_id=p_account # Nautilus usually uses the strategy's account_id unless specified
+            quantity=target_instrument.make_qty(close_qty),
         )
         
         # If the position's account differs from the strategy's account, we MUST override
@@ -1357,7 +1483,20 @@ class BaseStrategy(Strategy):
             self._pending_exit_orders.discard(order_id)
             self._pending_spread_orders.discard(order_id)
             
-            if is_spread_order:
+            # Check if this was our SL order - enable software fallback
+            if self._sl_order_id and order_id == self._sl_order_id:
+                self.logger.error(
+                    f"⚠️ SL ORDER CANCELLED BY BROKER - Enabling software fallback | ID: {order_id}",
+                    extra={
+                        "extra": {
+                            "event_type": "sl_order_cancelled_fallback_enabled",
+                            "sl_order_id": str(order_id)
+                        }
+                    }
+                )
+                self._sl_order_active = False
+                self._software_sl_enabled = True
+            elif is_spread_order:
                 self.logger.warning(
                     f"⚠️ SPREAD ORDER CANCELLED | ID: {order_id} | No fill received.",
                     extra={

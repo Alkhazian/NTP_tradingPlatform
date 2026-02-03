@@ -57,6 +57,10 @@ class Orb15MinLongPutStrategy(SPXBaseStrategy):
         
         # Search tracking
         self._active_search_id: Optional[str] = None
+        
+        # Alert throttling (fire only once per SL/TP breach)
+        self._sl_alert_fired: bool = False
+        self._tp_alert_fired: bool = False
 
     # =========================================================================
     # LIFECYCLE
@@ -103,9 +107,8 @@ class Orb15MinLongPutStrategy(SPXBaseStrategy):
         # if self.is_opening_range_complete() and not self.breakout_detected:
         #     self._check_breakout()
         
-        # Monitor active position for exit conditions
-        if self.active_option_id:
-            self._check_exit_conditions()
+        # Exit condition monitoring moved to on_minute_closed() for throttling
+        pass
 
 
     # =========================================================================
@@ -114,10 +117,16 @@ class Orb15MinLongPutStrategy(SPXBaseStrategy):
 
     def on_minute_closed(self, close_price: float):
         """Called at each minute close."""
+        # Check for breakout - trust close_price from base class
         if self.is_opening_range_complete() and not self.breakout_detected:
             if close_price < self.or_low:
                 self.logger.info(f"Breakout detected on minute close: {close_price:.2f} < {self.or_low:.2f}")
-                self._check_breakout()
+                self._trigger_breakout_entry(close_price)
+        
+        # Monitor active position for exit conditions (once per minute, not per tick)
+        if self.active_option_id:
+            self._check_sl_order_health()  # Heartbeat: verify SL order is still active
+            self._check_exit_conditions()  # Log alerts + trigger software SL if needed
 
     def _reset_daily_state(self, current_date):
         """Reset daily tracking state. Extends base class reset."""
@@ -136,32 +145,71 @@ class Orb15MinLongPutStrategy(SPXBaseStrategy):
         """Handle quote ticks. Routes SPX to base, processes options here."""
         super().on_quote_tick_safe(tick)
         
-        # Process option quotes only if we have an active position
-        if self.active_option_id and tick.instrument_id == self.active_option_id:
-            self._check_exit_conditions()
+        # Software SL fallback runs per-tick for fast reaction (only when active)
+        if self._software_sl_enabled and self.active_option_id and tick.instrument_id == self.active_option_id:
+            mid = (tick.bid_price.as_double() + tick.ask_price.as_double()) / 2
+            self._execute_software_sl(mid)
+
+    def _execute_software_sl(self, current_price: float):
+        """
+        Execute software SL using active_option_id directly.
+        
+        Overrides base class to use option ID instead of strategy instrument_id,
+        which would fail due to symbol mismatch (SPX vs SPXW option).
+        """
+        if not self._software_sl_enabled or self._software_sl_price is None:
+            return
+        
+        if current_price > self._software_sl_price:
+            return  # Price hasn't hit SL yet
+        
+        self.logger.warning(
+            f"🛑 SOFTWARE SL TRIGGERED @ ${current_price:.2f} <= ${self._software_sl_price:.2f}",
+            extra={
+                "extra": {
+                    "event_type": "software_sl_triggered",
+                    "current_price": current_price,
+                    "sl_price": self._software_sl_price
+                }
+            }
+        )
+        self._software_sl_enabled = False  # Prevent multiple triggers
+        
+        # Use active_option_id directly instead of base class lookup
+        if self.active_option_id:
+            self.close_strategy_position(
+                reason="SOFTWARE_STOP_LOSS",
+                override_instrument_id=self.active_option_id
+            )
+        else:
+            self.logger.error("Software SL triggered but no active_option_id set - cannot close")
 
     # =========================================================================
     # ENTRY LOGIC
     # =========================================================================
 
-    def _check_breakout(self):
-        """Check if SPX has broken below opening range low."""
+    def _trigger_breakout_entry(self, close_price: float):
+        """
+        Trigger entry after confirmed breakout on minute close.
+        
+        Args:
+            close_price: The minute close price that triggered the breakout.
+        """
         if self.breakout_detected or self.entry_attempted_today:
             return
         
-        if self.daily_low < self.or_low:
-            self.logger.info(
-                f"🔥 BREAKOUT DETECTED! SPX Low {self.daily_low:.2f} < "
-                f"OR Low {self.or_low:.2f}"
-            )
-            self.breakout_detected = True
-            
-            # Check entry conditions
-            can_enter, reason = self._can_enter()
-            if can_enter:
-                self._prepare_entry()
-            else:
-                self.logger.warning(f"Cannot enter: {reason}")
+        self.logger.info(
+            f"🔥 BREAKOUT CONFIRMED! Minute close {close_price:.2f} < "
+            f"OR Low {self.or_low:.2f}"
+        )
+        self.breakout_detected = True
+        
+        # Check entry conditions
+        can_enter, reason = self._can_enter()
+        if can_enter:
+            self._prepare_entry()
+        else:
+            self.logger.warning(f"Cannot enter: {reason}")
 
     def _can_enter(self) -> tuple[bool, str]:
         """Check all entry conditions."""
@@ -285,6 +333,24 @@ class Orb15MinLongPutStrategy(SPXBaseStrategy):
         """Called when an order is filled."""
         order_id = event.client_order_id
         
+        # Check if this was an ENTRY fill - recalculate SL/TP based on actual fill price
+        if order_id in self._pending_entry_orders:
+            fill_price = float(event.last_px.as_double())
+            
+            # Recalculate SL/TP using actual fill price (not order price)
+            old_sl = self.stop_loss_price
+            old_tp = self.take_profit_price
+            self.entry_price = fill_price
+            self.stop_loss_price = fill_price * (1 - self.stop_loss_percent / 100)
+            self.take_profit_price = fill_price + (self.take_profit_dollars / 100)
+            
+            self.logger.info(
+                f"📊 SL/TP RECALCULATED on fill | Fill: ${fill_price:.2f}\n"
+                f"   SL: ${old_sl:.2f} → ${self.stop_loss_price:.2f}\n"
+                f"   TP: ${old_tp:.2f} → ${self.take_profit_price:.2f}"
+            )
+            self.save_state()
+        
         # Check if this was our active option exit
         if self.active_option_id and order_id in self._pending_exit_orders:
             # Position closed (either by SL, TP, or manual)
@@ -314,20 +380,27 @@ class Orb15MinLongPutStrategy(SPXBaseStrategy):
         
         mid_price = (bid + ask) / 2
         
-        # Check stop loss
+        # Check software SL fallback first (if broker SL was cancelled/lost)
+        self._execute_software_sl(mid_price)
+        
+        # Check stop loss (throttled - log only once per breach)
         if mid_price <= self.stop_loss_price:
-            self.logger.warning(
-                f"⚠️ PASSIVE ALERT: Price hit 🛑 Stop Loss level: ${mid_price:.2f} <= ${self.stop_loss_price:.2f}\n"
-                f"   Broker should be executing the attached SL order. Monitoring for fill report..."
-            )
+            if not self._sl_alert_fired:
+                self.logger.warning(
+                    f"⚠️ PASSIVE ALERT: Price hit 🛑 Stop Loss level: ${mid_price:.2f} <= ${self.stop_loss_price:.2f}\n"
+                    f"   Broker should be executing the attached SL order. Monitoring for fill report..."
+                )
+                self._sl_alert_fired = True
             return
         
-        # Check take profit
+        # Check take profit (throttled - log only once per breach)
         if mid_price >= self.take_profit_price:
-            self.logger.info(
-                f"✨ PASSIVE ALERT: Price hit ✅ Take Profit level: ${mid_price:.2f} >= ${self.take_profit_price:.2f}\n"
-                f"   Broker should be executing the attached TP order. Monitoring for fill report..."
-            )
+            if not self._tp_alert_fired:
+                self.logger.info(
+                    f"✨ PASSIVE ALERT: Price hit ✅ Take Profit level: ${mid_price:.2f} >= ${self.take_profit_price:.2f}\n"
+                    f"   Broker should be executing the attached TP order. Monitoring for fill report..."
+                )
+                self._tp_alert_fired = True
             return
 
     def _clear_active_position_state(self):
@@ -336,6 +409,16 @@ class Orb15MinLongPutStrategy(SPXBaseStrategy):
         self.entry_price = None
         self.stop_loss_price = None
         self.take_profit_price = None
+        
+        # Reset alert throttling flags
+        self._sl_alert_fired = False
+        self._tp_alert_fired = False
+        
+        # Reset SL monitoring state
+        self._sl_order_id = None
+        self._sl_order_active = False
+        self._software_sl_enabled = False
+        self._software_sl_price = None
         
         self.save_state()
 
