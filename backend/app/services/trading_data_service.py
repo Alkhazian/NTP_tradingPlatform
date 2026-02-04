@@ -313,6 +313,61 @@ class TradingDataService:
             logger.error(f"Failed to update trade metrics {trade_id}: {e}")
             return False
     
+    def update_entry_price(
+        self,
+        trade_id: str,
+        new_entry_price: float,
+        new_quantity: Optional[float] = None,
+        attempt_count: Optional[int] = None,
+    ) -> bool:
+        """
+        Update trade entry price when entry order is resubmitted.
+        Called during entry monitoring when price is refreshed.
+        
+        Args:
+            trade_id: Trade identifier
+            new_entry_price: Updated entry price
+            new_quantity: Updated quantity (if partial fill caused resubmit)
+            attempt_count: Current attempt number for logging
+            
+        Returns:
+            True if update successful
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                updates = ["entry_price = ?", "updated_at = datetime('now')"]
+                params = [new_entry_price]
+                
+                if new_quantity is not None:
+                    updates.append("quantity = ?")
+                    params.append(new_quantity)
+                
+                params.append(trade_id)
+                
+                cursor.execute(
+                    f"UPDATE trades SET {', '.join(updates)} WHERE trade_id = ?",
+                    params
+                )
+                
+                conn.commit()
+                rows_affected = cursor.rowcount
+            
+            if rows_affected > 0:
+                logger.info(
+                    f"Trade entry updated: {trade_id} | New price: {new_entry_price} | "
+                    f"Attempt: {attempt_count or 'N/A'}"
+                )
+                return True
+            else:
+                logger.warning(f"Trade {trade_id} not found for entry update")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Failed to update entry price for {trade_id}: {e}")
+            return False
+    
     def close_trade(
         self,
         trade_id: str,

@@ -108,6 +108,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._entry_initial_quantity: float = 0.0
         self._entry_monitoring_active: bool = False
         self._entry_check_timer_name: Optional[str] = None
+        self._cumulative_filled_qty: float = 0.0  # Track fills across resubmits
         
         # Calculate range end time for logging
         range_end_time = "Range Close" # Will be calculated/logged by base
@@ -922,6 +923,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             self._entry_attempt_count = 1
             self._entry_initial_quantity = self.config_quantity
             self._entry_monitoring_active = True
+            self._cumulative_filled_qty = 0.0  # Start fresh for new entry
             
             # DON'T set traded_today = True yet! Wait for full fill confirmation
             # DON'T set entry_in_progress = False yet! Keep it True during monitoring
@@ -1562,6 +1564,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._entry_order_id = None
         self._entry_attempt_count = 0
         self._entry_initial_quantity = 0.0
+        self._cumulative_filled_qty = 0.0
         
         if self._entry_check_timer_name:
             try:
@@ -1632,10 +1635,14 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         total_qty = float(order.quantity)
         remaining_qty = total_qty - filled_qty
         
+        # Calculate cumulative total (previous fills + this order's fills)
+        cumulative_total = self._cumulative_filled_qty + filled_qty
+        
         self.logger.info(
             f"🔍 Entry check #{self._entry_attempt_count} | "
             f"Status: {order_status.name} | "
-            f"Filled: {filled_qty}/{total_qty} ({filled_qty/total_qty*100:.0f}%)",
+            f"This order: {filled_qty}/{total_qty} | "
+            f"Cumulative: {cumulative_total}/{self._entry_initial_quantity}",
             extra={
                 "extra": {
                     "event_type": "entry_order_check",
@@ -1644,6 +1651,8 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                     "filled_qty": filled_qty,
                     "total_qty": total_qty,
                     "remaining_qty": remaining_qty,
+                    "cumulative_filled": cumulative_total,
+                    "initial_qty": self._entry_initial_quantity,
                     "attempt": self._entry_attempt_count
                 }
             }
@@ -1651,13 +1660,19 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         
         # Case 1: Completely filled
         if order_status == OrderStatus.FILLED:
+            # Add this order's fills to cumulative
+            self._cumulative_filled_qty += filled_qty
+            
             self.logger.info(
-                f"✅ Entry FULLY FILLED | Qty: {filled_qty} | "
-                f"Complete after {self._entry_attempt_count} checks",
+                f"✅ Entry FULLY FILLED | This: {filled_qty} | "
+                f"Total: {self._cumulative_filled_qty}/{self._entry_initial_quantity} | "
+                f"Complete after {self._entry_attempt_count} attempts",
                 extra={
                     "extra": {
                         "event_type": "entry_fully_filled",
-                        "filled_qty": filled_qty,
+                        "this_fill": filled_qty,
+                        "cumulative_filled": self._cumulative_filled_qty,
+                        "initial_qty": self._entry_initial_quantity,
                         "attempts_used": self._entry_attempt_count
                     }
                 }
@@ -1681,13 +1696,20 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         
         # Case 3: Partially filled
         elif order_status == OrderStatus.PARTIALLY_FILLED:
+            # Add partial fill to cumulative before resubmit
+            self._cumulative_filled_qty += filled_qty
+            # Remaining is what we still need to get
+            remaining_qty = self._entry_initial_quantity - self._cumulative_filled_qty
+            
             self.logger.warning(
-                f"⚠️ Entry PARTIALLY FILLED | {filled_qty}/{total_qty} | "
-                f"Will resubmit remaining {remaining_qty}",
+                f"⚠️ Entry PARTIALLY FILLED | This: {filled_qty} | "
+                f"Cumulative: {self._cumulative_filled_qty}/{self._entry_initial_quantity} | "
+                f"Remaining: {remaining_qty}",
                 extra={
                     "extra": {
                         "event_type": "entry_partial_fill",
-                        "filled_qty": filled_qty,
+                        "this_fill": filled_qty,
+                        "cumulative_filled": self._cumulative_filled_qty,
                         "remaining_qty": remaining_qty,
                         "attempt": self._entry_attempt_count
                     }
@@ -1737,18 +1759,30 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
     def _resubmit_entry_order(self, quantity: float):
         """Resubmit entry order with recalculated price."""
         
-        # Cancel existing order
+        old_order_id = self._entry_order_id  # Track for validation
+        
+        # Cancel existing order with verification
         if self._entry_order_id:
             try:
                 order = self.cache.order(self._entry_order_id)
-                if order:
+                if order and order.status not in [OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.EXPIRED]:
                     self.cancel_order(order)
+                    
+                    # Verify cancel completed (brief check)
+                    import time
+                    for _ in range(3):
+                        time.sleep(0.1)  # 100ms wait
+                        order_check = self.cache.order(self._entry_order_id)
+                        if order_check and order_check.status in [OrderStatus.CANCELED, OrderStatus.PENDING_CANCEL]:
+                            break
+                    
                     self.logger.info(
                         f"🚫 Cancelled previous entry order: {self._entry_order_id}",
                         extra={
                             "extra": {
                                 "event_type": "entry_order_cancelled_for_resubmit",
-                                "order_id": str(self._entry_order_id)
+                                "order_id": str(self._entry_order_id),
+                                "final_status": order_check.status.name if order_check else "UNKNOWN"
                             }
                         }
                     )
@@ -1826,16 +1860,39 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         pending_after = set(self._pending_spread_orders)
         new_orders = pending_after - pending_before
         
+        new_order_id = None
         if new_orders:
-            self._entry_order_id = list(new_orders)[0]
+            new_order_id = list(new_orders)[0]
         else:
             all_orders = list(self.cache.orders())
             if all_orders:
-                self._entry_order_id = all_orders[-1].client_order_id
+                new_order_id = all_orders[-1].client_order_id
+        
+        # Validate new order_id differs from old (Issue #3 fix)
+        if new_order_id and new_order_id != old_order_id:
+            self._entry_order_id = new_order_id
+        elif new_order_id == old_order_id:
+            self.logger.warning(
+                f"⚠️ New order_id same as old! Order: {new_order_id} | May track wrong order",
+                extra={"extra": {"event_type": "order_id_collision", "order_id": str(new_order_id)}}
+            )
+            self._entry_order_id = new_order_id  # Use anyway but logged warning
+        else:
+            self.logger.warning("Could not determine new order_id after resubmit")
         
         # Update state
         self._spread_entry_price = abs(rounded_mid)
         self._entry_attempt_count += 1
+        
+        # Update trade record with new entry price
+        # Note: Keep original quantity - don't update on resubmit
+        # The trade record reflects total position size, not just remaining
+        if self._current_trade_id:
+            self._trading_data.update_entry_price(
+                trade_id=self._current_trade_id,
+                new_entry_price=rounded_mid,
+                attempt_count=self._entry_attempt_count
+            )
         
         # Schedule next check
         self._schedule_entry_check()
@@ -1871,38 +1928,90 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 }
             )
         else:
-            # Entry failed
-            self.traded_today = True  # Prevent further attempts
+            # Entry failed - but check for partial fills first!
+            filled_qty = 0.0
+            
+            # Check if any quantity was filled from the last order
+            if self._entry_order_id:
+                try:
+                    order = self.cache.order(self._entry_order_id)
+                    if order and hasattr(order, 'filled_qty'):
+                        filled_qty = float(order.filled_qty)
+                except Exception:
+                    pass
+            
+            # Also check actual position in cache as fallback
+            if filled_qty == 0:
+                try:
+                    actual_qty = abs(self.get_effective_spread_quantity())
+                    if actual_qty > 0:
+                        filled_qty = actual_qty
+                except Exception:
+                    pass
+            
+            self.traded_today = True  # Prevent further entries
             self.entry_in_progress = False
             self._signal_time = None
             self._signal_close_price = None
             
-            # Cancel trade record
-            if self._current_trade_id:
-                try:
-                    self._trading_data.cancel_trade(self._current_trade_id)
-                    self.logger.info(f"Cancelled trade record: {self._current_trade_id}")
-                except Exception as e:
-                    self.logger.warning(f"Failed to cancel trade record: {e}")
-                self._current_trade_id = None
-            
-            self.logger.error(
-                f"❌ Entry FAILED after {self._entry_attempt_count} attempts | "
-                f"Set traded_today=True (no more attempts today)",
-                extra={
-                    "extra": {
-                        "event_type": "entry_monitoring_failed",
-                        "total_attempts": self._entry_attempt_count,
-                        "max_attempts": self.entry_max_attempts,
-                        "traded_today": True
+            if filled_qty > 0:
+                # PARTIAL SUCCESS: We have a live position!
+                # Keep trade record and continue to position management
+                self.logger.warning(
+                    f"⚠️ Entry PARTIAL after {self._entry_attempt_count} attempts | "
+                    f"Filled: {filled_qty}/{self._entry_initial_quantity} | "
+                    f"Position management will continue",
+                    extra={
+                        "extra": {
+                            "event_type": "entry_partial_timeout",
+                            "filled_qty": filled_qty,
+                            "initial_qty": self._entry_initial_quantity,
+                            "attempts": self._entry_attempt_count
+                        }
                     }
-                }
-            )
+                )
+                
+                # Update trade record with actual filled quantity
+                if self._current_trade_id:
+                    self._trading_data.update_entry_price(
+                        trade_id=self._current_trade_id,
+                        new_entry_price=self._spread_entry_price,
+                        new_quantity=filled_qty,
+                        attempt_count=self._entry_attempt_count
+                    )
+                
+                # DON'T cancel trade record - position is live!
+                # DON'T reset _spread_entry_price - needed for SL/TP
+                
+            else:
+                # Complete failure - no fills at all
+                # Cancel trade record
+                if self._current_trade_id:
+                    try:
+                        self._trading_data.cancel_trade(self._current_trade_id)
+                        self.logger.info(f"Cancelled trade record: {self._current_trade_id}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to cancel trade record: {e}")
+                    self._current_trade_id = None
+                
+                self.logger.error(
+                    f"❌ Entry FAILED after {self._entry_attempt_count} attempts | "
+                    f"No fills | Set traded_today=True",
+                    extra={
+                        "extra": {
+                            "event_type": "entry_monitoring_failed",
+                            "total_attempts": self._entry_attempt_count,
+                            "max_attempts": self.entry_max_attempts,
+                            "traded_today": True
+                        }
+                    }
+                )
         
         # Reset state
         self._entry_order_id = None
         self._entry_attempt_count = 0
         self._entry_initial_quantity = 0.0
+        self._cumulative_filled_qty = 0.0  # Reset cumulative tracking
         
         self.save_state()
 
@@ -1925,6 +2034,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             "_entry_attempt_count": self._entry_attempt_count,
             "_entry_initial_quantity": self._entry_initial_quantity,
             "_entry_monitoring_active": self._entry_monitoring_active,
+            "_cumulative_filled_qty": self._cumulative_filled_qty,
         })
         return state
 
@@ -1949,6 +2059,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._entry_attempt_count = state.get("_entry_attempt_count", 0)
         self._entry_initial_quantity = state.get("_entry_initial_quantity", 0.0)
         self._entry_monitoring_active = state.get("_entry_monitoring_active", False)
+        self._cumulative_filled_qty = state.get("_cumulative_filled_qty", 0.0)
         
         # Resume monitoring if it was active
         if self._entry_monitoring_active and self._entry_order_id:
