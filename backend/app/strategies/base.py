@@ -1023,7 +1023,8 @@ class BaseStrategy(Strategy):
         take_profit_price: Optional[float] = None
     ) -> bool:
         """
-        Submit a bracket order (entry + attached SL/TP).
+        Submit a bracket order (entry + attached SL/TP) as an atomic atomic OrderList.
+        Uses manual construction with IBOrderTags to ensure valid OCO on IBKR.
         """
         can_submit, reason = self.can_submit_entry_order()
         if not can_submit:
@@ -1032,36 +1033,110 @@ class BaseStrategy(Strategy):
 
         qty = entry_order.quantity
         tif = entry_order.time_in_force
+        instrument = self.cache.instrument(entry_order.instrument_id)
         
-        # LOGIC CHANGE: To bypass IBKR "Combo Strategy" permission rejections (Code 201),
-        # we submit the entry order FIRST and INDEPENDENTLY. 
-        # The exit legs will be submitted as an OCO pair once the entry is filled.
+        entry_side = entry_order.side
+        exit_side = OrderSide.SELL if entry_side == OrderSide.BUY else OrderSide.BUY
+
+        # 1. Generate OCO Group ID and Tags (Explicit Configuration Required)
+        try:
+            from nautilus_trader.adapters.interactive_brokers.common import IBOrderTags
+            
+            # Use entry ClientOrderId as base for group name to ensure uniqueness
+            oca_group = f"OCO_{entry_order.client_order_id}"
+            
+            # Type 1 = Cancel All with Block (Safest, prevents overfills)
+            oca_tags = IBOrderTags(
+                ocaGroup=oca_group,
+                ocaType=1
+            )
+            # Add tags to dictionary for order factory
+            tags_list = [oca_tags.value]
+        except ImportError:
+            self.logger.warning("IBOrderTags not available (IB Adapter missing?). Submitting without OCO tags (Risk of error).")
+            tags_list = None
         
-        # Track entry as pending
+        orders = [entry_order]
+        
+        # 2. Construct Exit Orders with Tags
+        
+        # Stop Loss (Stop Limit)
+        if stop_loss_price is not None:
+            if instrument:
+                rounded_sl = self.round_to_tick(stop_loss_price, instrument)
+                sl_trigger = instrument.make_price(rounded_sl)
+                
+                # Calculate limit price for StopLimit (buffer for fill)
+                limit_offset = 0.05 if abs(rounded_sl) < 3.0 else 0.10
+                if exit_side == OrderSide.SELL:
+                    sl_limit_val = max(0.01, rounded_sl - limit_offset)
+                else:
+                    sl_limit_val = rounded_sl + limit_offset
+                sl_limit = instrument.make_price(sl_limit_val)
+                
+                sl_order = self.order_factory.stop_limit(
+                    instrument_id=entry_order.instrument_id,
+                    order_side=exit_side,
+                    quantity=qty,
+                    trigger_price=sl_trigger,
+                    price=sl_limit,
+                    time_in_force=tif,
+                    reduce_only=True,
+                    tags=tags_list  # Explicitly applies OCA group
+                )
+                orders.append(sl_order)
+                self._bracket_exit_map[sl_order.client_order_id] = "STOP_LOSS"
+                self._pending_exit_orders.add(sl_order.client_order_id)
+            else:
+                self.logger.error("Instrument not found in cache for SL calculation")
+
+        # Take Profit (Limit)
+        if take_profit_price is not None:
+            if instrument:
+                rounded_tp = self.round_to_tick(take_profit_price, instrument)
+                tp_limit = instrument.make_price(rounded_tp)
+                
+                tp_order = self.order_factory.limit(
+                    instrument_id=entry_order.instrument_id,
+                    order_side=exit_side,
+                    quantity=qty,
+                    price=tp_limit,
+                    time_in_force=tif,
+                    reduce_only=True,
+                    tags=tags_list  # Explicitly applies OCA group
+                )
+                orders.append(tp_order)
+                self._bracket_exit_map[tp_order.client_order_id] = "TAKE_PROFIT"
+                self._pending_exit_orders.add(tp_order.client_order_id)
+            else:
+                self.logger.error("Instrument not found in cache for TP calculation")
+
+        # 3. Submit Atomic Order List
+        from nautilus_trader.model.orders import OrderList
+        
+        order_list = OrderList(
+            order_list_id=self.order_factory.generate_order_list_id(),
+            orders=orders
+        )
+        
+        # Track entry order
         self._pending_entry_orders.add(entry_order.client_order_id)
         
-        # Save the exit leg intent
-        self._pending_bracket_exits[entry_order.client_order_id] = {
-            "stop_loss_price": stop_loss_price,
-            "take_profit_price": take_profit_price,
-            "quantity": float(qty.as_double()),
-            "instrument_id": str(entry_order.instrument_id),
-            "time_in_force": tif
-        }
-
-        self.submit_order(entry_order)
+        self.submit_order_list(order_list)
+        
         self.logger.info(
-            f"📈 Entry order submitted: {entry_order.client_order_id} | Broker-side SL/TP pending fill",
+            f"📈 BRACKET LIST SUBMITTED | ListID: {order_list.id} | Entry: {entry_order.client_order_id}",
             extra={
                 "extra": {
-                    "event_type": "entry_order_submitted_bracket",
-                    "order_id": str(entry_order.client_order_id),
-                    "instrument_id": str(entry_order.instrument_id)
+                    "event_type": "bracket_list_submitted",
+                    "order_list_id": str(order_list.id),
+                    "entry_id": str(entry_order.client_order_id),
+                    "oca_group": oca_group if tags_list else "N/A"
                 }
             }
         )
         
-        # Immediate save to persist the exit intent
+        # No need to store pending intent for later triggers
         self.save_state()
         return True
 
@@ -1611,10 +1686,10 @@ class BaseStrategy(Strategy):
             self._start_trade_record_async(event)
         )
         
-        # BRACKET TRIGGER: Check if we have stored exits for this entry
-        if event.client_order_id in self._pending_bracket_exits:
-            exit_data = self._pending_bracket_exits.pop(event.client_order_id)
-            self._trigger_bracket_exits(exit_data, event.order_side)
+        # BRACKET TRIGGER: NOT NEEDED for Atomic Bracket Orders
+        # if event.client_order_id in self._pending_bracket_exits:
+        #     exit_data = self._pending_bracket_exits.pop(event.client_order_id)
+        #     self._trigger_bracket_exits(exit_data, event.order_side)
 
     def _on_exit_filled(self, event):
         """Handle exit fill - close trade record."""
