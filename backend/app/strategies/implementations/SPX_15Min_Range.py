@@ -31,8 +31,8 @@ import math
 from typing import Dict, Any, Optional
 
 from nautilus_trader.model.data import QuoteTick
-from nautilus_trader.model.enums import OptionKind, TimeInForce
-from nautilus_trader.model.identifiers import InstrumentId, Venue
+from nautilus_trader.model.enums import OptionKind, TimeInForce, OrderStatus
+from nautilus_trader.model.identifiers import InstrumentId, Venue, ClientOrderId
 from nautilus_trader.model.instruments import Instrument
 
 from app.strategies.base_spx import SPXBaseStrategy
@@ -102,6 +102,13 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._current_trade_id: Optional[str] = None
         self._total_commission: float = 0.0  # Track total commission for the trade
         
+        # Entry order monitoring state
+        self._entry_order_id: Optional[ClientOrderId] = None
+        self._entry_attempt_count: int = 0
+        self._entry_initial_quantity: float = 0.0
+        self._entry_monitoring_active: bool = False
+        self._entry_check_timer_name: Optional[str] = None
+        
         # Calculate range end time for logging
         range_end_time = "Range Close" # Will be calculated/logged by base
         
@@ -147,6 +154,10 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self.signal_max_age_seconds = int(params.get("signal_max_age_seconds", 5))
         self.max_price_deviation = float(params.get("max_price_deviation", 10.0))
         self.entry_timeout_seconds = int(params.get("entry_timeout_seconds", 35))
+        
+        # Entry monitoring configuration
+        self.entry_check_interval_seconds = int(params.get("entry_check_interval_seconds", 30))
+        self.entry_max_attempts = int(params.get("entry_max_attempts", 6))
         
         range_end_time = "Range Close" # Will be calculated/logged by base
         
@@ -881,17 +892,45 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 }
             )
             
-            self.open_spread_position(
+            # Capture pending orders before submission to identify new order
+            pending_before = set(self._pending_spread_orders)
+            
+            success = self.open_spread_position(
                 quantity=self.config_quantity,
                 is_buy=True,
                 limit_price=rounded_mid
             )
             
-            self.traded_today = True
-            self.entry_in_progress = False
-            self._spread_entry_price = abs(rounded_mid)  # Store as positive credit amount
-            self._signal_time = None
-            self._signal_close_price = None
+            if not success:
+                self.logger.error("Failed to submit entry order")
+                self._cancel_entry()
+                return
+            
+            # Find the new order_id via set difference
+            pending_after = set(self._pending_spread_orders)
+            new_orders = pending_after - pending_before
+            
+            if new_orders:
+                self._entry_order_id = list(new_orders)[0]
+            else:
+                # Fallback: get latest order from cache
+                all_orders = list(self.cache.orders())
+                if all_orders:
+                    self._entry_order_id = all_orders[-1].client_order_id
+            
+            # Initialize entry monitoring
+            self._entry_attempt_count = 1
+            self._entry_initial_quantity = self.config_quantity
+            self._entry_monitoring_active = True
+            
+            # DON'T set traded_today = True yet! Wait for full fill confirmation
+            # DON'T set entry_in_progress = False yet! Keep it True during monitoring
+            
+            # Store entry price (may be updated on resubmit)
+            self._spread_entry_price = abs(rounded_mid)
+            # Keep signal info for potential resubmit price recalculation
+            # self._signal_time = None  # DON'T CLEAR YET
+            # self._signal_close_price = None  # DON'T CLEAR YET
             
             # Start trade tracking with TradingDataService
             now = self.clock.utc_now().astimezone(self.tz)
@@ -1013,7 +1052,23 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 filled_price=rounded_mid,
                 raw_data=entry_reason,
             )
-
+            
+            # Start entry order monitoring
+            self._schedule_entry_check()
+            
+            self.logger.info(
+                f"🔍 Entry monitoring STARTED | Order: {self._entry_order_id} | "
+                f"Check every {self.entry_check_interval_seconds}s | "
+                f"Attempt 1/{self.entry_max_attempts}",
+                extra={
+                    "extra": {
+                        "event_type": "entry_monitoring_started",
+                        "order_id": str(self._entry_order_id) if self._entry_order_id else None,
+                        "attempt": 1,
+                        "max_attempts": self.entry_max_attempts
+                    }
+                }
+            )
             
             self.save_state()
         else:
@@ -1501,7 +1556,19 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         
         self._total_commission = 0.0
         self._processed_executions = set()
-
+        
+        # Reset entry monitoring
+        self._entry_monitoring_active = False
+        self._entry_order_id = None
+        self._entry_attempt_count = 0
+        self._entry_initial_quantity = 0.0
+        
+        if self._entry_check_timer_name:
+            try:
+                self.clock.cancel_timer(self._entry_check_timer_name)
+            except Exception:
+                pass
+            self._entry_check_timer_name = None
         
         self.logger.info(
             f"📅 NEW TRADING DAY: {new_date} | Previous: {old_date} | Range Start: {self.start_time}",
@@ -1514,6 +1581,330 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 }
             }
         )
+
+    # =========================================================================
+    # ENTRY ORDER MONITORING AND RESUBMIT
+    # =========================================================================
+
+    def _schedule_entry_check(self):
+        """Schedule next entry order status check."""
+        self._entry_check_timer_name = f"{self.id}_entry_check_{self._entry_attempt_count}"
+        
+        self.clock.set_time_alert(
+            name=self._entry_check_timer_name,
+            alert_time=self.clock.utc_now() + timedelta(seconds=self.entry_check_interval_seconds),
+            callback=self._check_entry_order_status
+        )
+
+    def _check_entry_order_status(self, event):
+        """
+        Check entry order status and handle resubmit if needed.
+        Called every 30 seconds to monitor entry order fill status.
+        """
+        if not self._entry_monitoring_active:
+            return
+        
+        if not self._entry_order_id:
+            self.logger.warning("Entry monitoring active but no order_id tracked")
+            self._stop_entry_monitoring(success=False)
+            return
+        
+        # Get order from cache
+        order = self.cache.order(self._entry_order_id)
+        
+        if not order:
+            self.logger.warning(
+                f"Entry order {self._entry_order_id} not found in cache",
+                extra={
+                    "extra": {
+                        "event_type": "entry_order_not_found",
+                        "order_id": str(self._entry_order_id),
+                        "attempt": self._entry_attempt_count
+                    }
+                }
+            )
+            self._stop_entry_monitoring(success=False)
+            return
+        
+        # Check order status
+        order_status = order.status
+        filled_qty = float(order.filled_qty) if hasattr(order, 'filled_qty') else 0.0
+        total_qty = float(order.quantity)
+        remaining_qty = total_qty - filled_qty
+        
+        self.logger.info(
+            f"🔍 Entry check #{self._entry_attempt_count} | "
+            f"Status: {order_status.name} | "
+            f"Filled: {filled_qty}/{total_qty} ({filled_qty/total_qty*100:.0f}%)",
+            extra={
+                "extra": {
+                    "event_type": "entry_order_check",
+                    "order_id": str(self._entry_order_id),
+                    "status": order_status.name,
+                    "filled_qty": filled_qty,
+                    "total_qty": total_qty,
+                    "remaining_qty": remaining_qty,
+                    "attempt": self._entry_attempt_count
+                }
+            }
+        )
+        
+        # Case 1: Completely filled
+        if order_status == OrderStatus.FILLED:
+            self.logger.info(
+                f"✅ Entry FULLY FILLED | Qty: {filled_qty} | "
+                f"Complete after {self._entry_attempt_count} checks",
+                extra={
+                    "extra": {
+                        "event_type": "entry_fully_filled",
+                        "filled_qty": filled_qty,
+                        "attempts_used": self._entry_attempt_count
+                    }
+                }
+            )
+            self._stop_entry_monitoring(success=True)
+            return
+        
+        # Case 2: Cancelled, rejected, or expired
+        if order_status in [OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.EXPIRED]:
+            self.logger.warning(
+                f"⚠️ Entry order {order_status.name} | Will resubmit",
+                extra={
+                    "extra": {
+                        "event_type": "entry_order_failed",
+                        "status": order_status.name,
+                        "attempt": self._entry_attempt_count
+                    }
+                }
+            )
+            remaining_qty = self._entry_initial_quantity
+        
+        # Case 3: Partially filled
+        elif order_status == OrderStatus.PARTIALLY_FILLED:
+            self.logger.warning(
+                f"⚠️ Entry PARTIALLY FILLED | {filled_qty}/{total_qty} | "
+                f"Will resubmit remaining {remaining_qty}",
+                extra={
+                    "extra": {
+                        "event_type": "entry_partial_fill",
+                        "filled_qty": filled_qty,
+                        "remaining_qty": remaining_qty,
+                        "attempt": self._entry_attempt_count
+                    }
+                }
+            )
+        
+        # Case 4: Still pending
+        elif order_status in [OrderStatus.SUBMITTED, OrderStatus.ACCEPTED]:
+            self.logger.info(
+                f"⏳ Entry still PENDING | Will resubmit with fresh price",
+                extra={
+                    "extra": {
+                        "event_type": "entry_still_pending",
+                        "status": order_status.name,
+                        "attempt": self._entry_attempt_count
+                    }
+                }
+            )
+            remaining_qty = self._entry_initial_quantity
+        
+        else:
+            self.logger.warning(f"Unexpected order status: {order_status.name}")
+            self._schedule_entry_check()
+            return
+        
+        # Check max attempts
+        if self._entry_attempt_count >= self.entry_max_attempts:
+            self.logger.error(
+                f"❌ Entry FAILED after {self.entry_max_attempts} attempts | "
+                f"Filled: {filled_qty}/{self._entry_initial_quantity} | "
+                f"Giving up for today",
+                extra={
+                    "extra": {
+                        "event_type": "entry_max_attempts_exceeded",
+                        "attempts": self.entry_max_attempts,
+                        "filled_qty": filled_qty,
+                        "initial_qty": self._entry_initial_quantity
+                    }
+                }
+            )
+            self._stop_entry_monitoring(success=False)
+            return
+        
+        # Resubmit
+        self._resubmit_entry_order(remaining_qty)
+
+    def _resubmit_entry_order(self, quantity: float):
+        """Resubmit entry order with recalculated price."""
+        
+        # Cancel existing order
+        if self._entry_order_id:
+            try:
+                order = self.cache.order(self._entry_order_id)
+                if order:
+                    self.cancel_order(order)
+                    self.logger.info(
+                        f"🚫 Cancelled previous entry order: {self._entry_order_id}",
+                        extra={
+                            "extra": {
+                                "event_type": "entry_order_cancelled_for_resubmit",
+                                "order_id": str(self._entry_order_id)
+                            }
+                        }
+                    )
+            except Exception as e:
+                self.logger.warning(f"Failed to cancel previous entry order: {e}")
+        
+        # Get fresh quote
+        if not self.spread_instrument:
+            self.logger.error("Cannot resubmit - spread instrument not available")
+            self._stop_entry_monitoring(success=False)
+            return
+        
+        quote = self.cache.quote_tick(self.spread_instrument.id)
+        if not quote:
+            self.logger.warning("No quote for resubmit - will retry next check")
+            self._entry_attempt_count += 1
+            self._schedule_entry_check()
+            return
+        
+        # Calculate fresh price
+        bid = quote.bid_price.as_double()
+        ask = quote.ask_price.as_double()
+        mid = (bid + ask) / 2
+        rounded_mid = self.round_to_tick(mid, self.spread_instrument)
+        
+        # Validate credit
+        credit_received = abs(rounded_mid) * 100
+        
+        if credit_received < self.min_credit_amount:
+            self.logger.warning(
+                f"⚠️ Resubmit credit too low: ${credit_received:.2f} < ${self.min_credit_amount:.2f} | "
+                f"Will retry next check",
+                extra={
+                    "extra": {
+                        "event_type": "resubmit_credit_too_low",
+                        "current_credit": credit_received,
+                        "min_credit": self.min_credit_amount,
+                        "attempt": self._entry_attempt_count
+                    }
+                }
+            )
+            self._entry_attempt_count += 1
+            self._schedule_entry_check()
+            return
+        
+        # Submit new order
+        self.logger.info(
+            f"🔄 RESUBMITTING entry | Attempt {self._entry_attempt_count + 1}/{self.entry_max_attempts} | "
+            f"Qty: {quantity} | Limit: {rounded_mid:.4f} | Credit: ${credit_received:.2f}",
+            extra={
+                "extra": {
+                    "event_type": "entry_order_resubmit",
+                    "attempt": self._entry_attempt_count + 1,
+                    "quantity": quantity,
+                    "limit_price": rounded_mid,
+                    "credit": credit_received
+                }
+            }
+        )
+        
+        pending_before = set(self._pending_spread_orders)
+        
+        success = self.open_spread_position(
+            quantity=quantity,
+            is_buy=True,
+            limit_price=rounded_mid
+        )
+        
+        if not success:
+            self.logger.error("Failed to resubmit entry order")
+            self._stop_entry_monitoring(success=False)
+            return
+        
+        # Find new order_id
+        pending_after = set(self._pending_spread_orders)
+        new_orders = pending_after - pending_before
+        
+        if new_orders:
+            self._entry_order_id = list(new_orders)[0]
+        else:
+            all_orders = list(self.cache.orders())
+            if all_orders:
+                self._entry_order_id = all_orders[-1].client_order_id
+        
+        # Update state
+        self._spread_entry_price = abs(rounded_mid)
+        self._entry_attempt_count += 1
+        
+        # Schedule next check
+        self._schedule_entry_check()
+
+    def _stop_entry_monitoring(self, success: bool):
+        """Stop entry order monitoring."""
+        
+        self._entry_monitoring_active = False
+        
+        # Cancel timer
+        if self._entry_check_timer_name:
+            try:
+                self.clock.cancel_timer(self._entry_check_timer_name)
+            except Exception:
+                pass
+            self._entry_check_timer_name = None
+        
+        if success:
+            # Entry successful
+            self.traded_today = True
+            self.entry_in_progress = False
+            self._signal_time = None
+            self._signal_close_price = None
+            
+            self.logger.info(
+                f"✅ Entry SUCCESSFUL | Position established | Set traded_today=True",
+                extra={
+                    "extra": {
+                        "event_type": "entry_monitoring_success",
+                        "final_attempt": self._entry_attempt_count,
+                        "traded_today": True
+                    }
+                }
+            )
+        else:
+            # Entry failed
+            self.traded_today = True  # Prevent further attempts
+            self.entry_in_progress = False
+            self._signal_time = None
+            self._signal_close_price = None
+            
+            # Cancel trade record
+            if self._current_trade_id:
+                try:
+                    self._trading_data.cancel_trade(self._current_trade_id)
+                    self.logger.info(f"Cancelled trade record: {self._current_trade_id}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to cancel trade record: {e}")
+                self._current_trade_id = None
+            
+            self.logger.error(
+                f"❌ Entry FAILED after {self._entry_attempt_count} attempts | "
+                f"Set traded_today=True (no more attempts today)",
+                extra={
+                    "extra": {
+                        "event_type": "entry_monitoring_failed",
+                        "total_attempts": self._entry_attempt_count,
+                        "max_attempts": self.entry_max_attempts,
+                        "traded_today": True
+                    }
+                }
+            )
+        
+        # Reset state
+        self._entry_order_id = None
+        self._entry_attempt_count = 0
+        self._entry_initial_quantity = 0.0
+        
+        self.save_state()
 
     def get_state(self) -> Dict[str, Any]:
         """Return strategy-specific state for persistence."""
@@ -1529,6 +1920,11 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             "_closing_in_progress": self._closing_in_progress,
             "_current_trade_id": self._current_trade_id,
             "_total_commission": self._total_commission,
+            # Entry monitoring state
+            "_entry_order_id": str(self._entry_order_id) if self._entry_order_id else None,
+            "_entry_attempt_count": self._entry_attempt_count,
+            "_entry_initial_quantity": self._entry_initial_quantity,
+            "_entry_monitoring_active": self._entry_monitoring_active,
         })
         return state
 
@@ -1546,6 +1942,21 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._closing_in_progress = state.get("_closing_in_progress", False)
         self._current_trade_id = state.get("_current_trade_id")
         self._total_commission = state.get("_total_commission", 0.0)
+        
+        # Restore entry monitoring state
+        entry_order_id_str = state.get("_entry_order_id")
+        self._entry_order_id = ClientOrderId(entry_order_id_str) if entry_order_id_str else None
+        self._entry_attempt_count = state.get("_entry_attempt_count", 0)
+        self._entry_initial_quantity = state.get("_entry_initial_quantity", 0.0)
+        self._entry_monitoring_active = state.get("_entry_monitoring_active", False)
+        
+        # Resume monitoring if it was active
+        if self._entry_monitoring_active and self._entry_order_id:
+            self.logger.info(
+                f"Resuming entry monitoring | Order: {self._entry_order_id} | "
+                f"Attempt: {self._entry_attempt_count}/{self.entry_max_attempts}"
+            )
+            self._schedule_entry_check()
         
         self.logger.info(
             f"State restored | Range: {self.daily_low}-{self.daily_high} | Calculated: {self.range_calculated} | Traded: {self.traded_today} | Dir: {self._signal_direction}",
@@ -1601,6 +2012,25 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
 
     def on_order_filled_safe(self, event):
         """Handle order fill events - reset closing state when close order is filled."""
+        
+        # Check if this is entry order being monitored - detect early fill
+        if self._entry_monitoring_active and event.client_order_id == self._entry_order_id:
+            order = self.cache.order(event.client_order_id)
+            
+            if order and order.status == OrderStatus.FILLED:
+                self.logger.info(
+                    f"✅ Entry filled during monitoring | "
+                    f"Qty: {float(order.filled_qty)} | "
+                    f"Stopping monitoring early",
+                    extra={
+                        "extra": {
+                            "event_type": "entry_filled_during_monitoring",
+                            "order_id": str(event.client_order_id),
+                            "filled_qty": float(order.filled_qty)
+                        }
+                    }
+                )
+                self._stop_entry_monitoring(success=True)
         
         # Track commission from any fill (Entry or Exit) with deduplication
         if event.commission:
