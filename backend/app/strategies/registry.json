@@ -1,46 +1,5 @@
 [
     {
-        "strategy_type": "SimpleIntervalTrader",
-        "module": "app.strategies.implementations.simple_interval_trader",
-        "class_name": "SimpleIntervalTrader"
-    },
-    {
-        "strategy_type": "SpxStreamer",
-        "module": "app.actors.spx_streamer",
-        "class_name": "SpxStreamer",
-        "comment": "Data Actor (uses Strategy infrastructure for plumbing)"
-    },
-    {
-        "strategy_type": "Spxw0DteIntervalStrategy",
-        "module": "app.strategies.implementations.SPXW_0DTE_interval_strategy",
-        "class_name": "Spxw0DteIntervalStrategy"
-    },
-    {
-        "strategy_type": "MesOrbStrategy",
-        "module": "app.strategies.implementations.MES_ORB_strategy",
-        "class_name": "MesOrbStrategy"
-    },
-    {
-        "strategy_type": "Orb15MinLongCallStrategy",
-        "module": "app.strategies.implementations.ORB_15_Long_Call",
-        "class_name": "Orb15MinLongCallStrategy"
-    },
-    {
-        "strategy_type": "Orb15MinLongCallDeltaStrategy",
-        "module": "app.strategies.implementations.ORB_15_Long_Call_delta",
-        "class_name": "Orb15MinLongCallDeltaStrategy"
-    },
-    {
-        "strategy_type": "Orb15MinLongPutStrategy",
-        "module": "app.strategies.implementations.ORB_15_Long_Put",
-        "class_name": "Orb15MinLongPutStrategy"
-    },
-    {
-        "strategy_type": "MesOrbSimpleStrategy",
-        "module": "app.strategies.implementations.MES_ORB_simple_strategy",
-        "class_name": "MesOrbSimpleStrategy"
-    },
-    {
         "strategy_type": "SPX15MinRangeStrategy",
         "module": "app.strategies.implementations.SPX_15Min_Range",
         "class_name": "SPX15MinRangeStrategy"

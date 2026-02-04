@@ -57,7 +57,8 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
     - min_credit_amount: float (default 50.0) - minimum credit in dollars
     - quantity: int (default 2) - number of spreads
     - strike_width: int (default 5) - width between strikes
-    - stop_loss_multiplier: float (default 2.0)
+    - stop_loss_multiplier: float (default 2.0) [REMOVED]
+    - fixed_stop_loss_amount: float (default 50.0)
     - take_profit_amount: float (default 50.0)
     - strike_step: int (default 5)
     - signal_max_age_seconds: int (default 5)
@@ -135,7 +136,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self.strike_width = int(params.get("strike_width", 5))
         
         # Risk management
-        self.stop_loss_multiplier = float(params.get("stop_loss_multiplier", 2.0))
+        self.fixed_stop_loss_amount = float(params.get("fixed_stop_loss_amount", 70.0))
         self.take_profit_amount = float(params.get("take_profit_amount", 50.0))
         
         # Strike parameters
@@ -163,7 +164,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                     "min_credit": self.min_credit_amount,
                     "quantity": self.config_quantity,
                     "strike_width": self.strike_width,
-                    "stop_loss_mult": self.stop_loss_multiplier,
+                    "fixed_stop_loss": self.fixed_stop_loss_amount,
                     "take_profit": self.take_profit_amount
                 }
             }
@@ -874,7 +875,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                         "limit_price": rounded_mid,
                         "credit_per_spread": abs(rounded_mid) * 100,
                         "total_credit": abs(rounded_mid) * 100 * self.config_quantity,
-                        "stop_loss": abs(rounded_mid) * 100 * self.stop_loss_multiplier,
+                        "stop_loss": self.fixed_stop_loss_amount,
                         "take_profit": self.take_profit_amount
                     }
                 }
@@ -939,7 +940,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 
                 # Strategy config snapshot
                 strategy_config_snapshot = {
-                    "sl_multiplier": self.stop_loss_multiplier,
+                    "fixed_sl_amount": self.fixed_stop_loss_amount,
                     "tp_amount": self.take_profit_amount,
                     "min_credit": self.min_credit_amount,
                     "quantity": self.config_quantity,
@@ -947,7 +948,12 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 }
                 
                 # Calculate stop loss and take profit levels
-                entry_stop_loss = -(abs(rounded_mid) * self.stop_loss_multiplier)
+                # Calculate stop loss and take profit levels
+                # Old logic: entry_stop_loss = -(abs(rounded_mid) * self.stop_loss_multiplier)
+                # New logic: stop_price = -(self._spread_entry_price + (self.fixed_stop_loss_amount / 100.0))
+                # Note: self._spread_entry_price is set to abs(rounded_mid) above.
+                sl_points_offset = self.fixed_stop_loss_amount / 100.0
+                entry_stop_loss = -(abs(rounded_mid) + sl_points_offset)
                 tp_points = self.take_profit_amount / 100.0
                 entry_target_price = -(abs(rounded_mid) - tp_points)
                 
@@ -1014,10 +1020,12 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             # Log why we're not entering yet
 
             self.logger.info(
-                f"Waiting for better price | Mid: {mid:.4f} > Target: {target_price:.4f} | Credit: ${credit_received:.2f} < Min: ${self.min_credit_amount:.2f}",
+                f"Waiting for better price | Bid: {bid:.4f} | Ask: {ask:.4f} | Mid: {mid:.4f} > Target: {target_price:.4f} | Credit: ${credit_received:.2f} < Min: ${self.min_credit_amount:.2f}",
                 extra={
                     "extra": {
                         "event_type": "waiting_for_price",
+                        "current_bid": bid,
+                        "current_ask": ask,
                         "current_mid": mid,
                         "target_price": target_price,
                         "credit_received": credit_received,
@@ -1047,8 +1055,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
     def _manage_open_position(self):
         """Monitor open position for stop loss and take profit."""
         # Skip if close order already submitted (waiting for fill)
-        if self._closing_in_progress:
-            return
+        # NOTE: We partially override this below for SL priority
         
         if self._spread_entry_price is None:
             self.logger.info(
@@ -1100,7 +1107,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             )
         
         # Calculate SL/TP prices for logging
-        stop_price = -(self._spread_entry_price * self.stop_loss_multiplier)
+        # Calculate SL/TP prices for logging
+        # Logic: stop_price = -(self._spread_entry_price + (self.fixed_stop_loss_amount / 100.0))
+        stop_price = -(self._spread_entry_price + (self.fixed_stop_loss_amount / 100.0))
         tp_points = self.take_profit_amount / 100.0
         required_debit = self._spread_entry_price - tp_points
         if required_debit < 0.05:
@@ -1131,7 +1140,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 health = "🔴 LOSS"
             
             self.logger.info(
-                f"📊 POSITION STATUS | {health} | Qty: {current_qty:.1f} | P&L: ${total_pnl:+.2f} | Mid: {mid:.4f} | SL: {stop_price:.4f} | TP: {tp_price:.4f}",
+                f"📊 POSITION STATUS | {health} | Qty: {current_qty:.1f} | P&L: ${total_pnl:+.2f} | Mid: {mid:.4f} | Bid: {bid:.4f} | Ask: {ask:.4f} | SL: {stop_price:.4f} | TP: {tp_price:.4f}",
                 extra={
                     "extra": {
                         "event_type": "position_status",
@@ -1139,6 +1148,8 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                         "quantity": current_qty,
                         "pnl_total": total_pnl,
                         "current_mid": mid,
+                        "current_bid": bid,
+                        "current_ask": ask,
                         "entry_credit": entry_credit,
                         "stop_price": stop_price,
                         "tp_price": tp_price,
@@ -1149,41 +1160,66 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             )
         
         # STOP LOSS
-        # If mid becomes more negative (spread costs more to buy back), we're losing
-        # Check STOP LOSS (stop_price already calculated above)
+        # Check SL trigger BEFORE checking closing flag to allow override
+        # If SL is triggered, cancel any existing orders (including active TP) and submit SL
         if mid <= stop_price:
+            # Get any active orders to cancel
+            orders_cancelled = False
+            if self.spread_instrument:
+                active_orders = list(self.cache.orders_open(instrument_id=self.spread_instrument.id))
+                if active_orders:
+                    self.logger.warning(
+                        f"🛑 SL OVERRIDE | Cancelling {len(active_orders)} pending orders to execute SL",
+                        extra={
+                            "extra": {
+                                "event_type": "sl_override_cancel",
+                                "count": len(active_orders),
+                                "orders": [str(o.client_order_id) for o in active_orders]
+                            }
+                        }
+                    )
+                    self.cancel_all_orders(self.spread_instrument.id)
+                    orders_cancelled = True
+            
             self.logger.info(
-                f"🛑 STOP LOSS TRIGGERED | Mid: {mid:.4f} <= Stop: {stop_price:.4f} | P&L: ${total_pnl:.2f}",
+                f"🛑 STOP LOSS TRIGGERED | Bid: {bid:.4f} | Ask: {ask:.4f} | Mid: {mid:.4f} <= Stop: {stop_price:.4f} | P&L: ${total_pnl:.2f}",
                 extra={
                     "extra": {
                         "event_type": "stop_loss_trigger",
                         "current_mid": mid,
+                        "current_bid": bid,
+                        "current_ask": ask,
                         "stop_price": stop_price,
                         "pnl": total_pnl,
                         "entry_credit": entry_credit,
-                        "quantity": current_qty
+                        "quantity": current_qty,
+                        "override_active": orders_cancelled
                     }
                 }
             )
             self._closing_in_progress = True
             
-            # CRITICAL SAFETY: Cancel any lingering entry orders (e.g. partial fills)
-            # preventing them from filling AFTER we decided to close.
-            self.cancel_all_orders(self.spread_instrument.id)
-            
-            self.close_spread_smart()
-            # Note: _spread_entry_price is reset in on_order_filled_safe when close is confirmed
+            # Use aggressive price (Limit below mid) or Market for SL
+            # Here we use Limit at mid - 0.05 for immediate fill
+            sl_limit = mid - 0.05
+            self.close_spread_smart(limit_price=sl_limit)
+            return
+
+        # Now check closing flag (TP order might be pending)
+        # If we are already closing (and SL didn't trigger above), we wait
+        if self._closing_in_progress:
             return
 
         # Check TAKE PROFIT (tp_price already calculated above)
-        
         if mid >= tp_price:
             self.logger.info(
-                f"💰 TAKE PROFIT TRIGGERED | Mid: {mid:.4f} >= TP: {tp_price:.4f} | P&L: ${total_pnl:.2f}",
+                f"💰 TAKE PROFIT TRIGGERED | Bid: {bid:.4f} | Ask: {ask:.4f} | Mid: {mid:.4f} >= TP: {tp_price:.4f} | P&L: ${total_pnl:.2f}",
                 extra={
                     "extra": {
                         "event_type": "take_profit_trigger",
                         "current_mid": mid,
+                        "current_bid": bid,
+                        "current_ask": ask,
                         "tp_price": tp_price,
                         "pnl": total_pnl,
                         "entry_credit": entry_credit,
@@ -1196,7 +1232,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             # CRITICAL SAFETY: Cancel any lingering entry orders
             self.cancel_all_orders(self.spread_instrument.id)
 
-            self.close_spread_smart()
+            self.close_spread_smart(limit_price=tp_price)
             # Note: _spread_entry_price is reset in on_order_filled_safe when close is confirmed
 
     def _start_fallback_polling(self, event):
