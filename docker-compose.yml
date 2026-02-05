@@ -31,6 +31,8 @@ services:
       - TWS_USERID=${TWS_USERID}
       - TWS_PASSWORD=${TWS_PASSWORD}
       - TRADING_MODE=${TRADING_MODE:-paper}
+      - DASHBOARD_USER=${DASHBOARD_USER}
+      - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD}
     depends_on:
       - redis
       - ib-gateway

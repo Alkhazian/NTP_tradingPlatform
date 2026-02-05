@@ -85,6 +85,9 @@ async def global_exception_handler(request: Request, exc: Exception):
         content={"message": "Internal server error"},
     )
 
+from app.routers import logs as logs_router
+from app.routers import auth as auth_router
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -95,6 +98,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(logs_router.router)
+app.include_router(auth_router.router)
 
 redis_manager = RedisManager()
 # Connect to IB Gateway using environment variables
@@ -108,6 +112,8 @@ update_trigger = asyncio.Event()
 @app.on_event("startup")
 async def startup_event():
     await redis_manager.connect()
+    app.state.redis = redis_manager
+
     
     async def start_nautilus():
         logger.info("Starting NautilusTrader Manager...")
