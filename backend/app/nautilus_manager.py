@@ -22,6 +22,7 @@ from nautilus_trader.config import (
     MessageBusConfig,
     DatabaseConfig
 )
+from nautilus_trader.live.config import LiveExecEngineConfig
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import AccountId, Venue, Symbol
 from nautilus_trader.model.enums import OrderSide, PositionSide
@@ -156,6 +157,17 @@ class NautilusManager:
                 account_id=account_id,
                 instrument_provider=ib_instrument_config,
                 routing=RoutingConfig(default=True),
+                track_option_exercise_from_position_update=True,  # Subscribe to IB position updates
+            )
+
+            # Configure execution engine with position reconciliation
+            # This enables detection of positions closed externally (e.g., in TWS)
+            exec_engine_config = LiveExecEngineConfig(
+                reconciliation=True,                   # Enable startup reconciliation
+                reconciliation_lookback_mins=None,     # Use maximum available history from IB
+                position_check_interval_secs=30.0,     # Check positions every 30 seconds
+                position_check_lookback_mins=60,       # Look back 60 minutes for position checks
+                position_check_threshold_ms=5000,      # Wait 5s since last update before acting
             )
 
 
@@ -167,6 +179,8 @@ class NautilusManager:
             )
 
             config = TradingNodeConfig(
+                # Enable execution reconciliation with IB
+                exec_engine=exec_engine_config,
                 # Enable Object Cache (Orders, Positions)
                 cache=CacheConfig(
                     database=redis_config,
