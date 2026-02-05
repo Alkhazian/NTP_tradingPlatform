@@ -168,6 +168,8 @@ class NautilusManager:
                 position_check_interval_secs=30.0,     # Check positions every 30 seconds
                 position_check_lookback_mins=60,       # Look back 60 minutes for position checks
                 position_check_threshold_ms=5000,      # Wait 5s since last update before acting
+                open_check_interval_secs=10.0,         # Check open orders every 10 seconds
+                allow_overfills=True,                  # Log warning instead of rejecting duplicate fills
             )
 
 
