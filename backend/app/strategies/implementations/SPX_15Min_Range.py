@@ -109,6 +109,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._entry_monitoring_active: bool = False
         self._entry_check_timer_name: Optional[str] = None
         self._cumulative_filled_qty: float = 0.0  # Track fills across resubmits
+        self._entry_order_submitted: bool = False  # P0 FIX: Prevent order spam loop
         
         # Calculate range end time for logging
         range_end_time = "Range Close" # Will be calculated/logged by base
@@ -181,6 +182,25 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 }
             }
         )
+        
+        # P1 FIX: Check for existing position at startup
+        try:
+            existing_qty = abs(self.get_effective_spread_quantity())
+            if existing_qty > 0:
+                self.logger.warning(
+                    f"⚠️ EXISTING POSITION DETECTED AT STARTUP | Qty: {existing_qty} | Setting traded_today=True",
+                    extra={
+                        "extra": {
+                            "event_type": "existing_position_detected",
+                            "quantity": existing_qty,
+                            "action": "block_new_entries"
+                        }
+                    }
+                )
+                self.traded_today = True
+                self.save_state()
+        except Exception as e:
+            self.logger.warning(f"Failed to check existing position at startup: {e}")
 
     def on_spx_ready(self):
         """Callback when SPX data stream is ready."""
@@ -794,7 +814,8 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
 
     def _process_spread_tick(self, tick: QuoteTick):
         """Process spread ticks for entry and position management."""
-        if self.entry_in_progress and not self.traded_today:
+        # P0 FIX: Check _entry_order_submitted to prevent calling _check_and_submit_entry on every tick
+        if self.entry_in_progress and not self.traded_today and not self._entry_order_submitted:
             self._check_and_submit_entry(tick)
         elif self.get_effective_spread_quantity() != 0:
             self._manage_open_position()
@@ -924,6 +945,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             self._entry_initial_quantity = self.config_quantity
             self._entry_monitoring_active = True
             self._cumulative_filled_qty = 0.0  # Start fresh for new entry
+            self._entry_order_submitted = True  # P0 FIX: Prevent spam on subsequent ticks
             
             # DON'T set traded_today = True yet! Wait for full fill confirmation
             # DON'T set entry_in_progress = False yet! Keep it True during monitoring
@@ -993,8 +1015,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 # Old logic: entry_stop_loss = -(abs(rounded_mid) * self.stop_loss_multiplier)
                 # New logic: stop_price = -(self._spread_entry_price + (self.fixed_stop_loss_amount / 100.0))
                 # Note: self._spread_entry_price is set to abs(rounded_mid) above.
-                sl_points_offset = self.fixed_stop_loss_amount / 100.0
-                entry_stop_loss = -(abs(rounded_mid) + sl_points_offset)
+                entry_stop_loss = -(abs(rounded_mid) + (self.fixed_stop_loss_amount / 100.0))
                 tp_points = self.take_profit_amount / 100.0
                 entry_target_price = -(abs(rounded_mid) - tp_points)
                 
@@ -1104,6 +1125,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             }
         )
         self.entry_in_progress = False
+        self._entry_order_submitted = False  # P0 FIX: Reset flag
         self._signal_time = None
         self._signal_close_price = None
         self._signal_direction = None
@@ -1565,6 +1587,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._entry_attempt_count = 0
         self._entry_initial_quantity = 0.0
         self._cumulative_filled_qty = 0.0
+        self._entry_order_submitted = False  # P0 FIX
         
         if self._entry_check_timer_name:
             try:
@@ -1682,6 +1705,29 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         
         # Case 2: Cancelled, rejected, or expired
         if order_status in [OrderStatus.CANCELED, OrderStatus.REJECTED, OrderStatus.EXPIRED]:
+            # P1 FIX: Check for insufficient funds/margin rejection - stop immediately
+            if order_status == OrderStatus.REJECTED:
+                try:
+                    rejection_reason = ""
+                    if hasattr(order, 'last_event') and order.last_event:
+                        rejection_reason = str(getattr(order.last_event, 'reason', '')).lower()
+                    
+                    if "insufficient" in rejection_reason or "margin" in rejection_reason:
+                        self.logger.error(
+                            f"❌ INSUFFICIENT FUNDS - Stopping entry immediately",
+                            extra={
+                                "extra": {
+                                    "event_type": "entry_rejected_insufficient_funds",
+                                    "reason": rejection_reason,
+                                    "attempt": self._entry_attempt_count
+                                }
+                            }
+                        )
+                        self._stop_entry_monitoring(success=False)
+                        return
+                except Exception:
+                    pass
+            
             self.logger.warning(
                 f"⚠️ Entry order {order_status.name} | Will resubmit",
                 extra={
@@ -1929,23 +1975,16 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             )
         else:
             # Entry failed - but check for partial fills first!
-            filled_qty = 0.0
+            # P0 FIX #2: Use cumulative tracking ONLY - don't check portfolio
+            # (portfolio fallback was confusing existing positions with fills from monitored order)
+            filled_qty = self._cumulative_filled_qty
             
-            # Check if any quantity was filled from the last order
-            if self._entry_order_id:
+            # Also try to get from order cache if cumulative is 0
+            if filled_qty == 0 and self._entry_order_id:
                 try:
                     order = self.cache.order(self._entry_order_id)
                     if order and hasattr(order, 'filled_qty'):
                         filled_qty = float(order.filled_qty)
-                except Exception:
-                    pass
-            
-            # Also check actual position in cache as fallback
-            if filled_qty == 0:
-                try:
-                    actual_qty = abs(self.get_effective_spread_quantity())
-                    if actual_qty > 0:
-                        filled_qty = actual_qty
                 except Exception:
                     pass
             
@@ -2012,6 +2051,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._entry_attempt_count = 0
         self._entry_initial_quantity = 0.0
         self._cumulative_filled_qty = 0.0  # Reset cumulative tracking
+        self._entry_order_submitted = False  # P0 FIX: Reset flag for next entry
         
         self.save_state()
 
@@ -2035,6 +2075,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             "_entry_initial_quantity": self._entry_initial_quantity,
             "_entry_monitoring_active": self._entry_monitoring_active,
             "_cumulative_filled_qty": self._cumulative_filled_qty,
+            "_entry_order_submitted": self._entry_order_submitted,  # P0 FIX
         })
         return state
 
@@ -2060,6 +2101,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._entry_initial_quantity = state.get("_entry_initial_quantity", 0.0)
         self._entry_monitoring_active = state.get("_entry_monitoring_active", False)
         self._cumulative_filled_qty = state.get("_cumulative_filled_qty", 0.0)
+        self._entry_order_submitted = state.get("_entry_order_submitted", False)  # P0 FIX
         
         # Resume monitoring if it was active
         if self._entry_monitoring_active and self._entry_order_id:
@@ -2241,7 +2283,8 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 exit_time_iso = now.isoformat()
                 
                 # Determine exit reason based on what triggered the close
-                stop_price = -(entry_credit * self.stop_loss_multiplier)
+                # Logic: stop_price = -(entry_credit + (self.fixed_stop_loss_amount / 100.0))
+                stop_price = -(entry_credit + (self.fixed_stop_loss_amount / 100.0))
                 tp_points = self.take_profit_amount / 100.0
                 required_debit = entry_credit - tp_points
                 if required_debit < 0.05:
