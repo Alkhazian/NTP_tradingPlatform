@@ -22,7 +22,8 @@ import {
     Trash2,
     Search,
     Menu,
-    X
+    X,
+    LogOut
 } from 'lucide-react';
 
 export const Icons = {
@@ -50,6 +51,7 @@ export const Icons = {
     search: Search,
     menu: Menu,
     x: X,
+    logout: LogOut,
 };
 
 export type IconName = keyof typeof Icons;

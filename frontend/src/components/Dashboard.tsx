@@ -173,10 +173,24 @@ export default function Dashboard() {
 
 
 
+    const handleLogout = async () => {
+        try {
+            await fetch('/logout', { method: 'POST' });
+            window.location.href = '/login';
+        } catch (error) {
+            console.error('Logout failed:', error);
+            window.location.href = '/login';
+        }
+    };
+
     return (
         <div className="min-h-screen bg-background">
             {/* Sidebar */}
-            <Sidebar isOpen={isSidebarOpen} onClose={() => setIsSidebarOpen(false)}>
+            <Sidebar
+                isOpen={isSidebarOpen}
+                onClose={() => setIsSidebarOpen(false)}
+                onLogout={handleLogout}
+            >
                 <SidebarItem
                     icon="lineChart"
                     label="Dashboard"

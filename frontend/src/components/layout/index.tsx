@@ -105,14 +105,16 @@ export function SidebarItem({ icon, label, active, onClick }: SidebarItemProps) 
     );
 }
 
+
 interface SidebarProps {
     className?: string;
     children?: React.ReactNode;
     isOpen?: boolean;
     onClose?: () => void;
+    onLogout?: () => void;
 }
 
-export function Sidebar({ className, children, isOpen, onClose }: SidebarProps) {
+export function Sidebar({ className, children, isOpen, onClose, onLogout }: SidebarProps) {
     return (
         <>
             {/* Mobile Backdrop */}
@@ -164,6 +166,13 @@ export function Sidebar({ className, children, isOpen, onClose }: SidebarProps) 
                             <p className="text-sm font-medium truncate">Trader</p>
                             <p className="text-xs text-muted-foreground">Paper Trading</p>
                         </div>
+                        <button
+                            onClick={onLogout}
+                            className="p-1.5 rounded-lg hover:bg-white/10 text-muted-foreground hover:text-red-400 transition-colors"
+                            title="Log Out"
+                        >
+                            <Icons.logout className="w-4 h-4" />
+                        </button>
                     </div>
                 </div>
             </aside>

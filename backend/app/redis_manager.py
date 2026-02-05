@@ -42,3 +42,24 @@ class RedisManager:
     async def close(self):
         if self.redis:
             await self.redis.close()
+
+    async def set_session(self, token: str, data: dict, ttl_days: int = 7):
+        """Store a session with a TTL."""
+        if self.redis:
+            key = f"session:{token}"
+            await self.redis.set(key, json.dumps(data), ex=ttl_days * 86400)
+
+    async def get_session(self, token: str):
+        """Retrieve a session by token."""
+        if self.redis:
+            key = f"session:{token}"
+            data = await self.redis.get(key)
+            if data:
+                return json.loads(data)
+        return None
+
+    async def delete_session(self, token: str):
+        """Delete a session."""
+        if self.redis:
+            key = f"session:{token}"
+            await self.redis.delete(key)
