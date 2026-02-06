@@ -6,8 +6,8 @@
     - [x] Create Database for Trades
     - [x] Create TradingDataService (unified replacement for TradeRecorder + DrawdownRecorder)
     - [x] Integrate into SPX_15Min_Range strategy
-- [ ] Fix calculation of strategy results based on trades DB
-- [ ] Add security layer - login page etc.
+- [x] Fix calculation of strategy results based on trades DB
+- [x] Add security layer - login page etc.
 
 
 ## Nice to have
