@@ -38,7 +38,7 @@ from nautilus_trader.model.instruments import Instrument
 from app.strategies.base_spx import SPXBaseStrategy
 from app.strategies.config import StrategyConfig
 from app.services.trading_data_service import TradingDataService
-
+from app.services.telegram_service import TelegramNotificationService
 
 class SPX15MinRangeStrategy(SPXBaseStrategy):
     """
@@ -91,6 +91,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._signal_direction: Optional[str] = None  # 'bearish' or 'bullish'
         self._closing_in_progress: bool = False  # Prevents duplicate close orders and log spam
         
+        # Telegram
+        self.telegram = TelegramNotificationService()
+        
         # Position monitoring
         self._last_position_log_time: Optional[datetime] = None
         self._position_log_interval_seconds: int = 30  # Log position status every N seconds
@@ -105,7 +108,18 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         # Calculate range end time for logging
         range_end_time = "Range Close" # Will be calculated/logged by base
         
-        
+    # =========================================================================
+    # NOTIFICATIONS
+    # =========================================================================
+
+    def _notify(self, message: str):
+        """Send notification via Telegram service."""
+        if hasattr(self, 'telegram'):
+            # The service handles its own background threading
+            self.logger.info(f"Triggering Telegram notification: {message[:50]}...")
+            self.telegram.send_message(f"{message}")
+        else:
+            self.logger.warning("Telegram service not initialized, skipping notification")      
 
     # =========================================================================
     # LIFECYCLE
@@ -168,6 +182,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                     "take_profit": self.take_profit_amount
                 }
             }
+        )
+        self._notify(
+            f"🚀 SPX15MinRangeStrategy STARTING | {self.tz} | Window: {self.start_time}-{range_end_time} | Cutoff: {self.entry_cutoff_time}"
         )
 
     def on_spx_ready(self):
