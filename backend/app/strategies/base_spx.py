@@ -292,6 +292,9 @@ class SPXBaseStrategy(BaseStrategy):
                         "spx_price": price
                     }}
                 )
+                self._notify(
+                    f"🕘 OPENING RANGE TRACKING STARTED | Window: {self.market_open_time.strftime('%H:%M')}-{range_end_time.strftime('%H:%M')} ET"
+                )
             self.range_calculated = False
 
         # 5. Lock in range after window period
@@ -312,6 +315,9 @@ class SPXBaseStrategy(BaseStrategy):
                     }}
                 )
                 self.save_state()
+                self._notify(
+                    f"📈 RANGE LOCKED ({self.opening_range_minutes}m) | High={self.or_high:.2f} Low={self.or_low:.2f} Width={self.or_high - self.or_low:.2f}",
+                )
             else:
                 self.logger.error(
                     f"❌ RANGE LOCK FAILED | Insufficient data at {current_time}",

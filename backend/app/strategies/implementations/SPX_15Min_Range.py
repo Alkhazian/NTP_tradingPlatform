@@ -345,6 +345,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                         }
                     }
                 )
+                self._notify(
+                    f"📉 BEARISH entry BLOCKED | Close below Low ({close_price:.2f} < {self.or_low:.2f}) but High breached earlier"
+                )
             else:
                 current_price = self.current_spx_price
                 price_deviation = current_price - self.or_low
@@ -365,6 +368,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                             }
                         }
                     )
+                    self._notify(
+                        f"⚠️ BEARISH SIGNAL REJECTED - Price Bounce | Dev: {price_deviation:.2f} > Max: {self.max_price_deviation}"
+                    )
                     return
                 
                 self._signal_time = self.clock.utc_now()
@@ -384,6 +390,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                         }
                     }
                 )
+                self._notify(
+                    f"⚡ BEARISH ENTRY SIGNAL CONFIRMED | Close {close_price:.2f} < Low {self.or_low:.2f}"
+                )
                 self._initiate_entry_sequence()
                 return
 
@@ -402,6 +411,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                             "low_breached": True
                         }
                     }
+                )
+                self._notify(
+                    f"📈 BULLISH entry BLOCKED | Close above High ({close_price:.2f} > {self.or_high:.2f}) but Low breached earlier"
                 )
             else:
                 current_price = self.current_spx_price
@@ -423,6 +435,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                             }
                         }
                     )
+                    self._notify(
+                        f"⚠️ BULLISH SIGNAL REJECTED - Price Drop | Dev: {price_deviation:.2f} > Max: {self.max_price_deviation}"
+                    )
                     return
                 
                 self._signal_time = self.clock.utc_now()
@@ -441,6 +456,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                             "deviation": price_deviation
                         }
                     }
+                )
+                self._notify(
+                    f"⚡ BULLISH ENTRY SIGNAL CONFIRMED | Close {close_price:.2f} > High {self.or_high:.2f}"
                 )
                 self._initiate_entry_sequence()
 
@@ -897,6 +915,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                     }
                 }
             )
+            self._notify(
+                f"✅ ENTRY ORDER SUBMITTED | {self._signal_direction.upper()} | Qty: {self.config_quantity} | Limit: {rounded_mid:.4f} | Credit: ${abs(rounded_mid) * 100:.2f}"
+            )
             
             self.open_spread_position(
                 quantity=self.config_quantity,
@@ -1185,7 +1206,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 active_orders = list(self.cache.orders_open(instrument_id=self.spread_instrument.id))
                 if active_orders:
                     self.logger.warning(
-                        f"🛑 SL OVERRIDE | Cancelling {len(active_orders)} pending orders to execute SL",
+                        f"🛑 STOP LOSS OVERRIDE | Cancelling {len(active_orders)} pending orders to execute STOP LOSS",
                         extra={
                             "extra": {
                                 "event_type": "sl_override_cancel",
@@ -1212,6 +1233,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                         "override_active": orders_cancelled
                     }
                 }
+            )
+            self._notify(
+                f"🛑 STOP LOSS TRIGGERED | Bid: {bid:.4f} | Ask: {ask:.4f} | Mid: {mid:.4f} <= Stop: {stop_price:.4f} | P&L: ${total_pnl:.2f}"
             )
             self._closing_in_progress = True
             
@@ -1242,6 +1266,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                         "quantity": current_qty
                     }
                 }
+            )
+            self._notify(
+                f"💰 TAKE PROFIT TRIGGERED | Bid: {bid:.4f} | Ask: {ask:.4f} | Mid: {mid:.4f} >= TP: {tp_price:.4f} | P&L: ${total_pnl:.2f}"
             )
             self._closing_in_progress = True
             
@@ -1529,6 +1556,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                     "start_time": str(self.start_time)
                 }
             }
+        )
+        self._notify(
+            f"📅 NEW TRADING DAY: {new_date} | Previous: {old_date} | Range Start: {self.start_time}"
         )
 
     def get_state(self) -> Dict[str, Any]:

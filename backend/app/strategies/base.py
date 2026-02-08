@@ -656,6 +656,9 @@ class BaseStrategy(Strategy):
                 }
             }
         )
+        self._notify(
+            f"📤 CLOSING SPREAD POSITION | ID: {self.spread_id} | Qty: {pos_qty}"
+        )
         
         self.close_all_positions(self.spread_id)
         return True
@@ -812,6 +815,9 @@ class BaseStrategy(Strategy):
                     "Note": "IB scattered legs into individual positions, but we close via combo order for atomicity."
                 }
             }
+        )
+        self._notify(
+            f"📤 CLOSING SPREAD (Smart - Reverse Combo Order) | {close_side} {close_qty} | Limit: {closing_limit_price if closing_limit_price else 'MARKET'}"
         )
         
         # Закриваємо через зворотній комбо-ордер
@@ -1567,6 +1573,9 @@ class BaseStrategy(Strategy):
                         }
                     }
                 )
+                self._notify(
+                    f"✅ SPREAD ORDER FILLED BY BROKER | {order.instrument_id} | {order.side.name} | Qty: {event.last_qty} | Px: {display_price} | Val: ${abs(fill_value):.2f}"
+                )
             elif order:
                 self.logger.info(
                     f"Order filled: {order_id} | {order.status.name} | Qty: {event.last_qty} | Px: {event.last_px}",
@@ -1634,6 +1643,9 @@ class BaseStrategy(Strategy):
                         }
                     }
                 )
+                self._notify(
+                    f"⚡ PARTIAL FILL | {order_id} | Filled: {event.last_qty} | Total Filled: {order.filled_qty} | Remaining: {remaining_qty:.1f}"
+                )
             
             if order and order.status == OrderStatus.FILLED:
                 self._pending_entry_orders.discard(order_id)
@@ -1649,6 +1661,9 @@ class BaseStrategy(Strategy):
                             "status": "FILLED"
                         }
                     }
+                )
+                self._notify(
+                    f"🏁 Order fully filled | Tracking cleaned up | ID: {order_id}"
                 )
             
         except Exception as e:
