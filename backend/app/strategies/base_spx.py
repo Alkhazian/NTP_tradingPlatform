@@ -63,6 +63,10 @@ class SPXBaseStrategy(BaseStrategy):
         self.current_spx_price = 0.0
         self.spx_subscribed = False
         
+        # SPX bid/ask tracking - store last valid values
+        self.last_spx_bid = 0.0
+        self.last_spx_ask = 0.0
+        
         # Opening Range Parameters
         params = config.parameters
         self.opening_range_minutes = int(params.get("opening_range_minutes", params.get("window_minutes", 15)))
@@ -214,10 +218,22 @@ class SPXBaseStrategy(BaseStrategy):
         """
         # Check if this is an SPX tick
         if tick.instrument_id == self.spx_instrument_id:
-            # Update current SPX price
+            # Get current bid/ask from tick
             bid = tick.bid_price.as_double()
             ask = tick.ask_price.as_double()
             
+            # Use previous valid values if current values are zero
+            if bid <= 0:
+                bid = self.last_spx_bid
+            else:
+                self.last_spx_bid = bid  # Store valid bid
+            
+            if ask <= 0:
+                ask = self.last_spx_ask
+            else:
+                self.last_spx_ask = ask  # Store valid ask
+            
+            # Calculate mid price from bid/ask
             if bid > 0 and ask > 0:
                 self.current_spx_price = (bid + ask) / 2
             elif bid > 0:
@@ -380,6 +396,8 @@ class SPXBaseStrategy(BaseStrategy):
         state.update({
             "current_spx_price": self.current_spx_price,
             "spx_subscribed": self.spx_subscribed,
+            "last_spx_bid": self.last_spx_bid,
+            "last_spx_ask": self.last_spx_ask,
             "or_high": self.or_high,
             "or_low": self.or_low,
             "range_calculated": self.range_calculated,
@@ -396,6 +414,8 @@ class SPXBaseStrategy(BaseStrategy):
         super().set_state(state)
         self.current_spx_price = state.get("current_spx_price", 0.0)
         self.spx_subscribed = state.get("spx_subscribed", False)
+        self.last_spx_bid = state.get("last_spx_bid", 0.0)
+        self.last_spx_ask = state.get("last_spx_ask", 0.0)
         self.or_high = state.get("or_high")
         self.or_low = state.get("or_low")
         self.range_calculated = state.get("range_calculated", False)
