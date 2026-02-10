@@ -13,9 +13,9 @@
         "min_credit_amount": 70,
         "strike_width": 5,
         "fixed_stop_loss_amount": 70,
-        "take_profit_amount": 40,
+        "take_profit_amount": 45,
         "strike_step": 5,
-        "signal_max_age_seconds": 5,
+        "signal_max_age_seconds": 30,
         "max_price_deviation": 10,
         "entry_timeout_seconds": 35
     }
