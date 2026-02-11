@@ -31,7 +31,7 @@ import math
 from typing import Dict, Any, Optional
 
 from nautilus_trader.model.data import QuoteTick
-from nautilus_trader.model.enums import OptionKind, TimeInForce
+from nautilus_trader.model.enums import OptionKind, TimeInForce, OrderStatus
 from nautilus_trader.model.identifiers import InstrumentId, Venue
 from nautilus_trader.model.instruments import Instrument
 
@@ -1706,7 +1706,11 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             # Check if position is flat (Backup Trigger, e.g. via Leg Fills)
             effective_qty = self.get_effective_spread_quantity()
             
-            if is_spread_fill or effective_qty == 0:
+            # Fetch the order to check its status (Partial vs Full)
+            order = self.cache.order(event.client_order_id)
+            is_order_filled = order and order.status == OrderStatus.FILLED
+            
+            if is_order_filled and effective_qty == 0:
                 # 1. Determine Fill Price
                 # Priority: Tracked Limit Price > Order Avg Price > Fill Price
                 # For Spreads, relying on Limit Price avoids "leg price" reporting issues.
