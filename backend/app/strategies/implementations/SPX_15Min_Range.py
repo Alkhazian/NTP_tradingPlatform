@@ -1048,6 +1048,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 filled_time=entry_time_iso,
                 filled_quantity=self.config_quantity,
                 filled_price=rounded_mid,
+                commission=0.0,
                 raw_data=entry_reason,
             )
 
@@ -1694,17 +1695,31 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             except Exception as e:
                 self.logger.warning(f"Failed to capture commission: {e}")
 
+            # Check if this is a close order fill (we were in closing state)
+        # Check if this is a close order fill (we were in closing state)
         # Check if this is a close order fill (we were in closing state)
         if self._closing_in_progress:
-            # Verify position is now flat (close order was filled)
-            # Verify position is now flat (close order was filled)
+            # Check if this IS the Spread Fill event (Primary Trigger)
+            # We want to close immediately on Spread Fill to use its correct price.
+            is_spread_fill = self.spread_instrument and event.instrument_id == self.spread_instrument.id
+            
+            # Check if position is flat (Backup Trigger, e.g. via Leg Fills)
             effective_qty = self.get_effective_spread_quantity()
-            if effective_qty == 0:
+            
+            if is_spread_fill or effective_qty == 0:
                 # 1. Determine Fill Price
                 # Priority: Tracked Limit Price > Order Avg Price > Fill Price
                 # For Spreads, relying on Limit Price avoids "leg price" reporting issues.
                 fill_price = 0.0
                 tracked_limit = self._active_spread_order_limits.get(event.client_order_id)
+                
+                # Fallback: If no limit found using event ID (e.g. Leg Fill triggered close),
+                # check if we have ANY tracked limit for an active spread order.
+                if tracked_limit is None and self._active_spread_order_limits:
+                    for oid, limit in self._active_spread_order_limits.items():
+                         tracked_limit = limit
+                         self.logger.info(f"✅ Found fallback tracked limit from parent order {oid}: {limit}")
+                         break
                 
                 if tracked_limit is not None:
                     fill_price = tracked_limit
@@ -1788,6 +1803,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                         filled_time=exit_time_iso,
                         filled_quantity=self.config_quantity,
                         filled_price=fill_price,
+                        commission=self._total_commission, # Include commission
                         raw_data={"trigger": exit_reason, "pnl": final_pnl},
                     )
                 
