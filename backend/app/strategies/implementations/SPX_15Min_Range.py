@@ -90,6 +90,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._spread_entry_price: Optional[float] = None
         self._signal_direction: Optional[str] = None  # 'bearish' or 'bullish'
         self._closing_in_progress: bool = False  # Prevents duplicate close orders and log spam
+        self._sl_triggered: bool = False  # Prevents SL from re-triggering after first fire
         
         # Telegram
         self.telegram = TelegramNotificationService()
@@ -1200,7 +1201,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         # STOP LOSS
         # Check SL trigger BEFORE checking closing flag to allow override
         # If SL is triggered, cancel any existing orders (including active TP) and submit SL
-        if mid <= stop_price:
+        if mid <= stop_price and not self._sl_triggered:
             # Get any active orders to cancel
             orders_cancelled = False
             if self.spread_instrument:
@@ -1239,6 +1240,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 f"🛑 STOP LOSS TRIGGERED | Bid: {bid:.4f} | Ask: {ask:.4f} | Mid: {mid:.4f} <= Stop: {stop_price:.4f} | P&L: ${total_pnl:.2f}"
             )
             self._closing_in_progress = True
+            self._sl_triggered = True
             
             # Use aggressive price (Limit below mid) or Market for SL
             # Here we use Limit at mid - 0.05 for immediate fill
@@ -1537,6 +1539,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._signal_close_price = None
         self._last_log_minute = -1
         self._closing_in_progress = False
+        self._sl_triggered = False
         
         # Cancel any orphaned trade tracking from previous day
         if self._current_trade_id:
@@ -1574,6 +1577,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             "_target_long_strike": self._target_long_strike,
             "_signal_direction": self._signal_direction,
             "_closing_in_progress": self._closing_in_progress,
+            "_sl_triggered": self._sl_triggered,
             "_current_trade_id": self._current_trade_id,
             "_total_commission": self._total_commission,
         })
@@ -1591,6 +1595,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._target_long_strike = state.get("_target_long_strike")
         self._signal_direction = state.get("_signal_direction")
         self._closing_in_progress = state.get("_closing_in_progress", False)
+        self._sl_triggered = state.get("_sl_triggered", False)
         self._current_trade_id = state.get("_current_trade_id")
         self._total_commission = state.get("_total_commission", 0.0)
         
@@ -1822,6 +1827,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 )
                 self._spread_entry_price = None
                 self._closing_in_progress = False
+                self._sl_triggered = False
                 self._current_trade_id = None
                 self._total_commission = 0.0  # Reset for next time (though typically once per day)
                 self.save_state()
