@@ -1707,32 +1707,27 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             
             if effective_qty == 0:
                 # 1. Determine Fill Price
-                # Priority: Tracked Limit Price > Order Avg Price > Fill Price
-                # For Spreads, relying on Limit Price avoids "leg price" reporting issues.
+                # Priority: Order Avg Price > Tracked Limit Price > Event Last Price
+                # CRITICAL FIX: Use order.avg_px as primary source to avoid using wrong order's limit
                 fill_price = 0.0
-                tracked_limit = self._active_spread_order_limits.get(event.client_order_id)
                 
-                # Fallback: If no limit found using event ID (e.g. Leg Fill triggered close),
-                # check if we have ANY tracked limit for an active spread order.
-                if tracked_limit is None and self._active_spread_order_limits:
-                    for oid, limit in self._active_spread_order_limits.items():
-                         tracked_limit = limit
-                         self.logger.info(f"✅ Found fallback tracked limit from parent order {oid}: {limit}")
-                         break
-                
-                if tracked_limit is not None:
-                    fill_price = tracked_limit
-                    self.logger.info(f"✅ Using tracked LIMIT price for spread exit: {fill_price}")
+                # Get the order to find the average fill price (handles partial fills correctly)
+                order = self.cache.order(event.client_order_id)
+                if order and hasattr(order, "avg_px") and order.avg_px is not None:
+                    # avg_px is the weighted average price of all fills for this order
+                    fill_price = order.avg_px.as_double() if hasattr(order.avg_px, "as_double") else float(order.avg_px)
+                    self.logger.info(f"✅ Using order avg_px for spread exit: {fill_price}")
                 else:
-                    self.logger.warning(f"⚠️ No tracked limit for {event.client_order_id}, falling back to event price")
-                    # Get the order to find the average fill price (handles partial fills correctly)
-                    order = self.cache.order(event.client_order_id)
-                    if order and hasattr(order, "avg_px"):
-                         # avg_px is the weighted average price of all fills for this order
-                         fill_price = order.avg_px.as_double() if hasattr(order.avg_px, "as_double") else float(order.avg_px)
+                    # Fallback to tracked limit price for THIS specific order
+                    tracked_limit = self._active_spread_order_limits.get(event.client_order_id)
+                    
+                    if tracked_limit is not None:
+                        fill_price = tracked_limit
+                        self.logger.info(f"✅ Using tracked LIMIT price for spread exit: {fill_price}")
                     else:
-                         # Fallback to last_px if order not found (should not happen)
-                         fill_price = event.last_px.as_double() if hasattr(event.last_px, "as_double") else float(event.last_px)
+                        # Last resort: use event last_px
+                        self.logger.warning(f"⚠️ No avg_px or tracked limit for {event.client_order_id}, using event last_px")
+                        fill_price = event.last_px.as_double() if hasattr(event.last_px, "as_double") else float(event.last_px)
 
                 entry_credit = self._spread_entry_price if self._spread_entry_price is not None else 0.0
                 # Note: spread prices are credits (negative) or debits (negative/positive depending on view).
@@ -1830,6 +1825,10 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 self._sl_triggered = False
                 self._current_trade_id = None
                 self._total_commission = 0.0  # Reset for next time (though typically once per day)
+                
+                # Clean up tracked order limits to prevent stale entries
+                self._active_spread_order_limits.clear()
+                
                 self.save_state()
 
     # --- Close Order Failsafe Handlers ---
