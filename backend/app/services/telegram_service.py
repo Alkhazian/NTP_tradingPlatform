@@ -41,7 +41,6 @@ class TelegramNotificationService:
             payload = {
                 "chat_id": self.chat_id,
                 "text": text,
-                "parse_mode": "HTML"
             }
             with httpx.Client(timeout=10.0) as client:
                 response = client.post(self.base_url, json=payload)

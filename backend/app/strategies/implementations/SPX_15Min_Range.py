@@ -31,7 +31,7 @@ import math
 from typing import Dict, Any, Optional
 
 from nautilus_trader.model.data import QuoteTick
-from nautilus_trader.model.enums import OptionKind, TimeInForce, OrderStatus
+from nautilus_trader.model.enums import OptionKind, TimeInForce
 from nautilus_trader.model.identifiers import InstrumentId, Venue
 from nautilus_trader.model.instruments import Instrument
 
@@ -1696,21 +1696,11 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 self.logger.warning(f"Failed to capture commission: {e}")
 
             # Check if this is a close order fill (we were in closing state)
-        # Check if this is a close order fill (we were in closing state)
-        # Check if this is a close order fill (we were in closing state)
         if self._closing_in_progress:
-            # Check if this IS the Spread Fill event (Primary Trigger)
-            # We want to close immediately on Spread Fill to use its correct price.
-            is_spread_fill = self.spread_instrument and event.instrument_id == self.spread_instrument.id
-            
-            # Check if position is flat (Backup Trigger, e.g. via Leg Fills)
+            # Check if position is flat — all legs closed
             effective_qty = self.get_effective_spread_quantity()
             
-            # Fetch the order to check its status (Partial vs Full)
-            order = self.cache.order(event.client_order_id)
-            is_order_filled = order and order.status == OrderStatus.FILLED
-            
-            if is_order_filled and effective_qty == 0:
+            if effective_qty == 0:
                 # 1. Determine Fill Price
                 # Priority: Tracked Limit Price > Order Avg Price > Fill Price
                 # For Spreads, relying on Limit Price avoids "leg price" reporting issues.
@@ -1835,3 +1825,41 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 self._current_trade_id = None
                 self._total_commission = 0.0  # Reset for next time (though typically once per day)
                 self.save_state()
+
+    # --- Close Order Failsafe Handlers ---
+
+    def on_order_canceled_safe(self, event):
+        self._handle_close_order_failure(event, "CANCELLED")
+
+    def on_order_rejected_safe(self, event):
+        self._handle_close_order_failure(event, "REJECTED")
+
+    def on_order_expired_safe(self, event):
+        self._handle_close_order_failure(event, "EXPIRED")
+
+    def _handle_close_order_failure(self, event, reason: str):
+        """Reset _closing_in_progress if a close order fails but position remains open."""
+        if not self._closing_in_progress:
+            return
+
+        effective_qty = self.get_effective_spread_quantity()
+        if effective_qty == 0:
+            # Position is flat — the partial fills completed the close
+            return
+
+        self.logger.warning(
+            f"\u26a0\ufe0f CLOSE ORDER {reason} | Position still open ({effective_qty:.0f} lots) | "
+            f"Resetting _closing_in_progress to allow SL/TP re-trigger",
+            extra={
+                "extra": {
+                    "event_type": f"close_order_{reason.lower()}_failsafe",
+                    "effective_qty": effective_qty,
+                    "order_id": str(event.client_order_id)
+                }
+            }
+        )
+        self._notify(
+            f"\u26a0\ufe0f CLOSE ORDER {reason} | Position still open ({effective_qty:.0f} lots) | SL/TP monitoring resumed"
+        )
+        self._closing_in_progress = False
+        self.save_state()

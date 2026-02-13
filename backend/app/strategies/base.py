@@ -748,9 +748,12 @@ class BaseStrategy(Strategy):
                     }
                 }
             )
-            # Тут рішення залежить від ризик-менеджменту. 
-            # Безпечно повернути мінімальне значення або 0, щоб не закрити зайве.
-            return 0.0 
+            # Return minimum implied qty (conservative) — position is NOT flat.
+            # Returning 0 here would falsely signal "no position" to all callers,
+            # breaking SL/TP monitoring, close confirmation, and emergency close.
+            min_abs = min(abs(q) for q in potential_spread_qtys)
+            sign = 1 if potential_spread_qtys[0] > 0 else -1
+            return sign * min_abs
 
         return first_qty
 
