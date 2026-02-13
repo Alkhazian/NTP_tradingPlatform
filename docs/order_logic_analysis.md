@@ -173,7 +173,7 @@ If the entry was already submitted (spread was found and order placed), neither 
 
 `_signal_direction` is persisted and restored. If the strategy restarts after a trade was entered but before exit, `_signal_direction` is used in [on_order_filled_safe](file:///root/ntp-remote/backend/app/strategies/base.py#2050-2051) to determine exit reason (L1788). This is correct — it needs to survive restarts.
 
-However, `_signal_time` is NOT persisted. After restart, the signal freshness check in [_check_and_submit_entry](file:///root/ntp-remote/backend/app/strategies/implementations/SPX_15Min_Range.py#826-1075) (L854-870) will use `None`, bypassing the staleness check. Since `entry_in_progress` is not persisted either (it's not in [get_state](file:///root/ntp-remote/backend/app/strategies/base_spx.py#391-409)), this is mostly safe — the entry won't resume after restart.
+However, `_signal_time` is NOT persisted. After restart, the signal freshness check in [_check_and_submit_entry](file:///root/ntp-remote/backend/app/strategies/implementations/SPX_15Min_Range.py#826-1075) (L854-870) will use `None`, bypassing the staleness check. Since `entry_in_progress` is not persisted either (it's not in [get_state](file:///root/ntp-remote/backend/app/strategies/implementations/SPX_15Min_Range.py#1568-1585)), this is mostly safe — the entry won't resume after restart.
 
 ### 4.2 `entry_in_progress` Not Persisted
 
@@ -183,7 +183,7 @@ However, `_signal_time` is NOT persisted. After restart, the signal freshness ch
 
 The commission tracking in [on_order_filled_safe](file:///root/ntp-remote/backend/app/strategies/base.py#2050-2051) (L1654-1701) has solid deduplication logic using `trade_id` (execution ID). It correctly ignores leg-level commissions when spread-level commissions are reported. This is well-designed for IB's behavior.
 
-### 4.4 [on_minute_closed](file:///root/ntp-remote/backend/app/strategies/implementations/SPX_15Min_Range.py#226-465) Can Trigger Both Breach AND Entry in Same Minute
+### 4.4 [on_minute_closed](file:///root/ntp-remote/backend/app/strategies/base_spx.py#948-954) Can Trigger Both Breach AND Entry in Same Minute
 
 **Location**: [SPX_15Min_Range.py L257-464](file:///root/ntp-remote/backend/app/strategies/implementations/SPX_15Min_Range.py#L257-L464)
 
@@ -229,12 +229,90 @@ This is **intentionally correct** — bearish entry requires close below Low, wh
 
 | # | Issue | Severity | Risk |
 |---|-------|----------|------|
-| 1 | `traded_today` set before fill (2.1) | **CRITICAL** | Lost trading day on any entry failure |
-| 2 | `_sl_triggered` not reset on SL close failure (2.3) | **CRITICAL** | Unlimited loss exposure |
-| 3 | `spread_id` not reset on new day (4.5) | **HIGH** | Strategy cannot enter on subsequent days |
-| 4 | Trade record created before fill (2.2) | **HIGH** | Data integrity, wrong P&L in DB |
-| 5 | SL uses LIMIT not MARKET (2.3) | **MEDIUM** | SL may not fill in fast market |
-| 6 | Dual trade recording systems (3.2) | **MEDIUM** | Duplicate DB records |
-| 7 | `_closing_in_progress` after restart (3.4) | **MEDIUM** | Position unmanaged after restart |
-| 8 | Exit record uses `config_quantity` not actual qty (3.1) | **LOW** | Wrong qty in DB on partial fill |
-| 9 | TP limit below market (2.4) | **LOW** | Leaves money on table (fills anyway) |
+| 1 | **TP deadloop** — infinite close orders to broker (7.1) | **CRITICAL** | Broker rate-limiting, account flags, infinite orders |
+| 2 | `traded_today` set before fill (2.1) | **CRITICAL** | Lost trading day on any entry failure |
+| 3 | `_sl_triggered` not reset on SL close failure (2.3) | **CRITICAL** | Unlimited loss exposure |
+| 4 | `spread_id` not reset on new day (4.5) | **HIGH** | Strategy cannot enter on subsequent days |
+| 5 | Trade record created before fill (2.2) | **HIGH** | Data integrity, wrong P&L in DB |
+| 6 | SL uses LIMIT not MARKET (2.3) | **MEDIUM** | SL may not fill in fast market |
+| 7 | Dual trade recording systems (3.2) | **MEDIUM** | Duplicate DB records |
+| 8 | `_closing_in_progress` after restart (3.4) | **MEDIUM** | Position unmanaged after restart |
+| 9 | Exit record uses `config_quantity` not actual qty (3.1) | **LOW** | Wrong qty in DB on partial fill |
+| 10 | TP limit below market (2.4) | **LOW** | Leaves money on table (fills anyway) |
+
+---
+
+## 7. Infinite Loop / Deadloop Analysis
+
+Four potential feedback loops traced in the order system:
+
+### 7.1 ⛔ CRITICAL: Take Profit Re-Trigger Loop
+
+**Path**: `every tick` → [_process_spread_tick](file:///root/ntp-remote/backend/app/strategies/implementations/SPX_15Min_Range.py#819-825) → [_manage_open_position](file:///root/ntp-remote/backend/app/strategies/implementations/SPX_15Min_Range.py#1094-1283) → TP triggers at L1257 → [close_spread_smart()](file:///root/ntp-remote/backend/app/strategies/base.py#760-835) → LIMIT order submitted → order **rejected/cancelled/expired** → [_handle_close_order_failure](file:///root/ntp-remote/backend/app/strategies/implementations/SPX_15Min_Range.py#1846-1872) → `_closing_in_progress = False` → **next tick** → [_manage_open_position](file:///root/ntp-remote/backend/app/strategies/implementations/SPX_15Min_Range.py#1094-1283) → TP triggers again → ...
+
+```mermaid
+graph LR
+    A[Tick arrives] --> B[_manage_open_position]
+    B --> C{mid >= tp_price?}
+    C -->|Yes| D[close_spread_smart]
+    D --> E[LIMIT order submitted]
+    E --> F{Order rejected/expired?}
+    F -->|Yes| G[_handle_close_order_failure]
+    G --> H[_closing_in_progress = False]
+    H --> A
+```
+
+> [!CAUTION]
+> Unlike SL (which has `_sl_triggered` one-shot flag), **TP has no equivalent flag**. If the TP close order is consistently rejected (e.g., bad limit price, market closed, permissions), the cycle repeats **on every single tick** — potentially hundreds of times per second.
+
+**Why this is realistic**: The TP LIMIT order uses a calculated `tp_price` which may be stale or invalid after market conditions change. If IB rejects the order (e.g., price outside valid range, insufficient buying power for the debit), the rejection callback immediately resets `_closing_in_progress`, and the very next tick re-triggers TP.
+
+**Concrete impact**:
+- Hundreds/thousands of orders submitted per minute
+- IB rate-limits at ~50 messages/second → account may be flagged or disconnected
+- Each rejection generates log entries, notifications, and DB writes
+
+**Fix direction**: Add a `_tp_triggered` one-shot flag (like `_sl_triggered`), or add a cooldown timer between close attempts, or add a max-retry counter.
+
+---
+
+### 7.2 ✅ Safe: SL Trigger Path
+
+**Path**: SL triggers → `_sl_triggered = True` → [close_spread_smart()](file:///root/ntp-remote/backend/app/strategies/base.py#760-835) → order rejected → failsafe resets `_closing_in_progress` → next tick → `mid <= stop_price and not self._sl_triggered` → **FALSE** (because `_sl_triggered = True`)
+
+SL cannot deadloop because `_sl_triggered` is a **one-shot flag** set immediately on first trigger. This is correctly designed.
+
+However, as noted in issue 2.3, the downside of this one-shot behavior is that if the SL close fails, no further SL attempts are made.
+
+---
+
+### 7.3 ✅ Safe: SL Cancel-All → Failsafe Cross-Event
+
+**Scenario**: TP close order is pending → SL triggers → `cancel_all_orders()` cancels the TP order → [on_order_cancelled](file:///root/ntp-remote/backend/app/strategies/base.py#1439-1466) fires → [_handle_close_order_failure](file:///root/ntp-remote/backend/app/strategies/implementations/SPX_15Min_Range.py#1846-1872) checks `_closing_in_progress`.
+
+**Timing analysis**:
+1. L1220: `cancel_all_orders(self.spread_instrument.id)` — cancels pending TP
+2. L1242: `self._closing_in_progress = True` — set AFTER cancel_all
+3. L1248: [close_spread_smart()](file:///root/ntp-remote/backend/app/strategies/base.py#760-835) — submits SL close
+
+In Nautilus's **single-threaded event loop**, `cancel_all_orders` is processed synchronously — the cancel request is sent to the broker, but the [on_order_cancelled](file:///root/ntp-remote/backend/app/strategies/base.py#1439-1466) callback fires **later** (asynchronously from the broker). By that time, `_closing_in_progress = True` is already set.
+
+When [on_order_cancelled](file:///root/ntp-remote/backend/app/strategies/base.py#1439-1466) fires for the old TP order:
+- `_closing_in_progress = True` → enters handler
+- `effective_qty != 0` → resets `_closing_in_progress = False`
+
+This **does** reset the flag, but `_sl_triggered = True` prevents SL from re-triggering, and TP won't trigger because `mid <= stop_price` (we're in SL territory). So no deadloop here — but it does prematurely reset `_closing_in_progress` while the SL close order is still pending.
+
+> [!WARNING]
+> This creates a brief window where `_closing_in_progress = False` even though an SL close order is active. If the SL close order then also fails, the failsafe fires again and `_closing_in_progress` is already False — no reset happens, and the position is stuck (no SL re-trigger due to `_sl_triggered`, and no TP because market is below TP).
+
+---
+
+### 7.4 ✅ Safe: Entry Polling Not Self-Perpetuating
+
+Entry uses [_check_and_submit_entry](file:///root/ntp-remote/backend/app/strategies/implementations/SPX_15Min_Range.py#826-1075) which is called from [_process_spread_tick](file:///root/ntp-remote/backend/app/strategies/implementations/SPX_15Min_Range.py#819-825) only when:
+```python
+if self.entry_in_progress and not self.traded_today:
+```
+
+After entry submission, `self.entry_in_progress = False` and `self.traded_today = True` immediately (L929-930), so the entry path cannot loop. Even if the order is rejected, neither flag is reset — the day is simply dead (which is issue 2.1, not a deadloop).
