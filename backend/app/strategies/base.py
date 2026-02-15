@@ -739,15 +739,35 @@ class BaseStrategy(Strategy):
         is_broken = not all(abs(q - first_qty) < 1e-9 for q in potential_spread_qtys)
         
         if is_broken:
-            self.logger.critical(
-                f"BROKEN SPREAD DETECTED | Leg quantities do not match ratios |Implied quantities per leg: {potential_spread_qtys}",
-                extra={
-                    "extra": {
-                        "event_type": "broken_spread_detected",
-                        "implied_quantities": potential_spread_qtys
+            # Check if imbalance is expected due to a spread order being executed
+            # IB reports individual leg fills with 10-100ms delay, causing temporary imbalance
+            has_active_spread_orders = bool(self._pending_spread_orders)
+            
+            if has_active_spread_orders:
+                self.logger.info(
+                    f"Temporary leg imbalance during spread order execution (expected) | Quantities: {potential_spread_qtys}",
+                    extra={
+                        "extra": {
+                            "event_type": "temporary_leg_imbalance",
+                            "implied_quantities": potential_spread_qtys,
+                            "active_spread_orders": [str(oid) for oid in self._pending_spread_orders]
+                        }
                     }
-                }
-            )
+                )
+            else:
+                self.logger.critical(
+                    f"BROKEN SPREAD DETECTED | Leg quantities do not match ratios | Implied quantities per leg: {potential_spread_qtys}",
+                    extra={
+                        "extra": {
+                            "event_type": "broken_spread_detected",
+                            "implied_quantities": potential_spread_qtys
+                        }
+                    }
+                )
+                self._notify(
+                    f"🚨 BROKEN SPREAD | Legs unbalanced with NO active orders: {potential_spread_qtys}"
+                )
+            
             # Return minimum implied qty (conservative) — position is NOT flat.
             # Returning 0 here would falsely signal "no position" to all callers,
             # breaking SL/TP monitoring, close confirmation, and emergency close.
