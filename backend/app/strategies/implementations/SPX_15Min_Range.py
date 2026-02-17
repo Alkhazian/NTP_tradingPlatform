@@ -31,7 +31,7 @@ import math
 from typing import Dict, Any, Optional
 
 from nautilus_trader.model.data import QuoteTick
-from nautilus_trader.model.enums import OptionKind, TimeInForce
+from nautilus_trader.model.enums import OptionKind, TimeInForce, OrderStatus
 from nautilus_trader.model.identifiers import ClientOrderId, InstrumentId, Venue
 from nautilus_trader.model.instruments import Instrument
 
@@ -91,6 +91,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._signal_direction: Optional[str] = None  # 'bearish' or 'bullish'
         self._closing_in_progress: bool = False  # Prevents duplicate close orders and log spam
         self._sl_triggered: bool = False  # Prevents SL from re-triggering after first fire
+        self._entry_order_id: Optional[ClientOrderId] = None  # Track entry order for fill timeout
         
         # Telegram
         self.telegram = TelegramNotificationService()
@@ -162,6 +163,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self.signal_max_age_seconds = int(params.get("signal_max_age_seconds", 5))
         self.max_price_deviation = float(params.get("max_price_deviation", 10.0))
         self.entry_timeout_seconds = int(params.get("entry_timeout_seconds", 35))
+        self.fill_timeout_seconds = int(params.get("fill_timeout_seconds", 0))  # 0 = disabled
         
         range_end_time = "Range Close" # Will be calculated/logged by base
         
@@ -920,11 +922,41 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 f"✅ ENTRY ORDER SUBMITTED | {self._signal_direction.upper()} | Qty: {self.config_quantity} | Limit: {rounded_mid:.4f} | Credit: ${abs(rounded_mid) * 100:.2f}"
             )
             
-            self.open_spread_position(
+            result = self.open_spread_position(
                 quantity=self.config_quantity,
                 is_buy=True,
                 limit_price=rounded_mid
             )
+            
+            # Track entry order ID for fill timeout
+            if result:
+                # Find the entry order we just submitted (most recent in _pending_spread_orders)
+                # This assumes _pending_spread_orders is updated immediately after open_spread_position
+                # and that it contains only the most recent order if multiple are submitted in quick succession.
+                # A more robust way would be to have open_spread_position return the ClientOrderId.
+                if self._pending_spread_orders:
+                    self._entry_order_id = list(self._pending_spread_orders)[-1]
+                
+                # Start fill timeout timer if configured
+                if self.fill_timeout_seconds > 0 and self._entry_order_id:
+                    try:
+                        self.clock.set_time_alert(
+                            name=f"{self.id}_fill_timeout",
+                            alert_time=self.clock.utc_now() + timedelta(seconds=self.fill_timeout_seconds),
+                            callback=self._on_fill_timeout
+                        )
+                        self.logger.info(
+                            f"⏱️ Fill timeout set | Duration: {self.fill_timeout_seconds}s | Order: {self._entry_order_id}",
+                            extra={
+                                "extra": {
+                                    "event_type": "fill_timeout_set",
+                                    "timeout_seconds": self.fill_timeout_seconds,
+                                    "order_id": str(self._entry_order_id)
+                                }
+                            }
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"Failed to set fill timeout timer: {e}")
             
             self.traded_today = True
             self.entry_in_progress = False
@@ -1519,6 +1551,100 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 )
                 self._cancel_entry()
 
+    def _on_fill_timeout(self, event):
+        """
+        Handle fill timeout - cancel unfilled portion of entry order.
+        
+        If order has partial fills: cancel remaining, continue with partial position.
+        If no fills at all: cancel entire order, clean up entry state.
+        """
+        if not self._entry_order_id:
+            self.logger.info(
+                "Fill timeout fired but no entry order tracked | Ignoring",
+                extra={
+                    "extra": {
+                        "event_type": "fill_timeout_no_order"
+                    }
+                }
+            )
+            return
+        
+        order = self.cache.order(self._entry_order_id)
+        if not order:
+            self.logger.warning(
+                f"Fill timeout fired but order not found in cache | ID: {self._entry_order_id}",
+                extra={
+                    "extra": {
+                        "event_type": "fill_timeout_order_not_found",
+                        "order_id": str(self._entry_order_id)
+                    }
+                }
+            )
+            return
+        
+        # Only act if order is still pending or partially filled
+        if order.status not in [OrderStatus.SUBMITTED, OrderStatus.ACCEPTED, OrderStatus.PARTIALLY_FILLED]:
+            self.logger.info(
+                f"Fill timeout fired but order already {order.status.name} | ID: {self._entry_order_id}",
+                extra={
+                    "extra": {
+                        "event_type": "fill_timeout_order_completed",
+                        "order_id": str(self._entry_order_id),
+                        "order_status": order.status.name
+                    }
+                }
+            )
+            return
+        
+        filled_qty = float(order.filled_qty)
+        total_qty = float(order.quantity)
+        unfilled_qty = total_qty - filled_qty
+        
+        if filled_qty > 0:
+            # Partial fill scenario: cancel unfilled portion, keep partial position
+            self.logger.warning(
+                f"⏱️ FILL TIMEOUT | Partial Fill | Filled: {filled_qty:.0f}/{total_qty:.0f} | "
+                f"Cancelling unfilled: {unfilled_qty:.0f} contracts | Order: {self._entry_order_id}",
+                extra={
+                    "extra": {
+                        "event_type": "fill_timeout_partial",
+                        "order_id": str(self._entry_order_id),
+                        "filled_qty": filled_qty,
+                        "total_qty": total_qty,
+                        "unfilled_qty": unfilled_qty,
+                        "timeout_seconds": self.fill_timeout_seconds
+                    }
+                }
+            )
+            self._notify(
+                f"⏱️ FILL TIMEOUT | Filled: {filled_qty:.0f}/{total_qty:.0f} | "
+                f"Cancelling unfilled: {unfilled_qty:.0f} contracts"
+            )
+            self.cancel_order(order)
+            # Position already exists with filled_qty contracts
+            # SL/TP will work correctly via get_effective_spread_quantity()
+        else:
+            # No fills at all: cancel entire order and clean up
+            self.logger.warning(
+                f"⏱️ FILL TIMEOUT | No fills received in {self.fill_timeout_seconds}s | "
+                f"Cancelling order: {self._entry_order_id}",
+                extra={
+                    "extra": {
+                        "event_type": "fill_timeout_no_fills",
+                        "order_id": str(self._entry_order_id),
+                        "total_qty": total_qty,
+                        "timeout_seconds": self.fill_timeout_seconds
+                    }
+                }
+            )
+            self._notify(
+                f"⏱️ FILL TIMEOUT | No fills in {self.fill_timeout_seconds}s | Order cancelled"
+            )
+            self.cancel_order(order)
+            # Clean up entry state since we never entered
+            self._spread_entry_price = None
+            self._entry_order_id = None
+
     # =========================================================================
     # STATE MANAGEMENT
     # =========================================================================
@@ -1540,6 +1666,13 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._last_log_minute = -1
         self._closing_in_progress = False
         self._sl_triggered = False
+        self._entry_order_id = None
+        
+        # Cancel fill timeout timer if active
+        try:
+            self.clock.cancel_timer(f"{self.id}_fill_timeout")
+        except Exception:
+            pass
         
         # Cancel any orphaned trade tracking from previous day
         if self._current_trade_id:
@@ -1653,6 +1786,26 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
 
     def on_order_filled_safe(self, event):
         """Handle order fill events - reset closing state when close order is filled."""
+        
+        # Cancel fill timeout if entry order is fully filled
+        if self._entry_order_id and event.client_order_id == self._entry_order_id:
+            order = self.cache.order(self._entry_order_id)
+            if order and order.status == OrderStatus.FILLED:
+                try:
+                    self.clock.cancel_timer(f"{self.id}_fill_timeout")
+                except Exception:
+                    pass
+                self.logger.info(
+                    f"⏱️ Fill timeout cancelled | Entry order fully filled | ID: {self._entry_order_id}",
+                    extra={
+                        "extra": {
+                            "event_type": "fill_timeout_cancelled",
+                            "order_id": str(self._entry_order_id),
+                            "reason": "order_fully_filled"
+                        }
+                    }
+                )
+                self._entry_order_id = None
         
         # Track commission from any fill (Entry or Exit) with deduplication
         if event.commission:
