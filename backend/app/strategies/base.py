@@ -1563,6 +1563,30 @@ class BaseStrategy(Strategy):
         try:
             order_id = event.client_order_id
             
+            # === UNIVERSAL FILL LOG ===
+            # Fires for ALL fills including LEG fills that may not be in cache.
+            # IB decomposes spread orders into individual LEG orders (e.g. O-xxx-LEG-SPXW...),
+            # which are not tracked in _pending_spread_orders and may not be in Nautilus cache.
+            # Without this log, those fills are invisible (only commission capture fires).
+            self.logger.info(
+                f"📥 FILL EVENT | Order: {order_id} | Instrument: {event.instrument_id} | "
+                f"Side: {event.order_side.name} | Qty: {event.last_qty} | Px: {event.last_px}",
+                extra={
+                    "extra": {
+                        "event_type": "fill_event_raw",
+                        "order_id": str(order_id),
+                        "instrument_id": str(event.instrument_id),
+                        "fill_qty": float(event.last_qty),
+                        "fill_price": float(event.last_px),
+                        "side": event.order_side.name,
+                    }
+                }
+            )
+            self._notify(
+                f"📥 FILL EVENT | Order: {order_id} | Instrument: {event.instrument_id} | "
+                f"Side: {event.order_side.name} | Qty: {event.last_qty} | Px: {event.last_px}"
+            )
+            
             # Determine if entry or exit based on our tracking
             # CRITICAL FIX: Do NOT discard here yet! Only discard if status is FILLED.
             is_entry = order_id in self._pending_entry_orders
@@ -1645,6 +1669,24 @@ class BaseStrategy(Strategy):
             # Save state for non-entry/exit fills (e.g., spread fills, other order types)
             if not is_entry and not is_exit:
                 self.save_state()
+
+            # === CUMULATIVE POSITION LOG ===
+            # After each fill, show the effective spread position so user can track fill progress.
+            # This is especially important for LEG fills that don't trigger PARTIAL_FILL logs.
+            try:
+                effective_qty = self.get_effective_spread_quantity()
+                self.logger.info(
+                    f"📊 FILL PROGRESS | After fill: effective spread qty = {effective_qty}",
+                    extra={
+                        "extra": {
+                            "event_type": "fill_progress",
+                            "effective_spread_qty": effective_qty,
+                            "trigger_order_id": str(order_id),
+                        }
+                    }
+                )
+            except Exception:
+                pass  # get_effective_spread_quantity may not be available in all strategies
 
             # CRITICAL: Clean up tracking sets ONLY if order is fully filled
             # If PARTIALLY_FILLED, we need to keep tracking it for subsequent fills
