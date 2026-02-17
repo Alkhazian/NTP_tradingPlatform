@@ -32,7 +32,7 @@ from typing import Dict, Any, Optional
 
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.enums import OptionKind, TimeInForce
-from nautilus_trader.model.identifiers import InstrumentId, Venue
+from nautilus_trader.model.identifiers import ClientOrderId, InstrumentId, Venue
 from nautilus_trader.model.instruments import Instrument
 
 from app.strategies.base_spx import SPXBaseStrategy
@@ -1708,25 +1708,40 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             if effective_qty == 0:
                 # 1. Determine Fill Price
                 # Priority: Order Avg Price > Tracked Limit Price > Event Last Price
-                # CRITICAL FIX: Use order.avg_px as primary source to avoid using wrong order's limit
+                # CRITICAL FIX: Handle LEG orders by finding parent spread order
                 fill_price = 0.0
                 
+                # Extract parent order ID if this is a LEG order
+                # IB decomposes spread orders into LEG orders like:
+                #   O-20260217-161349-001-000-261-LEG-SPXW260217C06855000
+                # Parent spread order ID is:
+                #   O-20260217-161349-001-000-261
+                # We need the parent to get the correct spread price (avg_px or tracked limit),
+                # because event.last_px for a LEG order contains the individual leg price (e.g. 11.55),
+                # not the spread price (e.g. -2.35).
+                order_id_to_check = event.client_order_id
+                if "-LEG-" in str(event.client_order_id):
+                    parent_order_id_str = str(event.client_order_id).split("-LEG-")[0]
+                    parent_order_id = ClientOrderId(parent_order_id_str)
+                    self.logger.info(f"🔍 LEG order detected | LEG: {event.client_order_id} | Parent: {parent_order_id}")
+                    order_id_to_check = parent_order_id
+                
                 # Get the order to find the average fill price (handles partial fills correctly)
-                order = self.cache.order(event.client_order_id)
+                order = self.cache.order(order_id_to_check)
                 if order and hasattr(order, "avg_px") and order.avg_px is not None:
                     # avg_px is the weighted average price of all fills for this order
                     fill_price = order.avg_px.as_double() if hasattr(order.avg_px, "as_double") else float(order.avg_px)
-                    self.logger.info(f"✅ Using order avg_px for spread exit: {fill_price}")
+                    self.logger.info(f"✅ Using order avg_px for spread exit: {fill_price} (from order {order_id_to_check})")
                 else:
-                    # Fallback to tracked limit price for THIS specific order
-                    tracked_limit = self._active_spread_order_limits.get(event.client_order_id)
+                    # Fallback to tracked limit price for the parent spread order
+                    tracked_limit = self._active_spread_order_limits.get(order_id_to_check)
                     
                     if tracked_limit is not None:
                         fill_price = tracked_limit
-                        self.logger.info(f"✅ Using tracked LIMIT price for spread exit: {fill_price}")
+                        self.logger.info(f"✅ Using tracked LIMIT price for spread exit: {fill_price} (from order {order_id_to_check})")
                     else:
-                        # Last resort: use event last_px
-                        self.logger.warning(f"⚠️ No avg_px or tracked limit for {event.client_order_id}, using event last_px")
+                        # Last resort: use event last_px (but this should be avoided for spreads)
+                        self.logger.warning(f"⚠️ No avg_px or tracked limit for {order_id_to_check}, using event last_px (may be incorrect for spreads!)")
                         fill_price = event.last_px.as_double() if hasattr(event.last_px, "as_double") else float(event.last_px)
 
                 entry_credit = self._spread_entry_price if self._spread_entry_price is not None else 0.0
