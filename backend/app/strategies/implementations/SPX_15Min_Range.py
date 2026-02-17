@@ -164,6 +164,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self.max_price_deviation = float(params.get("max_price_deviation", 10.0))
         self.entry_timeout_seconds = int(params.get("entry_timeout_seconds", 35))
         self.fill_timeout_seconds = int(params.get("fill_timeout_seconds", 0))  # 0 = disabled
+        self.entry_price_adjustment = float(params.get("entry_price_adjustment", 0.25))  # Bid + (Spread * adjustment)
         
         range_end_time = "Range Close" # Will be calculated/logged by base
         
@@ -829,7 +830,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         """Check spread price and submit entry if conditions are met."""
         bid = quote.bid_price.as_double()
         ask = quote.ask_price.as_double()
-        mid = (bid + ask) / 2
+        mid = bid + ((ask - bid) * self.entry_price_adjustment)
         spread_width = ask - bid
         
         # For a credit spread sold as BUY order:
