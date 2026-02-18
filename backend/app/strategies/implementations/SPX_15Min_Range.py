@@ -1725,8 +1725,10 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             pass
         
         # Cancel any orphaned trade tracking from previous day
+        # Use delete_trade (not cancel_trade) to also remove the record from SQLite,
+        # otherwise an OPEN trade row leaks into the DB if the fill timeout didn't fire.
         if self._current_trade_id:
-            self._trading_data.cancel_trade(self._current_trade_id)
+            self._trading_data.delete_trade(self._current_trade_id)
             self._current_trade_id = None
         
         self._total_commission = 0.0
