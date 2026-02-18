@@ -1555,9 +1555,13 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
     def _on_fill_timeout(self, event):
         """
         Handle fill timeout - cancel unfilled portion of entry order.
-        
-        If order has partial fills: cancel remaining, continue with partial position.
-        If no fills at all: cancel entire order, clean up entry state.
+
+        Three scenarios are handled:
+          1. No fills at all  → cancel order, DELETE trade record from DB,
+                                reset traded_today so a new entry can be attempted.
+          2. Partial fill     → cancel remaining, UPDATE trade quantity in DB
+                                to match actual filled amount.
+          3. Order already in a terminal state → no-op (guard clause).
         """
         if not self._entry_order_id:
             self.logger.info(
@@ -1602,7 +1606,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         unfilled_qty = total_qty - filled_qty
         
         if filled_qty > 0:
-            # Partial fill scenario: cancel unfilled portion, keep partial position
+            # ----------------------------------------------------------------
+            # SCENARIO 2: Partial fill — cancel remainder, keep partial position
+            # ----------------------------------------------------------------
             self.logger.warning(
                 f"⏱️ FILL TIMEOUT | Partial Fill | Filled: {filled_qty:.0f}/{total_qty:.0f} | "
                 f"Cancelling unfilled: {unfilled_qty:.0f} contracts | Order: {self._entry_order_id}",
@@ -1622,10 +1628,31 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 f"Cancelling unfilled: {unfilled_qty:.0f} contracts"
             )
             self.cancel_order(order)
-            # Position already exists with filled_qty contracts
-            # SL/TP will work correctly via get_effective_spread_quantity()
+            # Position already exists with filled_qty contracts.
+            # SL/TP will work correctly via get_effective_spread_quantity().
+
+            # DB SYNC: Update trade quantity to reflect actual filled amount.
+            if self._current_trade_id:
+                self.logger.info(
+                    f"📝 Updating DB trade quantity | Trade: {self._current_trade_id} | "
+                    f"Original: {total_qty:.0f} → Actual: {filled_qty:.0f}",
+                    extra={
+                        "extra": {
+                            "event_type": "fill_timeout_db_quantity_update",
+                            "trade_id": self._current_trade_id,
+                            "original_qty": total_qty,
+                            "actual_qty": filled_qty
+                        }
+                    }
+                )
+                self._trading_data.update_trade_quantity(
+                    trade_id=self._current_trade_id,
+                    actual_quantity=filled_qty,
+                )
         else:
-            # No fills at all: cancel entire order and clean up
+            # ----------------------------------------------------------------
+            # SCENARIO 1: Zero fills — cancel order, remove DB record entirely
+            # ----------------------------------------------------------------
             self.logger.warning(
                 f"⏱️ FILL TIMEOUT | No fills received in {self.fill_timeout_seconds}s | "
                 f"Cancelling order: {self._entry_order_id}",
@@ -1642,9 +1669,31 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 f"⏱️ FILL TIMEOUT | No fills in {self.fill_timeout_seconds}s | Order cancelled"
             )
             self.cancel_order(order)
-            # Clean up entry state since we never entered
+
+            # Clean up in-memory entry state — we never entered a position.
             self._spread_entry_price = None
             self._entry_order_id = None
+
+            # DB SYNC: Delete the pre-recorded trade and its orders.
+            # The record was written optimistically in _check_and_submit_entry
+            # before broker confirmation; since no fill occurred it must be removed.
+            if self._current_trade_id:
+                self.logger.info(
+                    f"🗑️ Deleting DB trade record (no fills) | Trade: {self._current_trade_id}",
+                    extra={
+                        "extra": {
+                            "event_type": "fill_timeout_db_trade_deleted",
+                            "trade_id": self._current_trade_id
+                        }
+                    }
+                )
+                self._trading_data.delete_trade(self._current_trade_id)
+                self._current_trade_id = None
+
+            # Reset traded_today so the strategy can attempt a new entry
+            # if market conditions are still valid within the session.
+            self.traded_today = False
+            self.save_state()
 
     # =========================================================================
     # STATE MANAGEMENT

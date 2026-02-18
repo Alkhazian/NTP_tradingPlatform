@@ -774,6 +774,123 @@ class TradingDataService:
         self._active_trades.pop(trade_id, None)
         logger.info(f"Trade tracking cancelled: {trade_id}")
         return True
+
+    def delete_trade(self, trade_id: str) -> bool:
+        """
+        Permanently delete a trade and all its associated orders from the database.
+
+        Used when a fill timeout fires with zero fills — the order was never
+        actually executed, so the pre-recorded trade entry must be removed.
+
+        Returns:
+            True if deletion was successful (or trade didn't exist), False on error.
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                # Delete associated orders first (FK-safe order)
+                cursor.execute("DELETE FROM orders WHERE trade_id = ?", (trade_id,))
+                orders_deleted = cursor.rowcount
+                # Delete the trade record itself
+                cursor.execute("DELETE FROM trades WHERE trade_id = ?", (trade_id,))
+                trades_deleted = cursor.rowcount
+                conn.commit()
+
+            # Remove from in-memory tracking
+            self._active_trades.pop(trade_id, None)
+
+            logger.info(
+                f"Trade deleted from DB: {trade_id} | "
+                f"trades removed: {trades_deleted}, orders removed: {orders_deleted}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to delete trade {trade_id}: {e}")
+            return False
+
+    def update_trade_quantity(self, trade_id: str, actual_quantity: float) -> bool:
+        """
+        Update the quantity of an existing trade and its entry order.
+
+        Used when a fill timeout fires with a partial fill — the position exists
+        but with fewer contracts than originally ordered.  Both the trade record
+        and the corresponding ENTRY order row are updated so that max_profit,
+        max_loss, and commission calculations remain consistent.
+
+        Args:
+            trade_id:        The trade identifier to update.
+            actual_quantity: The number of contracts actually filled.
+
+        Returns:
+            True if update was successful, False on error.
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Fetch current trade to recalculate derived fields
+                cursor.execute(
+                    "SELECT entry_price, max_profit, max_loss, entry_premium_per_contract "
+                    "FROM trades WHERE trade_id = ?",
+                    (trade_id,),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    logger.error(f"Trade {trade_id} not found for quantity update")
+                    return False
+
+                entry_price = row["entry_price"]
+                entry_premium = row["entry_premium_per_contract"]
+
+                # Recalculate max_profit / max_loss proportionally
+                new_max_profit = (entry_premium * actual_quantity) if entry_premium else None
+                # max_loss stored as positive dollar amount per original quantity
+                old_max_loss = row["max_loss"]
+                old_max_profit = row["max_profit"]
+                if old_max_profit and old_max_profit != 0:
+                    ratio = actual_quantity / (old_max_profit / entry_premium) if entry_premium else 1
+                    new_max_loss = old_max_loss * ratio if old_max_loss else None
+                else:
+                    new_max_loss = old_max_loss
+
+                # Update trade record
+                cursor.execute(
+                    """
+                    UPDATE trades SET
+                        quantity = ?,
+                        max_profit = ?,
+                        max_loss = ?,
+                        updated_at = datetime('now')
+                    WHERE trade_id = ?
+                    """,
+                    (actual_quantity, new_max_profit, new_max_loss, trade_id),
+                )
+
+                # Update the ENTRY order row for this trade
+                cursor.execute(
+                    """
+                    UPDATE orders SET
+                        quantity = ?,
+                        filled_quantity = ?,
+                        updated_at = datetime('now')
+                    WHERE trade_id = ? AND trade_direction = 'ENTRY'
+                    """,
+                    (actual_quantity, actual_quantity, trade_id),
+                )
+
+                conn.commit()
+
+            logger.info(
+                f"Trade quantity updated: {trade_id} | "
+                f"new qty: {actual_quantity} | "
+                f"new max_profit: {new_max_profit} | new_max_loss: {new_max_loss}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to update trade quantity {trade_id}: {e}")
+            return False
     
     # =========================================================================
     # MIGRATION HELPERS
