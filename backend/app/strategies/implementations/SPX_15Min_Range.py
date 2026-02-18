@@ -1724,11 +1724,47 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         except Exception:
             pass
         
-        # Cancel any orphaned trade tracking from previous day
-        # Use delete_trade (not cancel_trade) to also remove the record from SQLite,
-        # otherwise an OPEN trade row leaks into the DB if the fill timeout didn't fire.
+        # Handle leftover trade from previous day.
+        # Two possible scenarios:
+        #   A. Trade was filled but position wasn't closed (crash / EOD) → close as EXPIRED
+        #   B. Trade was never filled (orphan from failed fill timeout) → delete from DB
         if self._current_trade_id:
-            self._trading_data.delete_trade(self._current_trade_id)
+            trade_record = self._trading_data.get_trade(self._current_trade_id)
+            if trade_record and trade_record.get("status") == "OPEN":
+                if self._spread_entry_price is not None:
+                    # Scenario A: real filled trade, never closed → close as EXPIRED (0DTE)
+                    self.logger.warning(
+                        f"📅 Closing unclosed trade from previous day as EXPIRED | "
+                        f"Trade: {self._current_trade_id}",
+                        extra={
+                            "extra": {
+                                "event_type": "daily_reset_trade_expired",
+                                "trade_id": self._current_trade_id
+                            }
+                        }
+                    )
+                    self._trading_data.close_trade(
+                        trade_id=self._current_trade_id,
+                        exit_price=0.0,  # 0DTE expired worthless
+                        exit_reason="EXPIRED",
+                        commission=self._total_commission,
+                    )
+                else:
+                    # Scenario B: orphan — order was submitted but never filled
+                    self.logger.info(
+                        f"🗑️ Deleting orphan trade from previous day | "
+                        f"Trade: {self._current_trade_id}",
+                        extra={
+                            "extra": {
+                                "event_type": "daily_reset_trade_deleted",
+                                "trade_id": self._current_trade_id
+                            }
+                        }
+                    )
+                    self._trading_data.delete_trade(self._current_trade_id)
+            else:
+                # Trade already closed or not found — just clean up in-memory
+                self._trading_data.cancel_trade(self._current_trade_id)
             self._current_trade_id = None
         
         self._total_commission = 0.0
