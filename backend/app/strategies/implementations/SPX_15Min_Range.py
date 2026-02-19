@@ -826,11 +826,25 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         elif self.get_effective_spread_quantity() != 0:
             self._manage_open_position()
 
+    def _calculate_entry_price(self, bid: float, ask: float) -> float:
+        """
+        Calculate the limit price for a spread entry order.
+
+        Rules:
+        - If bid-ask spread <= 0.10 (tight market): use the ask price directly.
+        - Otherwise: use bid + (spread * entry_price_adjustment) to place
+          the limit between bid and ask, biased by the configured adjustment.
+        """
+        spread_width = ask - bid
+        if spread_width <= 0.10:
+            return ask  # Tight spread — just pay the ask
+        return bid + (spread_width * self.entry_price_adjustment)
+
     def _check_and_submit_entry(self, quote: QuoteTick):
         """Check spread price and submit entry if conditions are met."""
         bid = quote.bid_price.as_double()
         ask = quote.ask_price.as_double()
-        mid = bid + ((ask - bid) * self.entry_price_adjustment)
+        mid = self._calculate_entry_price(bid, ask)
         spread_width = ask - bid
         
         # For a credit spread sold as BUY order:
