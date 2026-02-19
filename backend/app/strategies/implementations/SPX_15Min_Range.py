@@ -958,6 +958,16 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                         )
                     except Exception as e:
                         self.logger.warning(f"Failed to set fill timeout timer: {e}")
+                
+                # Start price monitoring every 10s while waiting for fill
+                try:
+                    self.clock.set_time_alert(
+                        name=f"{self.id}_fill_wait_monitor",
+                        alert_time=self.clock.utc_now() + timedelta(seconds=10),
+                        callback=self._log_fill_wait_status
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed to set fill wait monitor: {e}")
             
             self.traded_today = True
             self.entry_in_progress = False
@@ -1552,6 +1562,55 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 )
                 self._cancel_entry()
 
+    def _log_fill_wait_status(self, event):
+        """
+        Log current spread price every 10s while waiting for entry fill.
+        Stops automatically when _entry_order_id is cleared (full fill or timeout).
+        Same pattern as _manage_open_position, but for the waiting-for-fill phase.
+        """
+        # Stop if order is already gone (filled or timed out)
+        if not self._entry_order_id:
+            return
+
+        quote = self.cache.quote_tick(self.spread_instrument.id)
+        if quote:
+            bid = quote.bid_price.as_double()
+            ask = quote.ask_price.as_double()
+            mid = (bid + ask) / 2.0
+            limit = -self._spread_entry_price if self._spread_entry_price else None
+            distance = round(mid - limit, 4) if limit is not None else None
+
+            self.logger.info(
+                f"⏳ WAITING FOR FILL | Bid: {bid:.4f} | Ask: {ask:.4f} | Mid: {mid:.4f} "
+                f"| Limit: {limit:.4f} | Distance: {distance:+.4f} | Order: {self._entry_order_id}",
+                extra={
+                    "extra": {
+                        "event_type": "fill_wait_status",
+                        "bid": bid,
+                        "ask": ask,
+                        "mid": mid,
+                        "limit_price": limit,
+                        "distance_to_limit": distance,
+                        "order_id": str(self._entry_order_id)
+                    }
+                }
+            )
+        else:
+            self.logger.info(
+                f"⏳ WAITING FOR FILL | No quote available | Order: {self._entry_order_id}",
+                extra={"extra": {"event_type": "fill_wait_status", "order_id": str(self._entry_order_id)}}
+            )
+
+        # Schedule next check in 10 seconds (same pattern as _poll_spx_availability)
+        try:
+            self.clock.set_time_alert(
+                name=f"{self.id}_fill_wait_monitor",
+                alert_time=self.clock.utc_now() + timedelta(seconds=10),
+                callback=self._log_fill_wait_status
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to reschedule fill wait monitor: {e}")
+
     def _on_fill_timeout(self, event):
         """
         Handle fill timeout - cancel unfilled portion of entry order.
@@ -1882,6 +1941,10 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             if order and order.status == OrderStatus.FILLED:
                 try:
                     self.clock.cancel_timer(f"{self.id}_fill_timeout")
+                except Exception:
+                    pass
+                try:
+                    self.clock.cancel_timer(f"{self.id}_fill_wait_monitor")
                 except Exception:
                     pass
                 self.logger.info(
