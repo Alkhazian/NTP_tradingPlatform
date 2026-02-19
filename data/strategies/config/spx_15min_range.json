@@ -19,6 +19,6 @@
         "max_price_deviation": 10,
         "entry_timeout_seconds": 35,
         "fill_timeout_seconds": 300,
-        "entry_price_adjustment": 0.25
+        "entry_price_adjustment": 0.75
     }
 }

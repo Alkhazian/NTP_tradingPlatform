@@ -1690,9 +1690,10 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 self._trading_data.delete_trade(self._current_trade_id)
                 self._current_trade_id = None
 
-            # Reset traded_today so the strategy can attempt a new entry
-            # if market conditions are still valid within the session.
-            self.traded_today = False
+            # STOP TRADING for the day if entry timed out.
+            # As per user request: if we tried to enter and failed (timeout), 
+            # we consider the "shot" taken and do not attempt to trade again today.
+            self.traded_today = True
             self.save_state()
 
     # =========================================================================
