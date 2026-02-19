@@ -2012,41 +2012,53 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             
             if effective_qty == 0:
                 # 1. Determine Fill Price
-                # Priority: Order Avg Price > Tracked Limit Price > Event Last Price
-                # CRITICAL FIX: Handle LEG orders by finding parent spread order
+                # Priority: Tracked Limit > Order Avg Px (with sanity check) > Event Last Price
+                #
+                # IMPORTANT: IB reports combo/spread order fills in two ways:
+                #   a) A fill on the parent combo order (e.g. O-...-265) with avg_px = leg price (e.g. 11.10)
+                #   b) Individual LEG fills (e.g. O-...-265-LEG-SPXW...)
+                # The parent order's avg_px in IB reflects the individual leg's fill price, NOT
+                # the net spread price. Therefore, _active_spread_order_limits (the limit we sent)
+                # is the most reliable source for the spread's net exit price.
                 fill_price = 0.0
-                
+
                 # Extract parent order ID if this is a LEG order
-                # IB decomposes spread orders into LEG orders like:
-                #   O-20260217-161349-001-000-261-LEG-SPXW260217C06855000
-                # Parent spread order ID is:
-                #   O-20260217-161349-001-000-261
-                # We need the parent to get the correct spread price (avg_px or tracked limit),
-                # because event.last_px for a LEG order contains the individual leg price (e.g. 11.55),
-                # not the spread price (e.g. -2.35).
                 order_id_to_check = event.client_order_id
                 if "-LEG-" in str(event.client_order_id):
                     parent_order_id_str = str(event.client_order_id).split("-LEG-")[0]
                     parent_order_id = ClientOrderId(parent_order_id_str)
                     self.logger.info(f"🔍 LEG order detected | LEG: {event.client_order_id} | Parent: {parent_order_id}")
                     order_id_to_check = parent_order_id
-                
-                # Get the order to find the average fill price (handles partial fills correctly)
-                order = self.cache.order(order_id_to_check)
-                if order and hasattr(order, "avg_px") and order.avg_px is not None:
-                    # avg_px is the weighted average price of all fills for this order
-                    fill_price = order.avg_px.as_double() if hasattr(order.avg_px, "as_double") else float(order.avg_px)
-                    self.logger.info(f"✅ Using order avg_px for spread exit: {fill_price} (from order {order_id_to_check})")
+
+                # PRIORITY 1: Tracked limit price — always reliable for our limit orders.
+                # This is the exact spread price we submitted (e.g. -1.80 for a SL order).
+                tracked_limit = self._active_spread_order_limits.get(order_id_to_check)
+                if tracked_limit is not None:
+                    fill_price = tracked_limit
+                    self.logger.info(f"✅ Using tracked LIMIT price for spread exit: {fill_price} (from order {order_id_to_check})")
                 else:
-                    # Fallback to tracked limit price for the parent spread order
-                    tracked_limit = self._active_spread_order_limits.get(order_id_to_check)
-                    
-                    if tracked_limit is not None:
-                        fill_price = tracked_limit
-                        self.logger.info(f"✅ Using tracked LIMIT price for spread exit: {fill_price} (from order {order_id_to_check})")
-                    else:
-                        # Last resort: use event last_px (but this should be avoided for spreads)
-                        self.logger.warning(f"⚠️ No avg_px or tracked limit for {order_id_to_check}, using event last_px (may be incorrect for spreads!)")
+                    # PRIORITY 2: avg_px from the order object — only if it looks like a spread price.
+                    # Spread prices are small values (e.g. -1.80, -0.60). If abs(avg_px) > 5.0,
+                    # it is almost certainly a single leg option price (e.g. 11.10), not a spread price.
+                    order = self.cache.order(order_id_to_check)
+                    if order and hasattr(order, "avg_px") and order.avg_px is not None:
+                        avg_px_val = order.avg_px.as_double() if hasattr(order.avg_px, "as_double") else float(order.avg_px)
+                        if abs(avg_px_val) > 5.0:
+                            self.logger.warning(
+                                f"⚠️ order.avg_px={avg_px_val:.4f} exceeds sanity threshold (|avg_px|>5.0) — "
+                                f"this looks like a LEG price, not a spread price. Skipping. "
+                                f"(order {order_id_to_check})"
+                            )
+                        else:
+                            fill_price = avg_px_val
+                            self.logger.info(f"✅ Using order avg_px for spread exit: {fill_price} (from order {order_id_to_check})")
+
+                    # PRIORITY 3 (last resort): event last_px
+                    if fill_price == 0.0:
+                        self.logger.warning(
+                            f"⚠️ No tracked limit or valid avg_px for {order_id_to_check}, "
+                            f"using event last_px (may be incorrect for spreads!)"
+                        )
                         fill_price = event.last_px.as_double() if hasattr(event.last_px, "as_double") else float(event.last_px)
 
                 entry_credit = self._spread_entry_price if self._spread_entry_price is not None else 0.0
