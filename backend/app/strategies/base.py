@@ -1730,6 +1730,29 @@ class BaseStrategy(Strategy):
                 self._notify(
                     f"🏁 Order fully filled | Tracking cleaned up | ID: {order_id}"
                 )
+
+            elif "-LEG-" in str(order_id):
+                # IB decomposes partial spread fills into LEG sub-orders.
+                # Check if the parent spread order is now fully filled.
+                parent_id = ClientOrderId(str(order_id).split("-LEG-")[0])
+                parent = self.cache.order(parent_id)
+                if parent and parent.status == OrderStatus.FILLED and parent_id in self._pending_spread_orders:
+                    self._pending_entry_orders.discard(parent_id)
+                    self._pending_exit_orders.discard(parent_id)
+                    self._pending_spread_orders.discard(parent_id)
+                    self.logger.info(
+                        f"🏁 Order fully filled | Tracking cleaned up | ID: {parent_id}",
+                        extra={
+                            "extra": {
+                                "event_type": "tracking_cleanup",
+                                "order_id": str(parent_id),
+                                "status": "FILLED"
+                            }
+                        }
+                    )
+                    self._notify(
+                        f"🏁 Order fully filled | Tracking cleaned up | ID: {parent_id}"
+                    )
             
         except Exception as e:
             self.on_unexpected_error(e)
