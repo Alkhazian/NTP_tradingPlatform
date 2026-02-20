@@ -1615,15 +1615,20 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 extra={"extra": {"event_type": "fill_wait_status", "order_id": str(self._entry_order_id)}}
             )
 
-        # Schedule next check in 10 seconds (same pattern as _poll_spx_availability)
+        # Schedule next check in 10 seconds.
+        # cancel_timer first to clear the name from timer_names collection
+        # (NautilusTrader holds the name until after the callback returns,
+        # so set_time_alert with same name inside the callback would fail).
+        # Pattern from simple_interval_trader.py lines 171-176.
         try:
-            self.clock.set_time_alert(
-                name=f"{self.id}_fill_wait_monitor",
-                alert_time=self.clock.utc_now() + timedelta(seconds=10),
-                callback=self._log_fill_wait_status
-            )
-        except Exception as e:
-            self.logger.warning(f"Failed to reschedule fill wait monitor: {e}")
+            self.clock.cancel_timer(f"{self.id}_fill_wait_monitor")
+        except Exception:
+            pass
+        self.clock.set_time_alert(
+            name=f"{self.id}_fill_wait_monitor",
+            alert_time=self.clock.utc_now() + timedelta(seconds=10),
+            callback=self._log_fill_wait_status
+        )
 
     def _on_fill_timeout(self, event):
         """
