@@ -1,0 +1,31 @@
+{
+    "id": "spx_1dte_bull_put_spread",
+    "name": "SPX 1DTE Bull Put Spread",
+    "enabled": true,
+    "instrument_id": "^SPX.CBOE",
+    "strategy_type": "SPX1DTEBullPutSpreadStrategy",
+    "order_size": 1,
+    "parameters": {
+        "timezone": "US/Eastern",
+        "es_instrument_id": "ESH6.CME",
+        "es_ema_period": 20,
+        "es_sma_period": 10,
+        "es_vwma_period": 14,
+        "short_put_delta": -0.25,
+        "long_put_delta": -0.14,
+        "min_credit_amount": 200.0,
+        "stop_loss_pct_of_credit": 180.0,
+        "take_profit_pct_of_credit": 40.0,
+        "opening_range_minutes": 30,
+        "entry_cutoff_time_str": "15:00:00",
+        "signal_max_age_seconds": 180,
+        "entry_price_adjustment": 0.5,
+        "entry_timeout_seconds": 60,
+        "fill_timeout_seconds": 600,
+        "require_strong_reclaim": true,
+        "require_two_day_confirmation": false,
+        "enable_macro_filter": true,
+        "macro_day_before": false,
+        "macro_stop_dates": "2026-03-18,2026-04-30,2026-06-17"
+    }
+}

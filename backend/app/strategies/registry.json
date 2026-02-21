@@ -3,5 +3,10 @@
         "strategy_type": "SPX15MinRangeStrategy",
         "module": "app.strategies.implementations.SPX_15Min_Range",
         "class_name": "SPX15MinRangeStrategy"
+    },
+    {
+        "strategy_type": "SPX1DTEBullPutSpreadStrategy",
+        "module": "app.strategies.implementations.SPX_1DTE_Bull_Put_Spread",
+        "class_name": "SPX1DTEBullPutSpreadStrategy"
     }
 ]
