@@ -167,6 +167,8 @@ def make():
     s._total_commission = 0.0; s._processed_executions = set()
     s._last_log_minute = -1
     s._last_metrics_update_time = None
+    s._last_position_log_time = None
+    s._position_log_interval_seconds = 30
     s._macro_clear_today = True; s._strong_reclaim_ok = True; s._two_day_confirmed_ok = True
 
     s._short_put_search_id = None; s._long_put_search_id = None

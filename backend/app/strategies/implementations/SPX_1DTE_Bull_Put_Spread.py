@@ -114,6 +114,8 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         self._processed_executions: set = set()
         self._last_log_minute: int = -1
         self._last_metrics_update_time: Optional[datetime] = None  # throttle DB writes
+        self._last_position_log_time: Optional[datetime] = None   # throttle position status logs
+        self._position_log_interval_seconds: int = 30
         self._macro_clear_today: bool = True  # Cached daily; set in _reset_daily_state
         self._strong_reclaim_ok: bool = False  # Cached; set on ES daily bar
         self._two_day_confirmed_ok: bool = False  # Cached; set on ES daily bar
@@ -582,13 +584,14 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         self.logger.info(
             f"✅ SHORT PUT selected | Strike=${short_strike:.0f} | "
             f"Δ={option_data['delta']:.4f} (target={self.short_put_delta}) | "
-            f"IV={option_data['iv']:.2%} Mid=${option_data['mid']:.2f}",
+            f"IV={option_data['iv']:.2%} | Mid=${option_data['mid']:.2f}",
             extra={"extra": {"event_type": "short_put_selected",
-                             "strike": short_strike, "delta": option_data['delta']}}
+                             "strike": short_strike, "delta": option_data['delta'],
+                             "iv": option_data['iv'], "mid": option_data['mid']}}
         )
         self._notify(
             f"✅ Short Put: ${short_strike:.0f} Δ={option_data['delta']:.4f} "
-            f"Mid=${option_data['mid']:.2f}"
+            f"IV={option_data['iv']:.2%} Mid=${option_data['mid']:.2f}"
         )
 
         # Now search for long put (further OTM, lower absolute delta)
@@ -623,13 +626,14 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         self.logger.info(
             f"✅ LONG PUT selected | Strike=${long_strike:.0f} | "
             f"Δ={option_data['delta']:.4f} (target={self.long_put_delta}) | "
-            f"IV={option_data['iv']:.2%} Mid=${option_data['mid']:.2f}",
+            f"IV={option_data['iv']:.2%} | Mid=${option_data['mid']:.2f}",
             extra={"extra": {"event_type": "long_put_selected",
-                             "strike": long_strike, "delta": option_data['delta']}}
+                             "strike": long_strike, "delta": option_data['delta'],
+                             "iv": option_data['iv'], "mid": option_data['mid']}}
         )
         self._notify(
             f"✅ Long Put: ${long_strike:.0f} Δ={option_data['delta']:.4f} "
-            f"Mid=${option_data['mid']:.2f}"
+            f"IV={option_data['iv']:.2%} Mid=${option_data['mid']:.2f}"
         )
 
         # Both legs found — create spread
@@ -931,8 +935,8 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
 
         # Track trade metrics (max drawdown, P&L snapshots) — throttled to 30s
         total_pnl = pnl_per_spread * abs(position_qty)
+        now_utc = self.clock.utc_now()
         if self._current_trade_id and self._trading_data:
-            now_utc = self.clock.utc_now()
             should_update = (
                 self._last_metrics_update_time is None
                 or (now_utc - self._last_metrics_update_time).total_seconds() >= 30
@@ -945,6 +949,42 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
                     self._last_metrics_update_time = now_utc
                 except Exception:
                     pass
+
+        # Periodic position status log (every 30s) — matches template pattern
+        should_log = (
+            self._last_position_log_time is None
+            or (now_utc - self._last_position_log_time).total_seconds() >= self._position_log_interval_seconds
+        )
+        if should_log:
+            self._last_position_log_time = now_utc
+            if total_pnl > 0:
+                health = "🟢 PROFIT"
+            elif total_pnl > -50:
+                health = "🟡 SLIGHT LOSS"
+            else:
+                health = "🔴 LOSS"
+            distance_to_sl = mid - sl_price    # Positive = still above SL
+            distance_to_tp = tp_price - mid    # Positive = still below TP (further to go)
+            self.logger.info(
+                f"📊 POSITION STATUS | {health} | Qty: {abs(position_qty):.0f} | "
+                f"P&L: ${total_pnl:+.2f} | Mid: {mid:.4f} | Bid: {bid:.4f} | Ask: {ask:.4f} | "
+                f"Entry: {entry_credit:.4f} | SL: {sl_price:.4f} ({distance_to_sl:+.4f}) | "
+                f"TP: {tp_price:.4f} ({distance_to_tp:+.4f})",
+                extra={"extra": {
+                    "event_type": "position_status",
+                    "health": health,
+                    "quantity": abs(position_qty),
+                    "pnl_total": total_pnl,
+                    "current_mid": mid,
+                    "current_bid": bid,
+                    "current_ask": ask,
+                    "entry_credit": entry_credit,
+                    "sl_price": sl_price,
+                    "tp_price": tp_price,
+                    "distance_sl": distance_to_sl,
+                    "distance_tp": distance_to_tp,
+                }}
+            )
 
         # STOP LOSS — check before closing flag (SL overrides TP)
         if mid <= sl_price and not self._sl_triggered:
@@ -1192,6 +1232,7 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         self._target_short_strike = None
         self._target_long_strike = None
         self._last_metrics_update_time = None
+        self._last_position_log_time = None
 
         try:
             self.clock.cancel_timer(f"{self.id}_fill_timeout")
