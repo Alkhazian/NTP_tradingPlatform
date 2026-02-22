@@ -24,6 +24,8 @@ from nautilus_trader.model.enums import OrderStatus
 
 from app.strategies.base_spx import SPXBaseStrategy
 from app.strategies.config import StrategyConfig
+from app.services.trading_data_service import TradingDataService
+from app.services.telegram_service import TelegramNotificationService
 
 
 class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
@@ -111,6 +113,7 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         self._total_commission: float = 0.0
         self._processed_executions: set = set()
         self._last_log_minute: int = -1
+        self._last_metrics_update_time: Optional[datetime] = None  # throttle DB writes
         self._macro_clear_today: bool = True  # Cached daily; set in _reset_daily_state
         self._strong_reclaim_ok: bool = False  # Cached; set on ES daily bar
         self._two_day_confirmed_ok: bool = False  # Cached; set on ES daily bar
@@ -123,16 +126,9 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         self._target_long_strike: Optional[float] = None
 
         # --- Services ---
-        if integration_manager and hasattr(integration_manager, 'trading_data_service'):
-            self._trading_data = integration_manager.trading_data_service
-        else:
-            self._trading_data = None
-
-        try:
-            from app.services.telegram_service import send_telegram_message
-            self._telegram = send_telegram_message
-        except Exception:
-            self._telegram = None
+        self._trading_data = TradingDataService(db_path="data/trading.db")
+        
+        self.telegram = TelegramNotificationService()
 
         self.logger.info(
             f"SPX1DTEBullPutSpread initialized | "
@@ -150,12 +146,13 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
 
     def _notify(self, message: str):
         """Send Telegram notification (fire-and-forget)."""
-        prefix = f"[{self.strategy_id}] "
-        if self._telegram:
+        if hasattr(self, 'telegram') and self.telegram:
             try:
-                self._telegram(prefix + message)
-            except Exception:
-                pass
+                self.logger.info(f"Triggering Telegram notification: {message[:50]}...")
+                self.telegram.send_message(f"[{self.strategy_id}] {message}")
+            except Exception as e:
+                self.logger.error(f"Failed to send Telegram notification: {e}")
+
 
     # =========================================================================
     # LIFECYCLE
@@ -200,14 +197,59 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
                 self.logger.info(f"ES instrument not in cache, requesting: {self.es_instrument_id}")
                 self.request_instrument(self.es_instrument_id)
 
-            # Subscribe to bars regardless — Nautilus handles instrument resolution
+            # Only backfill if state wasn't restored with enough data already.
+            # This avoids firing IB historical data requests (and their per-bar
+            # historicalDataProtoBuf log lines) on every restart.
+            need_daily_backfill = len(self._es_daily_closes) < self.es_ema_period
+            need_1min_backfill  = len(self._es_1min_closes) < self.es_sma_period
+
+            from datetime import timedelta
+            end = self.clock.utc_now()
+
+            if need_daily_backfill:
+                # EMA(20) needs at least 20 closes + a small buffer → 25 calendar days
+                # covers ~17–18 trading days, enough for a clean warmup.
+                days_back = max(self.es_ema_period + 5, 25)
+                self.request_bars(
+                    self._es_daily_bar_type,
+                    start=end - timedelta(days=days_back),
+                    end=end,
+                )
+                self.logger.info(
+                    f"📊 Requesting ES daily backfill | Last {days_back} days "
+                    f"(have {len(self._es_daily_closes)}/{self.es_ema_period} closes)"
+                )
+            else:
+                self.logger.info(
+                    f"📊 Skipping ES daily backfill — state already has "
+                    f"{len(self._es_daily_closes)} closes (need {self.es_ema_period})"
+                )
+
             self.subscribe_bars(self._es_daily_bar_type)
+
+            if need_1min_backfill:
+                # SMA(10) 1-min: only need the current session's bars.
+                # 1 calendar day is more than enough.
+                self.request_bars(
+                    self._es_1min_bar_type,
+                    start=end - timedelta(days=1),
+                    end=end,
+                )
+                self.logger.info(
+                    f"📊 Requesting ES 1-min backfill | Last 1 day "
+                    f"(have {len(self._es_1min_closes)}/{self.es_sma_period} closes)"
+                )
+            else:
+                self.logger.info(
+                    f"📊 Skipping ES 1-min backfill — state already has "
+                    f"{len(self._es_1min_closes)} closes (need {self.es_sma_period})"
+                )
+
             self.subscribe_bars(self._es_1min_bar_type)
             self.es_subscribed = True
 
             self.logger.info(
-                f"📊 Subscribed to ES bars | "
-                f"Daily: {self._es_daily_bar_type} | "
+                f"📊 ES data subscribed | Daily: {self._es_daily_bar_type} | "
                 f"1min: {self._es_1min_bar_type}"
             )
         except Exception as e:
@@ -487,7 +529,9 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         """Start the entry sequence: search for put options by delta."""
         self.entry_in_progress = True
         self.traded_today = True
-        self._signal_time = self.clock.utc_now().astimezone(self.tz)
+        # Store signal time as UTC so age comparison in _check_and_submit_entry
+        # (which uses clock.utc_now()) is always apples-to-apples.
+        self._signal_time = self.clock.utc_now()
         self._found_legs.clear()
         
         # Set absolute timeout for entry setup/process
@@ -709,23 +753,90 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         now_iso = self.clock.utc_now().astimezone(self.tz).isoformat()
         if self._trading_data:
             try:
-                self._current_trade_id = self._trading_data.record_trade(
+                short_strike = self._target_short_strike
+                long_strike = self._target_long_strike
+                entry_premium = abs(rounded_limit) * 100  # dollars per spread
+
+                # SL/TP price levels for the trade record
+                sl_debit = abs(rounded_limit) + abs(rounded_limit) * self.stop_loss_pct / 100.0
+                entry_stop_loss = -sl_debit
+                tp_remaining = abs(rounded_limit) * (1.0 - self.take_profit_pct / 100.0)
+                if tp_remaining < 0.05:
+                    tp_remaining = 0.05
+                entry_target_price = -tp_remaining
+
+                max_profit = entry_premium * self.config_quantity
+                spread_width_pts = abs(short_strike - long_strike) if short_strike and long_strike else 50
+                max_loss = (spread_width_pts * 100 - entry_premium) * self.config_quantity
+
+                strikes_list = (
+                    [f"{int(short_strike)}P", f"{int(long_strike)}P"]
+                    if short_strike and long_strike else None
+                )
+                legs_info = [
+                    {"strike": short_strike, "side": "SELL", "type": "P"},
+                    {"strike": long_strike, "side": "BUY", "type": "P"}
+                ] if short_strike and long_strike else None
+
+                strategy_config_snapshot = {
+                    "stop_loss_pct": self.stop_loss_pct,
+                    "take_profit_pct": self.take_profit_pct,
+                    "min_credit_amount": self.min_credit_amount,
+                    "quantity": self.config_quantity,
+                    "short_put_delta": self.short_put_delta,
+                    "long_put_delta": self.long_put_delta,
+                    "require_strong_reclaim": self.require_strong_reclaim,
+                    "require_two_day_confirmation": self.require_two_day_confirmation,
+                    "enable_macro_filter": self.enable_macro_filter,
+                }
+
+                trade_date_str = self.clock.utc_now().astimezone(self.tz).strftime("%Y%m%d")
+                trade_time_str = self.clock.utc_now().astimezone(self.tz).strftime("%H%M%S")
+                self._current_trade_id = f"T-1DTE-{trade_date_str}-{trade_time_str}"
+
+                self._trading_data.start_trade(
+                    trade_id=self._current_trade_id,
                     strategy_id=self.strategy_id,
                     instrument_id=str(self.spread_instrument.id),
                     trade_type="PUT_CREDIT_SPREAD",
-                    direction="SHORT",
-                    quantity=self.config_quantity,
                     entry_price=rounded_limit,
-                    stop_loss=None,
-                    take_profit=None,
+                    quantity=self.config_quantity,
+                    direction="LONG",
                     entry_time=now_iso,
-                    raw_data={
-                        "short_strike": self._target_short_strike,
-                        "long_strike": self._target_long_strike,
-                        "credit_per_spread": credit_received,
-                        "expiry": "1DTE"
-                    }
+                    entry_reason={
+                        "trigger": "OR_HIGH_BREAKOUT",
+                        "short_strike": short_strike,
+                        "long_strike": long_strike,
+                        "credit_per_spread": abs(rounded_limit),
+                        "expiry": "1DTE",
+                    },
+                    entry_target_price=entry_target_price,
+                    entry_stop_loss=entry_stop_loss,
+                    strikes=strikes_list,
+                    expiration=self.clock.utc_now().astimezone(self.tz).strftime("%Y-%m-%d"),
+                    legs=legs_info,
+                    strategy_config=strategy_config_snapshot,
+                    max_profit=max_profit,
+                    max_loss=max_loss,
+                    entry_premium_per_contract=entry_premium,
                 )
+
+                # Record entry order
+                self._trading_data.record_order(
+                    strategy_id=self.strategy_id,
+                    instrument_id=str(self.spread_instrument.id),
+                    trade_type="PUT_CREDIT_SPREAD",
+                    trade_direction="ENTRY",
+                    order_side="BUY",
+                    order_type="LIMIT",
+                    quantity=self.config_quantity,
+                    status="SUBMITTED",
+                    submitted_time=now_iso,
+                    trade_id=self._current_trade_id,
+                    client_order_id=f"{self._current_trade_id}-ENTRY",
+                    price_limit=rounded_limit,
+                )
+
             except Exception as e:
                 self.logger.error(f"Failed to record trade: {e}")
 
@@ -818,15 +929,22 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
             tp_remaining = 0.05
         tp_price = -tp_remaining  # Negative (debit to close)
 
-        # Track max unrealized loss
+        # Track trade metrics (max drawdown, P&L snapshots) — throttled to 30s
         total_pnl = pnl_per_spread * abs(position_qty)
-        if self._current_trade_id and self._trading_data and total_pnl < 0:
-            try:
-                self._trading_data.update_max_unrealized_loss(
-                    self._current_trade_id, total_pnl
-                )
-            except Exception:
-                pass
+        if self._current_trade_id and self._trading_data:
+            now_utc = self.clock.utc_now()
+            should_update = (
+                self._last_metrics_update_time is None
+                or (now_utc - self._last_metrics_update_time).total_seconds() >= 30
+            )
+            if should_update:
+                try:
+                    self._trading_data.update_trade_metrics(
+                        self._current_trade_id, total_pnl
+                    )
+                    self._last_metrics_update_time = now_utc
+                except Exception:
+                    pass
 
         # STOP LOSS — check before closing flag (SL overrides TP)
         if mid <= sl_price and not self._sl_triggered:
@@ -884,6 +1002,10 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
             if order and order.status == OrderStatus.FILLED:
                 try:
                     self.clock.cancel_timer(f"{self.id}_fill_timeout")
+                except Exception:
+                    pass
+                try:
+                    self.clock.cancel_timer(f"{self.id}_fill_wait_monitor")
                 except Exception:
                     pass
                 self._entry_order_id = None
@@ -964,11 +1086,14 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
                     instrument_id=str(self.spread_instrument.id) if self.spread_instrument else "UNKNOWN",
                     trade_type="PUT_CREDIT_SPREAD", trade_direction="EXIT",
                     order_side="SELL", order_type="LIMIT",
-                    quantity=self.config_quantity, status="FILLED",
+                    # Use actual filled quantity, not config target
+                    quantity=float(self.get_effective_spread_quantity()) or self.config_quantity,
+                    status="FILLED",
                     price_limit=fill_price, submitted_time=now_iso,
                     trade_id=self._current_trade_id,
                     client_order_id=f"{self._current_trade_id}-EXIT",
-                    filled_time=now_iso, filled_quantity=self.config_quantity,
+                    filled_time=now_iso,
+                    filled_quantity=float(self.get_effective_spread_quantity()) or self.config_quantity,
                     filled_price=fill_price, commission=self._total_commission,
                     raw_data={"trigger": exit_reason, "pnl": final_pnl}
                 )
@@ -1063,6 +1188,10 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         self._found_legs.clear()
         self._last_log_minute = -1
         self._entry_order_id = None
+        self._signal_time = None
+        self._target_short_strike = None
+        self._target_long_strike = None
+        self._last_metrics_update_time = None
 
         try:
             self.clock.cancel_timer(f"{self.id}_fill_timeout")

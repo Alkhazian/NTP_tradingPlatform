@@ -169,7 +169,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         range_end_time = "Range Close" # Will be calculated/logged by base
         
         self.logger.info(
-            f"🚀 SPX15MinRangeStrategy STARTING | {self.tz} | Window: {self.start_time}-{range_end_time} | Cutoff: {self.entry_cutoff_time}",
+            f"🚀 SPX15MinRangeStrategy STARTED | {self.tz} | Window: {self.start_time}-{range_end_time} | Cutoff: {self.entry_cutoff_time}",
             extra={
                 "extra": {
                     "event_type": "strategy_start",
@@ -188,7 +188,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             }
         )
         self._notify(
-            f"🚀 SPX15MinRangeStrategy STARTING | {self.tz} | Window: {self.start_time}-{range_end_time} | Cutoff: {self.entry_cutoff_time}"
+            f"🚀 SPX15MinRangeStrategy STARTED | {self.tz} | Window: {self.start_time}-{range_end_time} | Cutoff: {self.entry_cutoff_time}"
         )
 
     def on_spx_ready(self):
