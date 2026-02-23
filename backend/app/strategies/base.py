@@ -110,6 +110,19 @@ class BaseStrategy(Strategy):
         # Track active orders limit prices for DB reconciliation
         self._active_spread_order_limits: Dict[ClientOrderId, float] = {}
 
+        # Accumulate LEG fill data for accurate net spread price calculation.
+        # IB decomposes spread orders into individual LEG sub-orders whose fill
+        # prices represent the actual execution prices.  These are accumulated
+        # here in real time during on_order_filled and then used by
+        # get_accumulated_spread_price() to compute the true net spread price.
+        # Structure: { parent_order_id_str: {
+        #   "sell_fills": [(qty, px, comm), ...],
+        #   "buy_fills":  [(qty, px, comm), ...],
+        #   "venue_order_id": str | None,
+        #   "last_fill_time": str | None,
+        # }}
+        self._leg_fill_accumulator: Dict[str, Dict] = {}
+
 
     # =========================================================================
     # LIFECYCLE MANAGEMENT (Using Nautilus ComponentState)
@@ -1586,6 +1599,56 @@ class BaseStrategy(Strategy):
                 f"📥 FILL EVENT | Order: {order_id} | Instrument: {event.instrument_id} | "
                 f"Side: {event.order_side.name} | Qty: {event.last_qty} | Px: {event.last_px}"
             )
+
+            # === ACCUMULATE LEG FILLS ===
+            # IB decomposes spread orders into individual LEG sub-orders
+            # (e.g. O-xxx-LEG-SPXW260223C06920000).  We accumulate each
+            # leg's fill data so we can later compute the true net spread
+            # price via get_accumulated_spread_price().
+            order_id_str = str(order_id)
+            if "-LEG-" in order_id_str:
+                parent_id = order_id_str.split("-LEG-")[0]
+                if parent_id not in self._leg_fill_accumulator:
+                    self._leg_fill_accumulator[parent_id] = {
+                        "sell_fills": [],
+                        "buy_fills": [],
+                        "venue_order_id": None,
+                        "last_fill_time": None,
+                    }
+                acc = self._leg_fill_accumulator[parent_id]
+
+                qty = float(event.last_qty)
+                px = float(event.last_px)
+                comm = 0.0
+                if event.commission:
+                    try:
+                        comm = event.commission.as_double()
+                    except Exception:
+                        try:
+                            comm = float(str(event.commission).split()[0])
+                        except Exception:
+                            pass
+
+                if event.order_side == OrderSide.SELL:
+                    acc["sell_fills"].append((qty, px, comm))
+                else:
+                    acc["buy_fills"].append((qty, px, comm))
+
+                # Derive parent venue_order_id (strip the -LEG-… suffix)
+                try:
+                    raw_vid = str(event.venue_order_id)
+                    vid = raw_vid.split("-LEG-")[0] if "-LEG-" in raw_vid else raw_vid
+                    acc["venue_order_id"] = vid
+                except Exception:
+                    pass
+
+                acc["last_fill_time"] = str(getattr(event, "ts_event", None))
+
+                self.logger.debug(
+                    f"📊 LEG FILL ACCUMULATED | Parent: {parent_id} | "
+                    f"Side: {event.order_side.name} | Qty: {qty} | Px: {px} | Comm: ${comm:.2f}"
+                )
+
             
             # Determine if entry or exit based on our tracking
             # CRITICAL FIX: Do NOT discard here yet! Only discard if status is FILLED.
@@ -1756,6 +1819,69 @@ class BaseStrategy(Strategy):
             
         except Exception as e:
             self.on_unexpected_error(e)
+
+    # ------------------------------------------------------------------
+    # LEG FILL ACCUMULATION HELPERS
+    # ------------------------------------------------------------------
+
+    def get_accumulated_spread_price(self, parent_order_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Calculate net spread price from accumulated LEG fills.
+
+        IB reports spread fills as individual leg executions.  This method
+        aggregates those fills (accumulated during on_order_filled) and
+        computes the weighted-average net spread price.
+
+        For a **credit spread** the net price is:
+            net = -(sell_avg - buy_avg)
+        where sell_avg and buy_avg are the qty-weighted average fill prices
+        across all partial fills of the respective legs.
+
+        Args:
+            parent_order_id: The parent spread order ID string
+                             (e.g. "O-20260223-144604-001-001-1")
+
+        Returns:
+            A dict with keys:
+                net_price        – net spread fill price (negative = credit)
+                total_qty        – number of contracts filled
+                total_commission – total $ commission across all legs
+                fill_time        – timestamp of the last leg fill (ISO str)
+                venue_order_id   – broker order number (str or None)
+            Or None if no fills have been accumulated for this order.
+        """
+        acc = self._leg_fill_accumulator.get(parent_order_id)
+        if not acc:
+            return None
+
+        sell_fills = acc["sell_fills"]
+        buy_fills = acc["buy_fills"]
+
+        if not sell_fills or not buy_fills:
+            return None
+
+        sell_qty = sum(q for q, _, _ in sell_fills)
+        sell_wp = sum(q * p for q, p, _ in sell_fills)
+        sell_comm = sum(c for _, _, c in sell_fills)
+
+        buy_qty = sum(q for q, _, _ in buy_fills)
+        buy_wp = sum(q * p for q, p, _ in buy_fills)
+        buy_comm = sum(c for _, _, c in buy_fills)
+
+        sell_avg = sell_wp / sell_qty if sell_qty else 0.0
+        buy_avg = buy_wp / buy_qty if buy_qty else 0.0
+
+        # Credit spread: we sell the more expensive leg, buy the cheaper one.
+        # Net price as negative credit: -(sell - buy)
+        net_price = -(sell_avg - buy_avg)
+
+        return {
+            "net_price": round(net_price, 4),
+            "total_qty": min(sell_qty, buy_qty),
+            "total_commission": round(sell_comm + buy_comm, 2),
+            "fill_time": acc["last_fill_time"],
+            "venue_order_id": acc["venue_order_id"],
+        }
 
     def _on_entry_filled(self, event):
         """Handle entry fill - start trade record."""
