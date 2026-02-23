@@ -362,34 +362,6 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
     # TREND FILTER CHECKS
     # =========================================================================
 
-    def _is_es_trend_bullish(self) -> bool:
-        """Check all ES1! trend conditions."""
-        if self._es_ema_value is None:
-            self.logger.debug("ES EMA not ready")
-            return False
-        if self._es_vwma_value is None:
-            self.logger.debug("ES VWMA not ready")
-            return False
-        if self._es_sma_value is None:
-            self.logger.debug("ES 1-min SMA not ready")
-            return False
-        if self._es_current_price <= 0:
-            return False
-
-        price = self._es_current_price
-        ema_ok = price > self._es_ema_value
-        vwma_ok = price > self._es_vwma_value
-        sma_ok = price > self._es_sma_value
-
-        if not (ema_ok and vwma_ok and sma_ok):
-            self.logger.debug(
-                f"ES trend BEARISH | Price={price:.2f} | "
-                f"EMA={self._es_ema_value:.2f}({'✓' if ema_ok else '✗'}) | "
-                f"VWMA={self._es_vwma_value:.2f}({'✓' if vwma_ok else '✗'}) | "
-                f"SMA={self._es_sma_value:.2f}({'✓' if sma_ok else '✗'})"
-            )
-            return False
-        return True
 
     def _is_strong_reclaim(self) -> bool:
         """D-1 regime check: prior day close > EMA20 AND green candle."""
@@ -483,11 +455,10 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
                 and self.get_effective_spread_quantity() == 0):
             self._check_entry_signal(close_price)
 
-        # ── Position management (SL/TP) ───────────────────────────────────────
-        # Options spreads don't re-quote at tick frequency, so minute-close
-        # resolution is more than adequate for a theta-decay strategy.
-        if self._spread_entry_price is not None and not self.entry_in_progress:
-            self._manage_open_position()
+        # NOTE: _manage_open_position() is intentionally NOT called here.
+        # It fires in on_quote_tick_safe() on every spread quote tick, which is
+        # the correct trigger — it reacts to actual spread price changes, not
+        # SPX minute closes.
 
     # =========================================================================
     # ENTRY SIGNAL DETECTION
