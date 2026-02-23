@@ -119,6 +119,13 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         self._macro_clear_today: bool = True  # Cached daily; set in _reset_daily_state
         self._strong_reclaim_ok: bool = False  # Cached; set on ES daily bar
         self._two_day_confirmed_ok: bool = False  # Cached; set on ES daily bar
+        # Day-blocking flag: set True when a HARD daily filter (EMA20, VWMA14, macro, strong
+        # reclaim) fails at any minute close. Blocks all further entry checks for the rest of
+        # the session. Only resets in _reset_daily_state() on the next trading day.
+        self._daily_blocked: bool = False
+        # One-shot flag: set True the first time close_price > or_high while hard filters pass.
+        # Prevents repeated OR breakout log lines when SMA10 is the only remaining blocker.
+        self._or_breakout_logged: bool = False
 
         # --- Option Search State ---
         self._short_put_search_id: Optional[str] = None
@@ -440,86 +447,165 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         return True
 
     # =========================================================================
-    # SPX TICK HANDLER — ENTRY LOGIC
+    # SPX MINUTE-CLOSE HANDLER — ENTRY + POSITION MANAGEMENT
     # =========================================================================
 
     def on_spx_tick(self, tick: QuoteTick):
-        """Called for each SPX quote tick from base class."""
-        now_et = self.clock.utc_now().astimezone(self.tz)
+        """Required override — all logic runs in on_minute_closed()."""
+        pass
 
-        # Periodic logging (every 5 min)
+    def on_minute_closed(self, close_price: float):
+        """Entry evaluation + periodic heartbeat on each SPX minute close."""
+        now_et = self.clock.utc_now().astimezone(self.tz)
         current_minute = now_et.hour * 60 + now_et.minute
+
+        # ── 5-min heartbeat (Proposal A: shows BLOCKED status) ────────────────
         if current_minute % 5 == 0 and current_minute != self._last_log_minute:
             self._last_log_minute = current_minute
             or_str = f"OR_H={self.or_high:.2f}" if self.or_high else "OR pending"
-            es_str = (
-                f"ES={self._es_current_price:.2f} "
-                f"EMA={self._es_ema_value:.2f if self._es_ema_value else 'N/A'} "
-                f"VWMA={self._es_vwma_value:.2f if self._es_vwma_value else 'N/A'} "
-                f"SMA={self._es_sma_value:.2f if self._es_sma_value else 'N/A'}"
-            )
+            ema_str = f"{self._es_ema_value:.2f}" if self._es_ema_value else "N/A"
+            vwma_str = f"{self._es_vwma_value:.2f}" if self._es_vwma_value else "N/A"
+            sma_str = f"{self._es_sma_value:.2f}" if self._es_sma_value else "N/A"
+            blocked_str = " | 🚫 BLOCKED FOR DAY" if self._daily_blocked else ""
             self.logger.info(
-                f"📈 SPX={self.current_spx_price:.2f} | {or_str} | {es_str} | "
-                f"Traded={self.traded_today} Entry={self.entry_in_progress}"
+                f"📈 SPX={self.current_spx_price:.2f} Close={close_price:.2f} | "
+                f"{or_str} | ES={self._es_current_price:.2f} "
+                f"EMA={ema_str} VWMA={vwma_str} SMA={sma_str} | "
+                f"Traded={self.traded_today} Entry={self.entry_in_progress}{blocked_str}"
             )
 
-        # Check for bullish breakout entry
-        if (self.range_calculated and not self.traded_today
-                and not self.entry_in_progress and not self._closing_in_progress
+        # ── Entry evaluation ──────────────────────────────────────────────────
+        if (self.range_calculated
+                and not self.traded_today
+                and not self.entry_in_progress
+                and not self._closing_in_progress
+                and not self._daily_blocked
                 and self.get_effective_spread_quantity() == 0):
-            self._check_entry_signal()
+            self._check_entry_signal(close_price)
 
-        # Monitor open position for SL/TP
+        # ── Position management (SL/TP) ───────────────────────────────────────
+        # Options spreads don't re-quote at tick frequency, so minute-close
+        # resolution is more than adequate for a theta-decay strategy.
         if self._spread_entry_price is not None and not self.entry_in_progress:
             self._manage_open_position()
-
-    def on_minute_closed(self, close_price: float):
-        """Called at each SPX minute close by base class."""
-        pass  # Entry logic runs on tick; no minute-close logic needed
 
     # =========================================================================
     # ENTRY SIGNAL DETECTION
     # =========================================================================
 
-    def _check_entry_signal(self):
-        """Check all entry conditions and initiate entry if met."""
+    def _check_entry_signal(self, close_price: float):
+        """
+        Evaluate all entry conditions at a minute close.
+
+        Hard daily filters (EMA20, VWMA14, macro, strong reclaim):
+          → If any fail, set _daily_blocked=True and stop checking for the rest of the day.
+        Soft per-minute filters (SMA10, OR breakout):
+          → Log at INFO and return; will re-evaluate at the next minute close.
+        """
         now_et = self.clock.utc_now().astimezone(self.tz)
 
-        # Time gate
+        # ── Time gate (silent) ────────────────────────────────────────────────
         if now_et.time() >= self.entry_cutoff_time:
             return
         if now_et.time() < time(9, 30):
             return
 
-        # Opening range must be complete and price above OR high
-        if not self.range_calculated or self.or_high is None:
-            return
-        if self.daily_high is None or self.daily_high <= self.or_high:
+        # ── Hard daily filters — block for the rest of the session on failure ─
+        es_price = self._es_current_price
+        ema_ok    = self._es_ema_value  is not None and es_price > self._es_ema_value
+        vwma_ok   = self._es_vwma_value is not None and es_price > self._es_vwma_value
+        macro_ok  = self._macro_clear_today
+        reclaim_ok = self._strong_reclaim_ok
+        two_day_ok = self._two_day_confirmed_ok  # disabled by default; True when disabled
+
+        if not (ema_ok and vwma_ok and macro_ok and reclaim_ok and two_day_ok):
+            # Log each failing filter at INFO so it's visible in production logs
+            if self._es_ema_value is None:
+                self.logger.info(
+                    f"🚫 DAILY BLOCK | EMA{self.es_ema_period} not ready "
+                    f"(need {self.es_ema_period} daily bars, have {len(self._es_daily_closes)})"
+                )
+            elif not ema_ok:
+                self.logger.info(
+                    f"🚫 DAILY BLOCK | EMA{self.es_ema_period} failed | "
+                    f"ES={es_price:.2f} ≤ EMA={self._es_ema_value:.2f}"
+                )
+            if self._es_vwma_value is None:
+                self.logger.info(
+                    f"🚫 DAILY BLOCK | VWMA{self.es_vwma_period} not ready "
+                    f"(need {self.es_vwma_period} daily bars)"
+                )
+            elif not vwma_ok:
+                self.logger.info(
+                    f"🚫 DAILY BLOCK | VWMA{self.es_vwma_period} failed | "
+                    f"ES={es_price:.2f} ≤ VWMA={self._es_vwma_value:.2f}"
+                )
+            if not macro_ok:
+                self.logger.info(
+                    f"🚫 DAILY BLOCK | Macro filter | Today is a restricted trading date"
+                )
+            if not reclaim_ok:
+                self.logger.info(
+                    f"🚫 DAILY BLOCK | Strong reclaim failed | "
+                    f"D-1 close must be above EMA{self.es_ema_period} and a green candle"
+                )
+            if not two_day_ok:
+                self.logger.info(
+                    f"🚫 DAILY BLOCK | Two-day confirmation failed | "
+                    f"D-1 and D-2 closes must both be above EMA{self.es_ema_period}"
+                )
+            self._daily_blocked = True
+            self._notify(
+                f"🚫 STRATEGY BLOCKED FOR DAY | "
+                f"EMA={'✓' if ema_ok else '✗'} VWMA={'✓' if vwma_ok else '✗'} "
+                f"Macro={'✓' if macro_ok else '✗'} Reclaim={'✓' if reclaim_ok else '✗'}"
+            )
+            self.save_state()
             return
 
-        # ES trend filters
-        if not self._is_es_trend_bullish():
-            return
-        if not self._strong_reclaim_ok:
-            return
-        if not self._two_day_confirmed_ok:
-            return
-        if not self._macro_clear_today:
+        # ── OR breakout: minute close must be ABOVE OR high ───────────────────
+        # More conservative than tick-based check: filters wick spikes that reverse.
+        if self.or_high is None or close_price <= self.or_high:
+            current_str = f"{close_price:.2f}" if self.or_high else "OR not locked"
+            or_str = f"{self.or_high:.2f}" if self.or_high else "N/A"
+            self.logger.info(
+                f"⏳ WAITING | OR breakout not confirmed | "
+                f"Close={current_str} ≤ OR_High={or_str}"
+            )
             return
 
-        # All conditions met — initiate entry
+        # Proposal B: one-shot log the first time close exceeds OR high
+        if not self._or_breakout_logged:
+            self._or_breakout_logged = True
+            self.logger.info(
+                f"📊 OR BREAKOUT CONFIRMED | Close={close_price:.2f} > OR={self.or_high:.2f} | "
+                f"Hard filters all passed | Waiting for SMA{self.es_sma_period} confirmation",
+                extra={"extra": {"event_type": "or_breakout_confirmed",
+                                 "close": close_price, "or_high": self.or_high}}
+            )
+
+        # ── SMA10 (1-min) — soft filter, re-evaluates each minute ─────────────
+        if self._es_sma_value is None or es_price <= self._es_sma_value:
+            sma_str = f"{self._es_sma_value:.2f}" if self._es_sma_value else "not ready"
+            self.logger.info(
+                f"⏳ WAITING | SMA{self.es_sma_period}(1m) not met | "
+                f"ES={es_price:.2f} vs SMA={sma_str} | Will retry next minute"
+            )
+            return
+
+        # ── All conditions met ─────────────────────────────────────────────────
         self.logger.info(
             f"🔥 ALL ENTRY CONDITIONS MET | "
-            f"SPX High={self.daily_high:.2f} > OR_High={self.or_high:.2f} | "
-            f"ES={self._es_current_price:.2f} > EMA={self._es_ema_value:.2f} > "
-            f"VWMA={self._es_vwma_value:.2f} | SMA1m={self._es_sma_value:.2f}",
+            f"SPX Close={close_price:.2f} > OR={self.or_high:.2f} | "
+            f"ES={es_price:.2f} > EMA={self._es_ema_value:.2f} "
+            f"VWMA={self._es_vwma_value:.2f} SMA={self._es_sma_value:.2f}",
             extra={"extra": {"event_type": "entry_signal",
-                             "spx_high": self.daily_high, "or_high": self.or_high,
-                             "es_price": self._es_current_price}}
+                             "spx_close": close_price, "or_high": self.or_high,
+                             "es_price": es_price}}
         )
         self._notify(
-            f"🔥 ENTRY SIGNAL | SPX High={self.daily_high:.2f} > OR={self.or_high:.2f} | "
-            f"ES={self._es_current_price:.2f}"
+            f"🔥 ENTRY SIGNAL | SPX Close={close_price:.2f} > OR={self.or_high:.2f} | "
+            f"ES={es_price:.2f}"
         )
         self._initiate_entry()
 
@@ -530,7 +616,10 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
     def _initiate_entry(self):
         """Start the entry sequence: search for put options by delta."""
         self.entry_in_progress = True
-        self.traded_today = True
+        # NOTE: traded_today is intentionally NOT set here.
+        # It is only set in _check_and_submit_entry() on successful order submission.
+        # Setting it here prematurely would permanently block re-entry on days where
+        # the delta search fails (e.g. no suitable options found, IB timeout).
         # Store signal time as UTC so age comparison in _check_and_submit_entry
         # (which uses clock.utc_now()) is always apples-to-apples.
         self._signal_time = self.clock.utc_now()
@@ -663,6 +752,12 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         self._found_legs.clear()
         self._target_short_strike = None
         self._target_long_strike = None
+
+        # Cancel any active delta searches to prevent timer/subscription leaks.
+        # This handles the case where the short put was found but the long put
+        # search is still running when we abort (e.g. on entry timeout).
+        for sid in list(self._premium_searches.keys()):
+            self.cancel_premium_search(sid)
 
         try:
             self.clock.cancel_timer(f"{self.id}_entry_timeout")
@@ -875,6 +970,17 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
                 callback=self._on_fill_timeout
             )
 
+            # Start periodic fill-wait monitoring every 10s (mirrors template pattern).
+            # _log_fill_wait_status reschedules itself and stops when _entry_order_id clears.
+            try:
+                self.clock.set_time_alert(
+                    name=f"{self.id}_fill_wait_monitor",
+                    alert_time=self.clock.utc_now() + timedelta(seconds=10),
+                    callback=self._log_fill_wait_status
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to set fill wait monitor: {e}")
+
             self._notify(
                 f"📤 ENTRY SUBMITTED | Credit=${abs(rounded_limit):.4f}/spread | "
                 f"Short=${self._target_short_strike:.0f} Long=${self._target_long_strike:.0f} | "
@@ -1028,7 +1134,11 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
             if self.spread_instrument:
                 self.cancel_all_orders(self.spread_instrument.id)
 
-            self.close_spread_smart(limit_price=mid)
+            # BUGFIX: Use tp_price as limit (not mid). The TP trigger condition is
+            # mid >= tp_price, so tp_price is the cheapest debit we'll accept to close.
+            # Using mid would submit an order at a potentially stale price; using tp_price
+            # guarantees we close at-or-better-than the configured TP threshold.
+            self.close_spread_smart(limit_price=tp_price)
 
     # =========================================================================
     # ORDER EVENT HANDLERS
@@ -1126,14 +1236,19 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
                     instrument_id=str(self.spread_instrument.id) if self.spread_instrument else "UNKNOWN",
                     trade_type="PUT_CREDIT_SPREAD", trade_direction="EXIT",
                     order_side="SELL", order_type="LIMIT",
-                    # Use actual filled quantity, not config target
-                    quantity=float(self.get_effective_spread_quantity()) or self.config_quantity,
+                    # BUGFIX: Do NOT call get_effective_spread_quantity() here — the position
+                    # is already flat (== 0) by the time this runs, so the call always
+                    # returns 0 and the fallback config_quantity is always used anyway.
+                    # Use config_quantity directly (consistent with template strategy).
+                    # If a partial fill occurred on entry, _on_fill_timeout already called
+                    # update_trade_quantity() on the trade record.
+                    quantity=self.config_quantity,
                     status="FILLED",
                     price_limit=fill_price, submitted_time=now_iso,
                     trade_id=self._current_trade_id,
                     client_order_id=f"{self._current_trade_id}-EXIT",
                     filled_time=now_iso,
-                    filled_quantity=float(self.get_effective_spread_quantity()) or self.config_quantity,
+                    filled_quantity=self.config_quantity,
                     filled_price=fill_price, commission=self._total_commission,
                     raw_data={"trigger": exit_reason, "pnl": final_pnl}
                 )
@@ -1151,6 +1266,7 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         self._spread_entry_price = None
         self._closing_in_progress = False
         self._sl_triggered = False
+        self.entry_in_progress = False  # Safety: clear in case of unexpected re-entry race
         self._current_trade_id = None
         self._total_commission = 0.0
         self._active_spread_order_limits.clear()
@@ -1187,6 +1303,56 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
                 self._current_trade_id = None
             self.traded_today = True
             self.save_state()
+
+    def _log_fill_wait_status(self, event):
+        """
+        Log spread quote every 10s while waiting for entry fill.
+        Ported from SPX_15Min_Range template.
+        Stops automatically when _entry_order_id is cleared (full fill or timeout).
+        """
+        # Stop if entry order has already been resolved (filled or timed out)
+        if not self._entry_order_id:
+            return
+
+        if self.spread_instrument:
+            quote = self.cache.quote_tick(self.spread_instrument.id)
+            if quote:
+                bid = quote.bid_price.as_double()
+                ask = quote.ask_price.as_double()
+                mid = (bid + ask) / 2.0
+                limit = -self._spread_entry_price if self._spread_entry_price else None
+                distance = round(mid - limit, 4) if limit is not None else None
+                self.logger.info(
+                    f"⏳ WAITING FOR FILL | Bid: {bid:.4f} | Ask: {ask:.4f} | Mid: {mid:.4f} "
+                    f"| Limit: {limit:.4f if limit is not None else 'N/A'} "
+                    f"| Distance: {f'{distance:+.4f}' if distance is not None else 'N/A'} "
+                    f"| Order: {self._entry_order_id}",
+                    extra={"extra": {
+                        "event_type": "fill_wait_status",
+                        "bid": bid, "ask": ask, "mid": mid,
+                        "limit_price": limit, "distance_to_limit": distance,
+                        "order_id": str(self._entry_order_id)
+                    }}
+                )
+            else:
+                self.logger.info(
+                    f"⏳ WAITING FOR FILL | No quote available | Order: {self._entry_order_id}",
+                    extra={"extra": {"event_type": "fill_wait_status",
+                                     "order_id": str(self._entry_order_id)}}
+                )
+
+        # Reschedule next check in 10s.
+        # Cancel first: NautilusTrader holds the timer name until the callback returns,
+        # so we must cancel before re-registering the same name.
+        try:
+            self.clock.cancel_timer(f"{self.id}_fill_wait_monitor")
+        except Exception:
+            pass
+        self.clock.set_time_alert(
+            name=f"{self.id}_fill_wait_monitor",
+            alert_time=self.clock.utc_now() + timedelta(seconds=10),
+            callback=self._log_fill_wait_status
+        )
 
     # --- Close Order Failsafe ---
 
@@ -1233,6 +1399,9 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         self._target_long_strike = None
         self._last_metrics_update_time = None
         self._last_position_log_time = None
+        # Reset day-block and OR-breakout flags for the new session
+        self._daily_blocked = False
+        self._or_breakout_logged = False
 
         try:
             self.clock.cancel_timer(f"{self.id}_fill_timeout")
@@ -1299,6 +1468,8 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
             "_es_daily_volumes": list(self._es_daily_volumes),
             "_es_daily_opens": list(self._es_daily_opens),
             "_es_1min_closes": list(self._es_1min_closes),
+            "_daily_blocked": self._daily_blocked,
+            "_or_breakout_logged": self._or_breakout_logged,
         })
         return state
 
@@ -1316,6 +1487,8 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         self._es_ema_value = state.get("_es_ema_value")
         self._es_vwma_value = state.get("_es_vwma_value")
         self._es_sma_value = state.get("_es_sma_value")
+        self._daily_blocked = state.get("_daily_blocked", False)
+        self._or_breakout_logged = state.get("_or_breakout_logged", False)
 
         for c in state.get("_es_daily_closes", []):
             self._es_daily_closes.append(c)

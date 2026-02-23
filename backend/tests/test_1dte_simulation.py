@@ -170,6 +170,8 @@ def make():
     s._last_position_log_time = None
     s._position_log_interval_seconds = 30
     s._macro_clear_today = True; s._strong_reclaim_ok = True; s._two_day_confirmed_ok = True
+    s._daily_blocked = False
+    s._or_breakout_logged = False
 
     s._short_put_search_id = None; s._long_put_search_id = None
     s._found_legs = {}; s._target_short_strike = None; s._target_long_strike = None
@@ -178,6 +180,12 @@ def make():
     s._trading_data.start_trade.return_value = "T-001"
     s._trading_data.get_trade.return_value = {"status": "OPEN", "entry_price": -1.50}
     s._telegram = None
+    # Attributes from SPXBaseStrategy that get_state() / set_state() reference
+    s.spx_subscribed = False
+    s.last_spx_bid = 0.0; s.last_spx_ask = 0.0
+    s.current_spx_price = 0.0
+    # _premium_searches is used by cancel_premium_search inside _abort_entry
+    s._premium_searches = {}
 
     s.get_effective_spread_quantity = MagicMock(return_value=0)
     s.open_spread_position = MagicMock(return_value=True)
@@ -218,6 +226,7 @@ def bull(s):
     s.range_calculated = True; s.or_high = 6100.0; s.daily_high = 6102.0
     s.current_spx_price = 6101.0
     s._macro_clear_today = True; s._strong_reclaim_ok = True; s._two_day_confirmed_ok = True
+    s._daily_blocked = False; s._or_breakout_logged = False
     s.traded_today = False; s.entry_in_progress = False; s._closing_in_progress = False
     s.get_effective_spread_quantity.return_value = 0
 
@@ -234,35 +243,40 @@ def ok(name, cond, detail=""):
 def t1():
     print("\n═══ 1: Normal Entry Signal ═══")
     s = make(); bull(s)
-    s._check_entry_signal()
+    s._check_entry_signal(close_price=6102.0)
     ok("entry_in_progress", s.entry_in_progress)
-    ok("traded_today", s.traded_today)
+    # traded_today is set in _check_and_submit_entry (on successful order submission),
+    # not in _check_entry_signal or _initiate_entry. At this point entry is in-flight.
+    ok("traded_today NOT set yet (set at order submission)", not s.traded_today)
     ok("find_option called", s.find_option_by_delta.called)
     ok("timeout set", s.clock.set_time_alert.called)
 
 def t2():
     print("\n═══ 2: Time Gate Blocks ═══")
     s = make(); bull(s); clk(s, h=15, m=1)
-    s._check_entry_signal()
+    s._check_entry_signal(close_price=6102.0)
     ok("no entry", not s.entry_in_progress)
 
 def t3():
     print("\n═══ 3: ES Bearish Blocks ═══")
     s = make(); bull(s); s._es_current_price = s._es_ema_value - 50
-    s._check_entry_signal()
+    s._check_entry_signal(close_price=6102.0)
     ok("no entry", not s.entry_in_progress)
+    ok("daily blocked", s._daily_blocked)
 
 def t4():
     print("\n═══ 4: Macro Blocks ═══")
     s = make(); bull(s); s._macro_clear_today = False
-    s._check_entry_signal()
+    s._check_entry_signal(close_price=6102.0)
     ok("no entry", not s.entry_in_progress)
+    ok("daily blocked", s._daily_blocked)
 
 def t5():
     print("\n═══ 5: Strong Reclaim Blocks ═══")
     s = make(); bull(s); s._strong_reclaim_ok = False
-    s._check_entry_signal()
+    s._check_entry_signal(close_price=6102.0)
     ok("no entry", not s.entry_in_progress)
+    ok("daily blocked", s._daily_blocked)
 
 def t6():
     print("\n═══ 6: Tick Poll — Credit Met ═══")
@@ -474,13 +488,118 @@ def t21():
     ok("record_order (exit) called", s._trading_data.record_order.called)
 
 
+def t22():
+    print("\n═══ 22: EMA20 fail → _daily_blocked, on_minute_closed no-ops after block ═══")
+    s = make(); bull(s); s._es_current_price = s._es_ema_value - 100  # below EMA
+    s._check_entry_signal(close_price=6102.0)
+    ok("daily_blocked set", s._daily_blocked)
+    ok("entry not started", not s.entry_in_progress)
+    # Simulate the next minute close via on_minute_closed, which guards on _daily_blocked
+    s._es_current_price = s._es_ema_value + 100  # now would pass EMA check
+    with patch.object(s, "_check_entry_signal") as ce:
+        s.on_minute_closed(close_price=6102.0)
+        ok("still no entry after block (on_minute_closed gate)", not ce.called)
+
+
+def t23():
+    print("\n═══ 23: VWMA14 fail alone → _daily_blocked ═══")
+    s = make(); bull(s)
+    s._es_vwma_value = s._es_current_price + 200  # ES below VWMA
+    s._check_entry_signal(close_price=6102.0)
+    ok("daily_blocked", s._daily_blocked)
+    ok("no entry", not s.entry_in_progress)
+
+
+def t24():
+    print("\n═══ 24: Macro fail → _daily_blocked ═══")
+    s = make(); bull(s); s._macro_clear_today = False
+    s._check_entry_signal(close_price=6102.0)
+    ok("daily_blocked", s._daily_blocked)
+    ok("no entry", not s.entry_in_progress)
+
+
+def t25():
+    print("\n═══ 25: Strong reclaim fail → _daily_blocked ═══")
+    s = make(); bull(s); s._strong_reclaim_ok = False
+    s._check_entry_signal(close_price=6102.0)
+    ok("daily_blocked", s._daily_blocked)
+    ok("no entry", not s.entry_in_progress)
+
+
+def t26():
+    print("\n═══ 26: SMA10 fail does NOT set _daily_blocked; recovers next minute ═══")
+    s = make(); bull(s)
+    s._es_sma_value = s._es_current_price + 50  # ES below SMA10 → soft block
+    s._check_entry_signal(close_price=6102.0)
+    ok("daily_blocked NOT set", not s._daily_blocked)
+    ok("no entry yet", not s.entry_in_progress)
+    # Next minute: SMA recovers
+    s._es_sma_value = s._es_current_price - 10  # now ES above SMA
+    s._check_entry_signal(close_price=6102.0)
+    ok("entry fires after SMA recovers", s.entry_in_progress)
+
+
+def t27():
+    print("\n═══ 27: OR breakout uses close_price, NOT daily_high tick spike ═══")
+    s = make(); bull(s)
+    # Simulate: daily_high exceeds OR high (tick spike) but close did NOT
+    s.daily_high = 6101.5   # > or_high=6100
+    s._check_entry_signal(close_price=6099.5)  # close BELOW or_high
+    ok("no entry (close below OR)", not s.entry_in_progress)
+    ok("not day-blocked", not s._daily_blocked)
+    # Now close exceeds OR high
+    s._check_entry_signal(close_price=6101.0)  # close ABOVE or_high
+    ok("entry fires when close > OR", s.entry_in_progress)
+
+
+def t28():
+    print("\n═══ 28: on_minute_closed bypasses entry when _daily_blocked ═══")
+    s = make(); bull(s); s._daily_blocked = True
+    with patch.object(s, "_check_entry_signal") as ce:
+        s.on_minute_closed(close_price=6102.0)
+        ok("_check_entry_signal NOT called when blocked", not ce.called)
+
+
+def t29():
+    print("\n═══ 29: _daily_blocked resets on _reset_daily_state ═══")
+    s = make()
+    s._daily_blocked = True; s._or_breakout_logged = True
+    s.current_trading_day = date(2026, 2, 22)
+    s.get_effective_spread_quantity.return_value = 0
+    clk(s, y=2026, mo=2, d=23)
+    from app.strategies.base_spx import SPXBaseStrategy
+    orig = SPXBaseStrategy._reset_daily_state
+    SPXBaseStrategy._reset_daily_state = lambda self, d: None
+    try:
+        s._reset_daily_state(date(2026, 2, 23))
+    finally:
+        SPXBaseStrategy._reset_daily_state = orig
+    ok("_daily_blocked reset", not s._daily_blocked)
+    ok("_or_breakout_logged reset", not s._or_breakout_logged)
+
+
+def t30():
+    print("\n═══ 30: _daily_blocked round-trips in get/set_state ═══")
+    s = make(); bull(s)
+    s._daily_blocked = True; s._or_breakout_logged = True
+    state = s.get_state()
+    ok("_daily_blocked in state", state.get("_daily_blocked") is True)
+    ok("_or_breakout_logged in state", state.get("_or_breakout_logged") is True)
+    # Restore into fresh instance
+    s2 = make()
+    s2.set_state(state)
+    ok("_daily_blocked restored", s2._daily_blocked is True)
+    ok("_or_breakout_logged restored", s2._or_breakout_logged is True)
+
+
 # ═══ RUN ═════════════════════════════════════════════════════════════════════
 
 def main():
     print("=" * 60)
     print(" SPX 1DTE Bull Put Spread — Logic Simulation")
     print("=" * 60)
-    for fn in [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21]:
+    for fn in [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,
+               t22,t23,t24,t25,t26,t27,t28,t29,t30]:
         try:
             fn()
         except Exception as e:
