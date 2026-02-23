@@ -2039,7 +2039,26 @@ class SPX1hRangeStrategy(SPXBaseStrategy):
                         }
                     }
                 )
+                entry_oid = self._entry_order_id
                 self._entry_order_id = None
+                
+                # Reconcile entry from accumulated LEG fills (captured in base.py)
+                if self._current_trade_id:
+                    fills_data = self.get_accumulated_spread_price(str(entry_oid))
+                    if fills_data:
+                        self.logger.info(
+                            f"🔄 Reconciling ENTRY | Trade: {self._current_trade_id} | "
+                            f"Price: {fills_data['net_price']} | Qty: {fills_data['total_qty']} | "
+                            f"Comm: ${fills_data['total_commission']:.2f}"
+                        )
+                        self._trading_data.reconcile_trade_fills(
+                            trade_id=self._current_trade_id,
+                            actual_entry_price=fills_data["net_price"],
+                            actual_quantity=fills_data["total_qty"],
+                            entry_commission=fills_data["total_commission"],
+                            entry_venue_order_id=fills_data["venue_order_id"],
+                            entry_fill_time=fills_data["fill_time"],
+                        )
         
         # Track commission from any fill (Entry or Exit) with deduplication
         if event.commission:
@@ -2108,40 +2127,46 @@ class SPX1hRangeStrategy(SPXBaseStrategy):
                 order_id_to_check = event.client_order_id
                 if "-LEG-" in str(event.client_order_id):
                     parent_order_id_str = str(event.client_order_id).split("-LEG-")[0]
-                    parent_order_id = ClientOrderId(parent_order_id_str)
-                    self.logger.info(f"🔍 LEG order detected | LEG: {event.client_order_id} | Parent: {parent_order_id}")
-                    order_id_to_check = parent_order_id
+                    order_id_to_check = ClientOrderId(parent_order_id_str)
+                    self.logger.info(f"🔍 LEG order detected | LEG: {event.client_order_id} | Parent: {order_id_to_check}")
 
-                # PRIORITY 1: Tracked limit price — always reliable for our limit orders.
-                # This is the exact spread price we submitted (e.g. -1.80 for a SL order).
-                tracked_limit = self._active_spread_order_limits.get(order_id_to_check)
-                if tracked_limit is not None:
-                    fill_price = tracked_limit
-                    self.logger.info(f"✅ Using tracked LIMIT price for spread exit: {fill_price} (from order {order_id_to_check})")
-                else:
-                    # PRIORITY 2: avg_px from the order object — only if it looks like a spread price.
-                    # Spread prices are small values (e.g. -1.80, -0.60). If abs(avg_px) > 5.0,
-                    # it is almost certainly a single leg option price (e.g. 11.10), not a spread price.
-                    order = self.cache.order(order_id_to_check)
-                    if order and hasattr(order, "avg_px") and order.avg_px is not None:
-                        avg_px_val = order.avg_px.as_double() if hasattr(order.avg_px, "as_double") else float(order.avg_px)
-                        if abs(avg_px_val) > 5.0:
+                # PRIORITY 0: Actual net spread price from accumulated LEG fills (Real-time reconciliation)
+                fills_data = self.get_accumulated_spread_price(str(order_id_to_check))
+                if fills_data:
+                    fill_price = fills_data["net_price"]
+                    self.logger.info(f"✅ Using accumulated LEG fills for spread exit price: {fill_price} (from order {order_id_to_check})")
+                
+                if fill_price == 0.0:
+                    # PRIORITY 1: Tracked limit price — always reliable for our limit orders.
+                    # This is the exact spread price we submitted (e.g. -1.80 for a SL order).
+                    tracked_limit = self._active_spread_order_limits.get(order_id_to_check)
+                    if tracked_limit is not None:
+                        fill_price = tracked_limit
+                        self.logger.info(f"✅ Using tracked LIMIT price for spread exit: {fill_price} (from order {order_id_to_check})")
+                    else:
+                        # PRIORITY 2: avg_px from the order object — only if it looks like a spread price.
+                        order = self.cache.order(order_id_to_check)
+                        if order and hasattr(order, "avg_px") and order.avg_px is not None:
+                            avg_px_val = order.avg_px.as_double() if hasattr(order.avg_px, "as_double") else float(order.avg_px)
+                            # Spread prices are small values (e.g. -1.80, -0.60). If abs(avg_px) > 5.0,
+                            # it is almost certainly a single leg option price (e.g. 11.10), not a spread price.
+                            if abs(avg_px_val) > 5.0:
+                                self.logger.warning(
+                                    f"⚠️ order.avg_px={avg_px_val:.4f} exceeds sanity threshold (|avg_px|>5.0) — "
+                                    f"this looks like a LEG price, not a spread price. Skipping. "
+                                    f"(order {order_id_to_check})"
+                                )
+                            else:
+                                fill_price = avg_px_val
+                                self.logger.info(f"✅ Using order avg_px for spread exit: {fill_price} (from order {order_id_to_check})")
+
+                        # PRIORITY 3 (last resort): event last_px
+                        if fill_price == 0.0:
                             self.logger.warning(
-                                f"⚠️ order.avg_px={avg_px_val:.4f} exceeds sanity threshold (|avg_px|>5.0) — "
-                                f"this looks like a LEG price, not a spread price. Skipping. "
-                                f"(order {order_id_to_check})"
+                                f"⚠️ No tracked limit or valid avg_px for {order_id_to_check}, "
+                                f"using event last_px (may be incorrect for spreads!)"
                             )
-                        else:
-                            fill_price = avg_px_val
-                            self.logger.info(f"✅ Using order avg_px for spread exit: {fill_price} (from order {order_id_to_check})")
-
-                    # PRIORITY 3 (last resort): event last_px
-                    if fill_price == 0.0:
-                        self.logger.warning(
-                            f"⚠️ No tracked limit or valid avg_px for {order_id_to_check}, "
-                            f"using event last_px (may be incorrect for spreads!)"
-                        )
-                        fill_price = event.last_px.as_double() if hasattr(event.last_px, "as_double") else float(event.last_px)
+                            fill_price = event.last_px.as_double() if hasattr(event.last_px, "as_double") else float(event.last_px)
 
                 entry_credit = self._spread_entry_price if self._spread_entry_price is not None else 0.0
                 # Note: spread prices are credits (negative) or debits (negative/positive depending on view).
@@ -2192,6 +2217,21 @@ class SPX1hRangeStrategy(SPXBaseStrategy):
                         exit_time=exit_time_iso,
                         commission=self._total_commission,
                     )
+                    
+                    # Reconcile exit from accumulated LEG fills (ensuring precision for all fields)
+                    fills_data = self.get_accumulated_spread_price(str(order_id_to_check))
+                    if fills_data:
+                        self.logger.info(
+                            f"🔄 Reconciling EXIT | Trade: {self._current_trade_id} | "
+                            f"Price: {fills_data['net_price']} | Comm: ${fills_data['total_commission']:.2f}"
+                        )
+                        self._trading_data.reconcile_trade_fills(
+                            trade_id=self._current_trade_id,
+                            actual_exit_price=fills_data["net_price"],
+                            exit_commission=fills_data["total_commission"],
+                            exit_venue_order_id=fills_data["venue_order_id"],
+                            exit_fill_time=fills_data["fill_time"],
+                        )
                     
                     # Record exit order
                     trade_type = "CALL_CREDIT_SPREAD" if self._signal_direction == 'bearish' else "PUT_CREDIT_SPREAD"

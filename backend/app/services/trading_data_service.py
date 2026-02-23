@@ -893,6 +893,193 @@ class TradingDataService:
             return False
     
     # =========================================================================
+    # FILL RECONCILIATION
+    # =========================================================================
+
+    def reconcile_trade_fills(
+        self,
+        trade_id: str,
+        actual_entry_price: Optional[float] = None,
+        actual_exit_price: Optional[float] = None,
+        actual_quantity: Optional[float] = None,
+        entry_commission: Optional[float] = None,
+        exit_commission: Optional[float] = None,
+        entry_fill_time: Optional[str] = None,
+        exit_fill_time: Optional[str] = None,
+        entry_venue_order_id: Optional[str] = None,
+        exit_venue_order_id: Optional[str] = None,
+    ) -> bool:
+        """
+        Reconcile trade and order records with actual fill data from broker.
+
+        Called after fill confirmation to correct prices/qty that were
+        pre-recorded using limit prices at order submission time.
+
+        Updates:
+          - trades: entry_price, exit_price, quantity, commission, pnl, net_pnl, result
+          - orders (ENTRY): filled_price, filled_quantity, filled_time, commission, exchange_order_id
+          - orders (EXIT):  filled_price, filled_time, commission, exchange_order_id
+
+        Args:
+            trade_id:              Trade identifier (e.g. "T-SPX-20260223-094604")
+            actual_entry_price:    Net spread entry fill price from LEG fills
+            actual_exit_price:     Net spread exit fill price from LEG fills
+            actual_quantity:       Actual number of contracts filled
+            entry_commission:      Total commission for entry legs
+            exit_commission:       Total commission for exit legs
+            entry_fill_time:       Actual fill timestamp from broker (entry)
+            exit_fill_time:        Actual fill timestamp from broker (exit)
+            entry_venue_order_id:  Broker order ID for entry
+            exit_venue_order_id:   Broker order ID for exit
+
+        Returns:
+            True if reconciliation was successful, False on error.
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Fetch current trade data
+                cursor.execute(
+                    "SELECT entry_price, exit_price, quantity, commission, status "
+                    "FROM trades WHERE trade_id = ?",
+                    (trade_id,),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    logger.error(f"Reconcile: trade {trade_id} not found")
+                    return False
+
+                # Determine effective values (use actual if provided, else keep existing)
+                eff_entry = actual_entry_price if actual_entry_price is not None else row["entry_price"]
+                eff_exit = actual_exit_price if actual_exit_price is not None else row["exit_price"]
+                eff_qty = actual_quantity if actual_quantity is not None else row["quantity"]
+                
+                # Fetch existing order commissions to ensure we don't lose data
+                cursor.execute(
+                    "SELECT trade_direction, commission FROM orders WHERE trade_id = ?",
+                    (trade_id,)
+                )
+                order_rows = cursor.fetchall()
+                existing_entry_comm = 0.0
+                existing_exit_comm = 0.0
+                for orow in order_rows:
+                    if orow["trade_direction"] == "ENTRY":
+                        existing_entry_comm = orow["commission"] or 0.0
+                    else:
+                        existing_exit_comm = orow["commission"] or 0.0
+
+                eff_entry_comm = entry_commission if entry_commission is not None else existing_entry_comm
+                eff_exit_comm = exit_commission if exit_commission is not None else existing_exit_comm
+                eff_total_comm = eff_entry_comm + eff_exit_comm
+
+                # --- Update trades table ---
+
+                trade_updates = []
+                trade_params = []
+
+                if actual_entry_price is not None:
+                    trade_updates.append("entry_price = ?")
+                    trade_params.append(actual_entry_price)
+
+                if actual_exit_price is not None:
+                    trade_updates.append("exit_price = ?")
+                    trade_params.append(actual_exit_price)
+
+                if actual_quantity is not None:
+                    trade_updates.append("quantity = ?")
+                    trade_params.append(actual_quantity)
+
+                if entry_commission is not None or exit_commission is not None:
+                    trade_updates.append("commission = ?")
+                    trade_params.append(eff_total_comm)
+
+                # Recalculate PnL if we have both prices and trade is closed
+                if row["status"] == "CLOSED" and eff_exit is not None:
+                    pnl = (eff_exit - eff_entry) * 100 * eff_qty
+                    net_pnl = pnl - eff_total_comm
+                    result = "WIN" if net_pnl > 0 else "LOSS" if net_pnl < 0 else "BREAKEVEN"
+
+                    trade_updates.extend(["pnl = ?", "net_pnl = ?", "result = ?"])
+                    trade_params.extend([round(pnl, 2), round(net_pnl, 2), result])
+
+                if trade_updates:
+                    trade_updates.append("updated_at = datetime('now')")
+                    trade_params.append(trade_id)
+                    cursor.execute(
+                        f"UPDATE trades SET {', '.join(trade_updates)} WHERE trade_id = ?",
+                        trade_params,
+                    )
+
+                # --- Update ENTRY order ---
+                entry_updates = []
+                entry_params = []
+
+                if actual_entry_price is not None:
+                    entry_updates.append("filled_price = ?")
+                    entry_params.append(actual_entry_price)
+                if actual_quantity is not None:
+                    entry_updates.extend(["quantity = ?", "filled_quantity = ?"])
+                    entry_params.extend([actual_quantity, actual_quantity])
+                if entry_fill_time is not None:
+                    entry_updates.append("filled_time = ?")
+                    entry_params.append(entry_fill_time)
+                if entry_commission is not None:
+                    entry_updates.append("commission = ?")
+                    entry_params.append(entry_commission)
+                if entry_venue_order_id is not None:
+                    entry_updates.append("exchange_order_id = ?")
+                    entry_params.append(entry_venue_order_id)
+
+                if entry_updates:
+                    entry_updates.append("updated_at = datetime('now')")
+                    entry_params.append(trade_id)
+                    cursor.execute(
+                        f"UPDATE orders SET {', '.join(entry_updates)} "
+                        f"WHERE trade_id = ? AND trade_direction = 'ENTRY'",
+                        entry_params,
+                    )
+
+                # --- Update EXIT order ---
+                exit_updates = []
+                exit_params = []
+
+                if actual_exit_price is not None:
+                    exit_updates.append("filled_price = ?")
+                    exit_params.append(actual_exit_price)
+                if exit_fill_time is not None:
+                    exit_updates.append("filled_time = ?")
+                    exit_params.append(exit_fill_time)
+                if exit_commission is not None:
+                    exit_updates.append("commission = ?")
+                    exit_params.append(exit_commission)
+                if exit_venue_order_id is not None:
+                    exit_updates.append("exchange_order_id = ?")
+                    exit_params.append(exit_venue_order_id)
+
+                if exit_updates:
+                    exit_updates.append("updated_at = datetime('now')")
+                    exit_params.append(trade_id)
+                    cursor.execute(
+                        f"UPDATE orders SET {', '.join(exit_updates)} "
+                        f"WHERE trade_id = ? AND trade_direction = 'EXIT'",
+                        exit_params,
+                    )
+
+                conn.commit()
+
+            logger.info(
+                f"Trade reconciled: {trade_id} | "
+                f"entry={actual_entry_price} exit={actual_exit_price} "
+                f"qty={actual_quantity} comm={eff_total_comm:.2f}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to reconcile trade {trade_id}: {e}")
+            return False
+
+    # =========================================================================
     # MIGRATION HELPERS
     # =========================================================================
     
