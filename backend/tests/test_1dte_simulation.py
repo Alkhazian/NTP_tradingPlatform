@@ -159,6 +159,10 @@ def make():
     s._es_ema_value = None; s._es_vwma_value = None; s._es_sma_value = None
     s._es_current_price = 0.0
     s._es_daily_bar_type = None; s._es_1min_bar_type = None
+    # D-1 / D-2 snapshots (Pine [1]/[2] equivalents)
+    s._es_d1_close = None; s._es_d1_open = None
+    s._es_d1_ema = None; s._es_d1_vwma = None
+    s._es_d2_close = None; s._es_d2_open = None; s._es_d2_ema = None
 
     s.traded_today = False; s.entry_in_progress = False
     s._spread_entry_price = None; s._signal_time = None
@@ -169,7 +173,8 @@ def make():
     s._last_metrics_update_time = None
     s._last_position_log_time = None
     s._position_log_interval_seconds = 30
-    s._macro_clear_today = True; s._strong_reclaim_ok = True; s._two_day_confirmed_ok = True
+    s._macro_clear_today = True; s._ema_ok = True; s._vwma_ok = True
+    s._strong_reclaim_ok = True; s._two_day_confirmed_ok = True
     s._daily_blocked = False
     s._or_breakout_logged = False
 
@@ -225,7 +230,8 @@ def bull(s):
     s._es_vwma_value = sum(a * b for a, b in zip(rc, rv)) / sum(rv)
     s.range_calculated = True; s.or_high = 6100.0; s.daily_high = 6102.0
     s.current_spx_price = 6101.0
-    s._macro_clear_today = True; s._strong_reclaim_ok = True; s._two_day_confirmed_ok = True
+    s._macro_clear_today = True; s._ema_ok = True; s._vwma_ok = True
+    s._strong_reclaim_ok = True; s._two_day_confirmed_ok = True
     s._daily_blocked = False; s._or_breakout_logged = False
     s.traded_today = False; s.entry_in_progress = False; s._closing_in_progress = False
     s.get_effective_spread_quantity.return_value = 0
@@ -259,7 +265,7 @@ def t2():
 
 def t3():
     print("\n═══ 3: ES Bearish Blocks ═══")
-    s = make(); bull(s); s._es_current_price = s._es_ema_value - 50
+    s = make(); bull(s); s._ema_ok = False  # D-1 close below EMA
     s._check_entry_signal(close_price=6102.0)
     ok("no entry", not s.entry_in_progress)
     ok("daily blocked", s._daily_blocked)
@@ -490,7 +496,8 @@ def t21():
 
 def t22():
     print("\n═══ 22: EMA20 fail → _daily_blocked, on_minute_closed no-ops after block ═══")
-    s = make(); bull(s); s._es_current_price = s._es_ema_value - 100  # below EMA
+    s = make(); bull(s)
+    s._ema_ok = False  # Simulate D-1 close below EMA
     s._check_entry_signal(close_price=6102.0)
     ok("daily_blocked set", s._daily_blocked)
     ok("entry not started", not s.entry_in_progress)
@@ -504,7 +511,7 @@ def t22():
 def t23():
     print("\n═══ 23: VWMA14 fail alone → _daily_blocked ═══")
     s = make(); bull(s)
-    s._es_vwma_value = s._es_current_price + 200  # ES below VWMA
+    s._vwma_ok = False  # Simulate D-1 close below VWMA
     s._check_entry_signal(close_price=6102.0)
     ok("daily_blocked", s._daily_blocked)
     ok("no entry", not s.entry_in_progress)

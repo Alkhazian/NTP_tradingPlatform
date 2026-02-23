@@ -88,14 +88,28 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
                         self.logger.warning(f"Invalid macro date: {d}")
 
         # --- ES Indicator State (manual rolling windows) ---
-        self._es_daily_closes: deque = deque(maxlen=max(self.es_ema_period, self.es_vwma_period) + 5)
+        # EMA requires ~250 trading days of history to "warm up" and match TradingView
+        self._es_daily_closes: deque = deque(maxlen=300)
         self._es_daily_volumes: deque = deque(maxlen=self.es_vwma_period + 5)
         self._es_daily_opens: deque = deque(maxlen=5)  # For green candle check
         self._es_1min_closes: deque = deque(maxlen=self.es_sma_period + 5)
-        self._es_ema_value: Optional[float] = None  # Current EMA(20) value
-        self._es_vwma_value: Optional[float] = None  # Current VWMA(14) value
+        self._es_ema_value: Optional[float] = None  # Current EMA(20) value (live, updates intraday)
+        self._es_vwma_value: Optional[float] = None  # Current VWMA(14) value (live, updates intraday)
         self._es_sma_value: Optional[float] = None   # Current SMA(10) 1-min value
         self._es_current_price: float = 0.0
+
+        # --- D-1 snapshots (mirrors Pine Script's [1] indexing) ---
+        # These are frozen at the close of D-1 and never mutated by live intraday
+        # bar updates. Used by _is_strong_reclaim and _is_two_day_confirmed so that
+        # the regime filters always compare against the PRIOR day's confirmed values,
+        # identical to Pine's: pClose = dClose[1] / pEMA20 = dEMA20[1].
+        self._es_d1_close: Optional[float] = None   # D-1 close
+        self._es_d1_open:  Optional[float] = None   # D-1 open  (green-candle check)
+        self._es_d1_ema:   Optional[float] = None   # EMA(20) as of D-1 close
+        self._es_d1_vwma:  Optional[float] = None   # VWMA(14) as of D-1 close
+        self._es_d2_close: Optional[float] = None   # D-2 close
+        self._es_d2_open:  Optional[float] = None   # D-2 open
+        self._es_d2_ema:   Optional[float] = None   # EMA(20) as of D-2 close (two-day check)
 
         # --- Bar Types (set in on_start_safe) ---
         self._es_daily_bar_type = None
@@ -117,6 +131,8 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         self._last_position_log_time: Optional[datetime] = None   # throttle position status logs
         self._position_log_interval_seconds: int = 30
         self._macro_clear_today: bool = True  # Cached daily; set in _reset_daily_state
+        self._ema_ok: bool = False  # Cached; set on ES daily bar (D-1 > EMA)
+        self._vwma_ok: bool = False # Cached; set on ES daily bar (D-1 > VWMA)
         self._strong_reclaim_ok: bool = False  # Cached; set on ES daily bar
         self._two_day_confirmed_ok: bool = False  # Cached; set on ES daily bar
         # Day-blocking flag: set True when a HARD daily filter (EMA20, VWMA14, macro, strong
@@ -183,6 +199,7 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         self._subscribe_es_data()
         self._macro_clear_today = self._is_macro_clear()
 
+
         self.logger.info(
             f"🚀 SPX 1DTE Bull Put Spread STARTED | "
             f"OR={self.opening_range_minutes}m | "
@@ -195,8 +212,19 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
             f"SL={self.stop_loss_pct}% TP={self.take_profit_pct}%"
         )
 
+
+        # Evaluate hard daily filters 15 seconds after startup.
+        # This provides the IB adapter enough time to asynchronously fetch the 365-day backfill
+        # before we declare EMA/VWMA missing and permanently block the day.
+        from datetime import timedelta
+        self.clock.set_time_alert(
+            f"{self.id}_startup_block_eval",
+            self.clock.utc_now() + timedelta(seconds=15),
+            self._evaluate_daily_block_at_open
+        )
+
     def _subscribe_es_data(self):
-        """Subscribe to ES futures bar data."""
+        """Subscribe to ES futures bar data and request historical backfill."""
         try:
             # Check if ES instrument is in cache
             self.es_instrument = self.cache.instrument(self.es_instrument_id)
@@ -207,25 +235,45 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
                 self.request_instrument(self.es_instrument_id)
 
             # Only backfill if state wasn't restored with enough data already.
-            # This avoids firing IB historical data requests (and their per-bar
-            # historicalDataProtoBuf log lines) on every restart.
             need_daily_backfill = len(self._es_daily_closes) < self.es_ema_period
-            need_1min_backfill  = len(self._es_1min_closes) < self.es_sma_period
+
+            # FORCE backfill if we have bars but the restored state is missing the calculated EMA.
+            if not need_daily_backfill and (self._es_d1_ema is None or self._es_d1_vwma is None):
+                self.logger.warning(
+                    f"State restored {len(self._es_daily_closes)} daily closes, but D1 EMA/VWMA is None. "
+                    f"Forcing a fresh backfill to recalculate indicators."
+                )
+                self._es_daily_closes.clear()
+                self._es_daily_opens.clear()
+                self._es_daily_volumes.clear()
+                self._es_ema_value = None
+                self._es_vwma_value = None
+                self._es_d1_close = self._es_d1_open = self._es_d1_ema = self._es_d1_vwma = None
+                self._es_d2_close = self._es_d2_open = self._es_d2_ema = None
+                need_daily_backfill = True
+
+            need_1min_backfill = len(self._es_1min_closes) < self.es_sma_period
 
             from datetime import timedelta
-            end = self.clock.utc_now()
+            now_utc = self.clock.utc_now()
 
             if need_daily_backfill:
-                # EMA(20) needs at least 20 closes + a small buffer → 25 calendar days
-                # covers ~17–18 trading days, enough for a clean warmup.
-                days_back = max(self.es_ema_period + 5, 25)
+                # Specific contracts like ESH6 typically have ~3 months of history.
+                # 60 calendar days ≈ 42 trading days (plenty for EMA20).
+                days_back = 60
+                
+                now_et = now_utc.astimezone(self.tz)
+                end_of_yesterday = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+                end_daily = end_of_yesterday.astimezone(pytz.utc)
+
                 self.request_bars(
                     self._es_daily_bar_type,
-                    start=end - timedelta(days=days_back),
-                    end=end,
+                    start=end_daily - timedelta(days=days_back),
+                    end=end_daily,
                 )
                 self.logger.info(
-                    f"📊 Requesting ES daily backfill | Last {days_back} days "
+                    f"📊 Requesting ES daily backfill | {self._es_daily_bar_type} | "
+                    f"Last {days_back} days ending {end_of_yesterday.date()} "
                     f"(have {len(self._es_daily_closes)}/{self.es_ema_period} closes)"
                 )
             else:
@@ -237,12 +285,10 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
             self.subscribe_bars(self._es_daily_bar_type)
 
             if need_1min_backfill:
-                # SMA(10) 1-min: only need the current session's bars.
-                # 1 calendar day is more than enough.
                 self.request_bars(
                     self._es_1min_bar_type,
-                    start=end - timedelta(days=1),
-                    end=end,
+                    start=now_utc - timedelta(days=1),
+                    end=now_utc,
                 )
                 self.logger.info(
                     f"📊 Requesting ES 1-min backfill | Last 1 day "
@@ -259,7 +305,9 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
 
             self.logger.info(
                 f"📊 ES data subscribed | Daily: {self._es_daily_bar_type} | "
-                f"1min: {self._es_1min_bar_type}"
+                f"1min: {self._es_1min_bar_type} | "
+                f"Persisted: {len(self._es_daily_closes)} daily closes, "
+                f"{len(self._es_1min_closes)} 1min closes"
             )
         except Exception as e:
             self.logger.error(f"Failed to subscribe to ES data: {e}", exc_info=True)
@@ -268,6 +316,14 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
     # BAR HANDLERS — ES1! INDICATOR ENGINE
     # =========================================================================
 
+    def on_historical_data(self, data):
+        """Route historical backfill data to local handlers."""
+        try:
+            if isinstance(data, Bar):
+                self.on_bar(data)
+        except Exception as e:
+            self.logger.error(f"Error processing historical data: {e}", exc_info=True)
+
     def on_bar(self, bar: Bar):
         """Route incoming bars to appropriate handler."""
         try:
@@ -275,6 +331,11 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
                 self._handle_es_daily_bar(bar)
             elif bar.bar_type == self._es_1min_bar_type:
                 self._handle_es_1min_bar(bar)
+            else:
+                self.logger.debug(
+                    f"Unrouted bar | type={bar.bar_type} | "
+                    f"expected daily={self._es_daily_bar_type} 1min={self._es_1min_bar_type}"
+                )
         except Exception as e:
             self.logger.error(f"Error processing bar: {e}", exc_info=True)
 
@@ -284,26 +345,46 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         open_price = float(bar.open)
         volume = float(bar.volume)
 
+        # Snapshot D-1 → becomes D-2 BEFORE appending the new bar.
+        # After appending, current bar becomes D-1.
+        # This mirrors Pine's [1] indexing: the values stored in _es_d2_* were
+        # D-1 at the previous step; the new bar now pushes them back one slot.
+        self._es_d2_close = self._es_d1_close
+        self._es_d2_open  = self._es_d1_open
+        self._es_d2_ema   = self._es_d1_ema  # old D-1 EMA → now D-2 EMA
+
         self._es_daily_closes.append(close)
         self._es_daily_opens.append(open_price)
         self._es_daily_volumes.append(volume)
 
         # Update EMA(20)
-        self._update_ema(close)
+        self._update_ema()
 
         # Update VWMA(14)
         self._update_vwma()
 
+        # Freeze D-1 snapshot = this bar's confirmed values.
+        # Pine: pClose = dClose[1], pEMA20 = dEMA20[1]
+        self._es_d1_close = close
+        self._es_d1_open  = open_price
+        self._es_d1_ema   = self._es_ema_value   # EMA as of THIS close
+        self._es_d1_vwma  = self._es_vwma_value  # VWMA as of THIS close
+
+        ema_str = f"{self._es_ema_value:.2f}" if self._es_ema_value is not None else "N/A"
+        vwma_str = f"{self._es_vwma_value:.2f}" if self._es_vwma_value is not None else "N/A"
         self.logger.info(
             f"📊 ES Daily Bar | Close={close:.2f} Open={open_price:.2f} Vol={volume:.0f} | "
-            f"EMA({self.es_ema_period})={self._es_ema_value:.2f if self._es_ema_value else 'N/A'} | "
-            f"VWMA({self.es_vwma_period})={self._es_vwma_value:.2f if self._es_vwma_value else 'N/A'} | "
+            f"EMA({self.es_ema_period})={ema_str} | "
+            f"VWMA({self.es_vwma_period})={vwma_str} | "
             f"Bars: {len(self._es_daily_closes)}",
             extra={"extra": {"event_type": "es_daily_bar",
                              "close": close, "ema": self._es_ema_value, "vwma": self._es_vwma_value}}
         )
 
         # Re-evaluate daily regime filters (only changes on new daily bars)
+        # If EMA is not ready yet (warmup period), we allow trading to proceed.
+        self._ema_ok = True if self._es_d1_ema is None else (self._es_d1_close > self._es_d1_ema)
+        self._vwma_ok = True if self._es_d1_vwma is None else (self._es_d1_close > self._es_d1_vwma)
         self._strong_reclaim_ok = self._is_strong_reclaim()
         self._two_day_confirmed_ok = self._is_two_day_confirmed()
 
@@ -322,20 +403,36 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
     # INDICATOR CALCULATIONS
     # =========================================================================
 
-    def _update_ema(self, new_close: float):
-        """Update EMA(N) using standard exponential smoothing."""
+    def _update_ema(self):
+        """
+        Recalculate or update EMA(N) using standard exponential smoothing.
+        If self._es_ema_value is None (e.g. after backfill), it computes the EMA
+        by rolling through the ENTIRE deque of historical closes. This "warm-up"
+        period (e.g. 250 bars) is required for the EMA to match TradingView.
+        """
         n = self.es_ema_period
-        if len(self._es_daily_closes) < n:
+        closes = list(self._es_daily_closes)
+        
+        if len(closes) < n:
             self._es_ema_value = None
             return
 
+        multiplier = 2.0 / (n + 1)
+
+        # If we have no prior EMA state, we must roll the EMA from the VERY FIRST
+        # bar in our history deque to properly "warm up" the exponential weights.
         if self._es_ema_value is None:
-            # Seed EMA with SMA of first N closes
-            first_n = list(self._es_daily_closes)[-n:]
-            self._es_ema_value = sum(first_n) / n
+            # Seed the EMA with the SMA of the oldest N bars
+            ema = sum(closes[:n]) / n
+            # Roll it forward through the rest of the historical bars
+            for close_price in closes[n:]:
+                ema = (close_price - ema) * multiplier + ema
+            self._es_ema_value = ema
         else:
-            multiplier = 2.0 / (n + 1)
-            self._es_ema_value = (new_close - self._es_ema_value) * multiplier + self._es_ema_value
+            # We already have a warmed-up EMA; just update it with the newest bar.
+            # (Note: the newest bar is closes[-1], which might be a live intraday update)
+            newest_close = closes[-1]
+            self._es_ema_value = (newest_close - self._es_ema_value) * multiplier + self._es_ema_value
 
     def _update_vwma(self):
         """
@@ -359,47 +456,85 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         self._es_vwma_value = weighted_sum / total_volume
 
     # =========================================================================
+    # SL / TP PRICE HELPER
+    # =========================================================================
+
+    def _compute_sl_tp_prices(self, entry_credit: float):
+        """
+        Calculate stop-loss and take-profit price levels from entry credit.
+
+        Returns:
+            (sl_price, tp_price) — both negative (debit to close).
+        """
+        sl_debit = entry_credit + (entry_credit * self.stop_loss_pct / 100.0)
+        tp_remaining = entry_credit * (1.0 - self.take_profit_pct / 100.0)
+        if tp_remaining < 0.05:
+            tp_remaining = 0.05
+        return -sl_debit, -tp_remaining
+
+    # =========================================================================
     # TREND FILTER CHECKS
     # =========================================================================
 
 
     def _is_strong_reclaim(self) -> bool:
-        """D-1 regime check: prior day close > EMA20 AND green candle."""
+        """
+        D-1 regime check: prior day close > D-1 EMA(20) AND green candle.
+
+        Matches Pine Script exactly:
+            pClose = dClose[1]
+            pEMA20 = dEMA20[1]   ← EMA as of D-1 close, NOT today's live EMA
+            pAboveEma    = pClose > pEMA20
+            pGreenCandle = pClose > dOpen[1]
+            pReclaimOK   = useStrongReclaim ? (pAboveEma and pGreenCandle) : pAboveEma
+        """
         if not self.require_strong_reclaim:
             return True
 
-        if len(self._es_daily_closes) < 2 or len(self._es_daily_opens) < 2:
-            self.logger.debug("Not enough daily bars for strong reclaim check")
-            return False
+        # Use stable D-1 snapshots frozen at prior session's close.
+        # Avoids the ambiguous [-1]/[-2] index (changes once today's live bar
+        # arrives) and EMA drift from intraday bar-in-progress updates.
+        if self._es_d1_close is None or self._es_d1_ema is None:
+            self.logger.debug("D-1 snapshot not ready: bypassing strong reclaim check (warmup)")
+            return True
 
-        # Prior day = second-to-last bar (last bar is current/forming)
-        prev_close = list(self._es_daily_closes)[-2]
-        prev_open = list(self._es_daily_opens)[-2]
-
-        if self._es_ema_value is None:
-            return False
-
-        above_ema = prev_close > self._es_ema_value
-        green_candle = prev_close > prev_open
+        above_ema    = self._es_d1_close > self._es_d1_ema
+        green_candle = self._es_d1_close > (self._es_d1_open or self._es_d1_close)
 
         if not (above_ema and green_candle):
             self.logger.debug(
-                f"Strong reclaim FAILED | PrevClose={prev_close:.2f} PrevOpen={prev_open:.2f} | "
+                f"Strong reclaim FAILED | "
+                f"D1_Close={self._es_d1_close:.2f} D1_Open={self._es_d1_open:.2f} D1_EMA={self._es_d1_ema:.2f} | "
                 f"AboveEMA={'✓' if above_ema else '✗'} Green={'✓' if green_candle else '✗'}"
             )
         return above_ema and green_candle
 
     def _is_two_day_confirmed(self) -> bool:
-        """2 consecutive daily closes above EMA20."""
+        """
+        2 consecutive daily closes above their respective EMA(20).
+
+        Matches Pine Script:
+            pReclaimOK      = pClose[1] > pEMA20[1] and pClose[1] > pOpen[1]
+            pReclaim2DayOK  = pReclaimOK and pReclaimOK[1]  (D-1 and D-2 satisfy)
+        """
         if not self.require_two_day_confirmation:
             return True
 
-        if len(self._es_daily_closes) < 3 or self._es_ema_value is None:
-            return False
+        # If indicators are still warming up, bypass the filter to allow trading
+        if self._es_d1_close is None or self._es_d1_ema is None:
+            return True
+        if self._es_d2_close is None or self._es_d2_ema is None:
+            return True
 
-        closes = list(self._es_daily_closes)
-        # Check D-1 and D-2 (last two completed bars)
-        return closes[-2] > self._es_ema_value and closes[-3] > self._es_ema_value
+        d1_above_ema = self._es_d1_close > self._es_d1_ema
+        d1_green     = self._es_d1_close > (self._es_d1_open or self._es_d1_close)
+        d1_ok        = (d1_above_ema and d1_green) if self.require_strong_reclaim else d1_above_ema
+
+        d2_above_ema = self._es_d2_close > self._es_d2_ema
+        d2_green     = self._es_d2_close > (self._es_d2_open or self._es_d2_close)
+        d2_ok        = (d2_above_ema and d2_green) if self.require_strong_reclaim else d2_above_ema
+
+        return d1_ok and d2_ok
 
     def _is_macro_clear(self) -> bool:
         """Check if today is NOT a macro event day (or day before)."""
@@ -431,19 +566,19 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         now_et = self.clock.utc_now().astimezone(self.tz)
         current_minute = now_et.hour * 60 + now_et.minute
 
-        # ── 5-min heartbeat (Proposal A: shows BLOCKED status) ────────────────
-        if current_minute % 5 == 0 and current_minute != self._last_log_minute:
+        # ── 5-min heartbeat — suppressed when session is already blocked ──────
+        # No point logging status every 5 min if we know it's blocked for the day.
+        if not self._daily_blocked and current_minute % 5 == 0 and current_minute != self._last_log_minute:
             self._last_log_minute = current_minute
             or_str = f"OR_H={self.or_high:.2f}" if self.or_high else "OR pending"
-            ema_str = f"{self._es_ema_value:.2f}" if self._es_ema_value else "N/A"
-            vwma_str = f"{self._es_vwma_value:.2f}" if self._es_vwma_value else "N/A"
-            sma_str = f"{self._es_sma_value:.2f}" if self._es_sma_value else "N/A"
-            blocked_str = " | 🚫 BLOCKED FOR DAY" if self._daily_blocked else ""
+            ema_str = f"{self._es_ema_value:.2f}" if self._es_ema_value is not None else "N/A"
+            vwma_str = f"{self._es_vwma_value:.2f}" if self._es_vwma_value is not None else "N/A"
+            sma_str = f"{self._es_sma_value:.2f}" if self._es_sma_value is not None else "N/A"
             self.logger.info(
                 f"📈 SPX={self.current_spx_price:.2f} Close={close_price:.2f} | "
                 f"{or_str} | ES={self._es_current_price:.2f} "
                 f"EMA={ema_str} VWMA={vwma_str} SMA={sma_str} | "
-                f"Traded={self.traded_today} Entry={self.entry_in_progress}{blocked_str}"
+                f"Traded={self.traded_today} Entry={self.entry_in_progress}"
             )
 
         # ── Entry evaluation ──────────────────────────────────────────────────
@@ -482,16 +617,17 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
             return
 
         # ── Hard daily filters — block for the rest of the session on failure ─
-        es_price = self._es_current_price
-        ema_ok    = self._es_ema_value  is not None and es_price > self._es_ema_value
-        vwma_ok   = self._es_vwma_value is not None and es_price > self._es_vwma_value
+        # Pine targets D-1 data for these checks, not intraday ES vs live indicators.
+        # These are pre-calculated once per daily bar in _handle_es_daily_bar().
+        ema_ok    = self._ema_ok
+        vwma_ok   = self._vwma_ok
         macro_ok  = self._macro_clear_today
         reclaim_ok = self._strong_reclaim_ok
         two_day_ok = self._two_day_confirmed_ok  # disabled by default; True when disabled
 
         if not (ema_ok and vwma_ok and macro_ok and reclaim_ok and two_day_ok):
             # Log each failing filter at INFO so it's visible in production logs
-            if self._es_ema_value is None:
+            if self._es_d1_ema is None:
                 self.logger.info(
                     f"🚫 DAILY BLOCK | EMA{self.es_ema_period} not ready "
                     f"(need {self.es_ema_period} daily bars, have {len(self._es_daily_closes)})"
@@ -499,9 +635,9 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
             elif not ema_ok:
                 self.logger.info(
                     f"🚫 DAILY BLOCK | EMA{self.es_ema_period} failed | "
-                    f"ES={es_price:.2f} ≤ EMA={self._es_ema_value:.2f}"
+                    f"D1_Close={self._es_d1_close:.2f} ≤ D1_EMA={self._es_d1_ema:.2f}"
                 )
-            if self._es_vwma_value is None:
+            if self._es_d1_vwma is None:
                 self.logger.info(
                     f"🚫 DAILY BLOCK | VWMA{self.es_vwma_period} not ready "
                     f"(need {self.es_vwma_period} daily bars)"
@@ -509,7 +645,7 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
             elif not vwma_ok:
                 self.logger.info(
                     f"🚫 DAILY BLOCK | VWMA{self.es_vwma_period} failed | "
-                    f"ES={es_price:.2f} ≤ VWMA={self._es_vwma_value:.2f}"
+                    f"D1_Close={self._es_d1_close:.2f} ≤ D1_VWMA={self._es_d1_vwma:.2f}"
                 )
             if not macro_ok:
                 self.logger.info(
@@ -556,6 +692,7 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
             )
 
         # ── SMA10 (1-min) — soft filter, re-evaluates each minute ─────────────
+        es_price = self._es_current_price
         if self._es_sma_value is None or es_price <= self._es_sma_value:
             sma_str = f"{self._es_sma_value:.2f}" if self._es_sma_value else "not ready"
             self.logger.info(
@@ -828,12 +965,7 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
                 entry_premium = abs(rounded_limit) * 100  # dollars per spread
 
                 # SL/TP price levels for the trade record
-                sl_debit = abs(rounded_limit) + abs(rounded_limit) * self.stop_loss_pct / 100.0
-                entry_stop_loss = -sl_debit
-                tp_remaining = abs(rounded_limit) * (1.0 - self.take_profit_pct / 100.0)
-                if tp_remaining < 0.05:
-                    tp_remaining = 0.05
-                entry_target_price = -tp_remaining
+                entry_stop_loss, entry_target_price = self._compute_sl_tp_prices(abs(rounded_limit))
 
                 max_profit = entry_premium * self.config_quantity
                 spread_width_pts = abs(short_strike - long_strike) if short_strike and long_strike else 50
@@ -1003,12 +1135,7 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         pnl_per_spread = (entry_credit - current_cost) * 100
 
         # Calculate SL/TP prices
-        sl_debit = entry_credit + (entry_credit * self.stop_loss_pct / 100.0)
-        sl_price = -sl_debit  # Negative (debit to close)
-        tp_remaining = entry_credit * (1.0 - self.take_profit_pct / 100.0)
-        if tp_remaining < 0.05:
-            tp_remaining = 0.05
-        tp_price = -tp_remaining  # Negative (debit to close)
+        sl_price, tp_price = self._compute_sl_tp_prices(entry_credit)
 
         # Track trade metrics (max drawdown, P&L snapshots) — throttled to 30s
         total_pnl = pnl_per_spread * abs(position_qty)
@@ -1169,7 +1296,11 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
             order = self.cache.order(order_id_to_check)
             if order and hasattr(order, "avg_px") and order.avg_px is not None:
                 avg_px_val = order.avg_px.as_double() if hasattr(order.avg_px, "as_double") else float(order.avg_px)
-                if abs(avg_px_val) <= 5.0:
+                # Spread credit/debit prices are normally < $5.00 for this strategy.
+                # If avg_px > 5.00, it's likely a bug or a raw aggregate strike price
+                # rather than the actual filled option premium. Fall back to event.last_px.
+                MAX_EXPECTED_SPREAD_PRICE = 5.0
+                if abs(avg_px_val) <= MAX_EXPECTED_SPREAD_PRICE:
                     fill_price = avg_px_val
             if fill_price == 0.0:
                 fill_price = event.last_px.as_double() if hasattr(event.last_px, "as_double") else float(event.last_px)
@@ -1179,12 +1310,7 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         final_pnl = (entry_credit - current_cost) * 100
 
         # Determine exit reason
-        sl_debit = entry_credit + (entry_credit * self.stop_loss_pct / 100.0)
-        sl_price = -sl_debit
-        tp_remaining = entry_credit * (1.0 - self.take_profit_pct / 100.0)
-        if tp_remaining < 0.05:
-            tp_remaining = 0.05
-        tp_price = -tp_remaining
+        sl_price, tp_price = self._compute_sl_tp_prices(entry_credit)
 
         if fill_price <= sl_price:
             exit_reason = "STOP_LOSS"
@@ -1403,7 +1529,7 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
                     else:
                         self._trading_data.delete_trade(self._current_trade_id)
                 self._current_trade_id = None
-            
+
             self._total_commission = 0.0
             self._processed_executions = set()
         else:
@@ -1419,6 +1545,63 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
             extra={"extra": {"event_type": "new_trading_day", "date": str(new_date), "macro_clear": self._macro_clear_today}}
         )
         self._notify(f"📅 NEW TRADING DAY: {new_date} | Macro={'CLEAR' if self._macro_clear_today else 'BLOCKED'}")
+
+        # ── Early-day hard-filter evaluation ─────────────────────────────────
+        # Check EMA20, VWMA14, strong reclaim, and two-day confirmation right
+        # at the start of the session (using yesterday's closed daily bar data).
+        # If any hard filter fails NOW, block the day immediately so we never
+        # reach _check_entry_signal() unnecessarily.
+        self._evaluate_daily_block_at_open()
+
+    def _evaluate_daily_block_at_open(self, event=None):
+        """
+        Run hard daily filter checks at the start of each trading day.
+        Sets _daily_blocked=True immediately if EMA20, VWMA14, strong reclaim,
+        or two-day confirmation is not satisfied. This avoids the first call to
+        _check_entry_signal() having to discover the block.
+        Called at the end of _reset_daily_state() and from on_start_safe() (via timer).
+        """
+        fail_reasons = []
+        warnings = []
+        
+        # Check warmup status first to generate warnings, but _ema_ok handles the actual pass logic
+        if self._es_d1_ema is None:
+            warnings.append(f"EMA{self.es_ema_period} warming up ({len(self._es_daily_closes)}/{self.es_ema_period} bars) → ALLOWING TRADE")
+        elif not self._ema_ok:
+            fail_reasons.append(f"EMA{self.es_ema_period} failed (D1_Close={self._es_d1_close:.2f} ≤ EMA={self._es_d1_ema:.2f})")
+            
+        if self._es_d1_vwma is None:
+            warnings.append(f"VWMA{self.es_vwma_period} warming up ({len(self._es_daily_closes)}/{self.es_vwma_period} bars) → ALLOWING TRADE")
+        elif not self._vwma_ok:
+            fail_reasons.append(f"VWMA{self.es_vwma_period} failed (D1_Close={self._es_d1_close:.2f} ≤ VWMA={self._es_d1_vwma:.2f})")
+            
+        if not self._macro_clear_today:
+            fail_reasons.append("Macro event date")
+        if not self._strong_reclaim_ok:
+            fail_reasons.append(f"Strong reclaim not met")
+        if not self._two_day_confirmed_ok:
+            fail_reasons.append(f"Two-day confirmation not met")
+
+        if fail_reasons:
+            self._daily_blocked = True
+            reasons_str = " | ".join(fail_reasons)
+            self.logger.info(
+                f"🚫 DAILY BLOCK AT OPEN | {reasons_str}",
+                extra={"extra": {"event_type": "daily_block_at_open", "reasons": fail_reasons}}
+            )
+            self._notify(
+                f"🚫 BLOCKED FOR DAY | {reasons_str}"
+            )
+            self.save_state()
+        else:
+            ema_str = f"{self._es_d1_ema:.2f}" if self._es_d1_ema is not None else "N/A"
+            vwma_str = f"{self._es_d1_vwma:.2f}" if self._es_d1_vwma is not None else "N/A"
+            warn_str = f" | ⚠️ {' | '.join(warnings)}" if warnings else ""
+            self.logger.info(
+                f"✅ DAILY FILTERS OK | D1_EMA={ema_str} D1_VWMA={vwma_str} "
+                f"Macro=CLEAR Reclaim=OK TwoDay=OK{warn_str}",
+                extra={"extra": {"event_type": "daily_filters_ok", "warnings": warnings}}
+            )
 
     def get_state(self) -> Dict[str, Any]:
         """Return strategy state for persistence."""
@@ -1441,6 +1624,18 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
             "_es_1min_closes": list(self._es_1min_closes),
             "_daily_blocked": self._daily_blocked,
             "_or_breakout_logged": self._or_breakout_logged,
+            "_ema_ok": self._ema_ok,
+            "_vwma_ok": self._vwma_ok,
+            "_strong_reclaim_ok": self._strong_reclaim_ok,
+            "_two_day_confirmed_ok": self._two_day_confirmed_ok,
+            # D-1 snapshots (Pine pClose[1] / pEMA20[1] equivalents)
+            "_es_d1_close": self._es_d1_close,
+            "_es_d1_open":  self._es_d1_open,
+            "_es_d1_ema":   self._es_d1_ema,
+            "_es_d1_vwma":  self._es_d1_vwma,
+            "_es_d2_close": self._es_d2_close,
+            "_es_d2_open":  self._es_d2_open,
+            "_es_d2_ema":   self._es_d2_ema,
         })
         return state
 
@@ -1460,6 +1655,18 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         self._es_sma_value = state.get("_es_sma_value")
         self._daily_blocked = state.get("_daily_blocked", False)
         self._or_breakout_logged = state.get("_or_breakout_logged", False)
+        self._ema_ok = state.get("_ema_ok", False)
+        self._vwma_ok = state.get("_vwma_ok", False)
+        self._strong_reclaim_ok = state.get("_strong_reclaim_ok", False)
+        self._two_day_confirmed_ok = state.get("_two_day_confirmed_ok", False)
+        # D-1 snapshots
+        self._es_d1_close = state.get("_es_d1_close")
+        self._es_d1_open  = state.get("_es_d1_open")
+        self._es_d1_ema   = state.get("_es_d1_ema")
+        self._es_d1_vwma  = state.get("_es_d1_vwma")
+        self._es_d2_close = state.get("_es_d2_close")
+        self._es_d2_open  = state.get("_es_d2_open")
+        self._es_d2_ema   = state.get("_es_d2_ema")
 
         for c in state.get("_es_daily_closes", []):
             self._es_daily_closes.append(c)
@@ -1470,11 +1677,13 @@ class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
         for c in state.get("_es_1min_closes", []):
             self._es_1min_closes.append(c)
 
+        d1_ema_str = f"{self._es_d1_ema:.2f}" if self._es_d1_ema is not None else "N/A"
         self.logger.info(
             f"State restored | Traded={self.traded_today} | "
             f"Entry={self._spread_entry_price} | "
             f"EMA={self._es_ema_value} VWMA={self._es_vwma_value} SMA={self._es_sma_value} | "
-            f"Daily Closes={len(self._es_daily_closes)}",
+            f"Daily Closes={len(self._es_daily_closes)} | "
+            f"D1_Close={self._es_d1_close} D1_EMA={d1_ema_str}",
             extra={"extra": {"event_type": "state_restored"}}
         )
 
