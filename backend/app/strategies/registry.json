@@ -1,7 +1,12 @@
 [
     {
-        "strategy_type": "SPX15MinRangeStrategy",
-        "module": "app.strategies.implementations.SPX_15Min_Range",
-        "class_name": "SPX15MinRangeStrategy"
+        "strategy_type": "SPXRangeStrategy",
+        "module": "app.strategies.implementations.SPX_Range_Strategy",
+        "class_name": "SPXRangeStrategy"
+    },
+    {
+        "strategy_type": "SPX1DTEBullPutStrategy",
+        "module": "app.strategies.implementations.SPX_1DTE_Bull_Put",
+        "class_name": "SPX1DTEBullPutStrategy"
     }
 ]

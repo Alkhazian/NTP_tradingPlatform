@@ -156,6 +156,5 @@ class CustomInteractiveBrokersLiveDataClientFactory(InteractiveBrokersLiveDataCl
             config=config,
             name=name,
             connection_timeout=config.connection_timeout,
-            request_timeout=config.request_timeout,
         )
         return data_client

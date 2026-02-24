@@ -138,7 +138,7 @@ export function Sidebar({ className, children, isOpen, onClose, onLogout }: Side
                             <Icons.activity className="w-6 h-6 text-white" />
                         </div>
                         <div>
-                            <h2 className="font-bold text-lg">NTD Trader</h2>
+                            <h2 className="font-bold text-lg">NTP Trader</h2>
                             <p className="text-xs text-muted-foreground">Dashboard v1.0</p>
                         </div>
                     </div>

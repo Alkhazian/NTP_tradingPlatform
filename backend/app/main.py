@@ -49,6 +49,12 @@ for logger_name in ["uvicorn", "uvicorn.error", "nautilus_trader"]:
 logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+# Silence IB API internal loggers — these emit one INFO line per protobuf bar received
+# (e.g. "ANSWER historicalDataProtoBuf") which floods logs during historical data backfill
+logging.getLogger("ibapi").setLevel(logging.WARNING)
+logging.getLogger("ibapi.utils").setLevel(logging.WARNING)
+logging.getLogger("ibapi.client").setLevel(logging.WARNING)
+logging.getLogger("ibapi.decoder").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 logger.info("--- Log Stream Initialized ---")

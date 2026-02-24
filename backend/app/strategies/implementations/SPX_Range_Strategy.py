@@ -40,9 +40,9 @@ from app.strategies.config import StrategyConfig
 from app.services.trading_data_service import TradingDataService
 from app.services.telegram_service import TelegramNotificationService
 
-class SPX15MinRangeStrategy(SPXBaseStrategy):
+class SPXRangeStrategy(SPXBaseStrategy):
     """
-    SPX 15-Minute Range Breakout Strategy.
+    SPX Range Breakout Strategy.
     
     Works exclusively on ticks:
     1. Builds range (High/Low) from ticks during opening period
@@ -53,6 +53,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
     - timezone: str (default "US/Eastern")
     - start_time_str: str (default "09:30:00")
     - window_minutes: int (default 15)
+    - dte: int (default 0) - days to expiry (0=today, 1=next trading day)
     - entry_cutoff_time_str: str (default "12:00:00") - no entries after this time
     - min_credit_amount: float (default 50.0) - minimum credit in dollars
     - quantity: int (default 2) - number of spreads
@@ -119,7 +120,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         if hasattr(self, 'telegram'):
             # The service handles its own background threading
             self.logger.info(f"Triggering Telegram notification: {message[:50]}...")
-            self.telegram.send_message(f"{message}")
+            self.telegram.send_message(f"[{self.strategy_id}] {message}")
         else:
             self.logger.warning("Telegram service not initialized, skipping notification")      
 
@@ -146,6 +147,9 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         entry_cutoff_str = params.get("entry_cutoff_time_str", "12:00:00")
         self.entry_cutoff_time = datetime.strptime(entry_cutoff_str, "%H:%M:%S").time()
         
+        # Expiry control
+        self.dte = int(params.get("dte", 0))
+        
         # Entry parameters
         self.min_credit_amount = float(params.get("min_credit_amount", 50.0))
         self.config_quantity = int(self.strategy_config.order_size)
@@ -169,15 +173,16 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         range_end_time = "Range Close" # Will be calculated/logged by base
         
         self.logger.info(
-            f"🚀 SPX15MinRangeStrategy STARTING | {self.tz} | Window: {self.start_time}-{range_end_time} | Cutoff: {self.entry_cutoff_time}",
+            f"🚀 {self.strategy_id} STARTED | {self.tz} | Window: {self.start_time}-{range_end_time} | Cutoff: {self.entry_cutoff_time} | DTE: {self.dte}",
             extra={
                 "extra": {
                     "event_type": "strategy_start",
-                    "strategy": "SPX15MinRangeStrategy",
+                    "strategy": "SPXRangeStrategy",
                     "full_config": self.strategy_config.dict(),
                     "timezone": str(self.tz),
                     "start_time": str(self.start_time),
                     "window_minutes": self.opening_range_minutes,
+                    "dte": self.dte,
                     "entry_cutoff": str(self.entry_cutoff_time),
                     "min_credit": self.min_credit_amount,
                     "quantity": self.config_quantity,
@@ -188,7 +193,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
             }
         )
         self._notify(
-            f"🚀 SPX15MinRangeStrategy STARTING | {self.tz} | Window: {self.start_time}-{range_end_time} | Cutoff: {self.entry_cutoff_time}"
+            f"🚀 STARTED | {self.tz} | Window: {self.start_time}-{range_end_time} | Cutoff: {self.entry_cutoff_time} | DTE: {self.dte}"
         )
 
     def on_spx_ready(self):
@@ -478,8 +483,29 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self.entry_in_progress = True
         self._found_legs.clear()  # Reset found legs
         
-        # Calculate strike prices based on direction
-        today_str = self.clock.utc_now().date().strftime("%Y%m%d")
+        # Calculate expiry date based on DTE config
+        today = self.clock.utc_now().astimezone(self.tz).date()
+        if self.dte == 0:
+            expiry_date = today
+        else:
+            expiry_date = today + timedelta(days=self.dte)
+            while expiry_date.weekday() >= 5:  # 5=Saturday, 6=Sunday
+                expiry_date += timedelta(days=1)
+        
+        expiry_str = expiry_date.strftime("%Y%m%d")
+        
+        self.logger.info(
+            f"📅 EXPIRY CALCULATED | DTE: {self.dte} | Expiry Date: {expiry_date} ({expiry_str})",
+            extra={
+                "extra": {
+                    "event_type": "expiry_calculated",
+                    "dte": self.dte,
+                    "today": str(today),
+                    "expiry_date": str(expiry_date),
+                    "expiry_str": expiry_str
+                }
+            }
+        )
         
         if self._signal_direction == 'bearish':
             # CALL CREDIT SPREAD: Short strike above High, Long strike higher
@@ -519,7 +545,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
                 "tradingClass": "SPXW",
                 "exchange": "CBOE",
                 "currency": "USD",
-                "lastTradeDateOrContractMonth": today_str,
+                "lastTradeDateOrContractMonth": expiry_str,
                 "strike": float(strike),
                 "right": option_right,
                 "multiplier": "100"
@@ -570,7 +596,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         self._expected_instrument_ids = []
         
         # Convert YYYYMMDD to YYMMDD (IB uses 2-digit year format)
-        expiry_yy = today_str[2:]  # "20260121" -> "260121"
+        expiry_yy = expiry_str[2:]  # e.g. "20260121" -> "260121"
         
         for strike in [self._target_short_strike, self._target_long_strike]:
             # Format: SPXW260121P06810000.CBOE
@@ -1976,7 +2002,7 @@ class SPX15MinRangeStrategy(SPXBaseStrategy):
         
         super().on_stop_safe()
         self.logger.info(
-            "🛑 SPX15MinRangeStrategy stopped",
+            f"🛑 {self.strategy_id} stopped",
             extra={
                 "extra": {
                     "event_type": "strategy_stopped_final"

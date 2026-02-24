@@ -1,4 +1,4 @@
-# NTD - Trader Dashboard
+# NTP - Trader Platform
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Alkhazian/NTP_tradingPlatform)
 
