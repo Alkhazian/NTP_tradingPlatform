@@ -571,8 +571,8 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
         if not self._daily_blocked and current_minute % 5 == 0 and current_minute != self._last_log_minute:
             self._last_log_minute = current_minute
             or_str = f"OR_H={self.or_high:.2f}" if self.or_high else "OR pending"
-            ema_str = f"{self._es_ema_value:.2f}" if self._es_ema_value is not None else "N/A"
-            vwma_str = f"{self._es_vwma_value:.2f}" if self._es_vwma_value is not None else "N/A"
+            ema_str = f"{self._es_d1_ema:.2f}" if self._es_d1_ema is not None else "N/A"
+            vwma_str = f"{self._es_d1_vwma:.2f}" if self._es_d1_vwma is not None else "N/A"
             sma_str = f"{self._es_sma_value:.2f}" if self._es_sma_value is not None else "N/A"
             self.logger.info(
                 f"📈 SPX={self.current_spx_price:.2f} Close={close_price:.2f} | "
@@ -619,33 +619,23 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
         # ── Hard daily filters — block for the rest of the session on failure ─
         # Pine targets D-1 data for these checks, not intraday ES vs live indicators.
         # These are pre-calculated once per daily bar in _handle_es_daily_bar().
-        ema_ok    = self._ema_ok
-        vwma_ok   = self._vwma_ok
+        ema_ready = self._es_d1_ema is not None
+        vwma_ready = self._es_d1_vwma is not None
         macro_ok  = self._macro_clear_today
         reclaim_ok = self._strong_reclaim_ok
         two_day_ok = self._two_day_confirmed_ok  # disabled by default; True when disabled
 
-        if not (ema_ok and vwma_ok and macro_ok and reclaim_ok and two_day_ok):
+        if not (ema_ready and vwma_ready and macro_ok and reclaim_ok and two_day_ok):
             # Log each failing filter at INFO so it's visible in production logs
-            if self._es_d1_ema is None:
+            if not ema_ready:
                 self.logger.info(
                     f"🚫 DAILY BLOCK | EMA{self.es_ema_period} not ready "
                     f"(need {self.es_ema_period} daily bars, have {len(self._es_daily_closes)})"
                 )
-            elif not ema_ok:
-                self.logger.info(
-                    f"🚫 DAILY BLOCK | EMA{self.es_ema_period} failed | "
-                    f"D1_Close={self._es_d1_close:.2f} ≤ D1_EMA={self._es_d1_ema:.2f}"
-                )
-            if self._es_d1_vwma is None:
+            if not vwma_ready:
                 self.logger.info(
                     f"🚫 DAILY BLOCK | VWMA{self.es_vwma_period} not ready "
                     f"(need {self.es_vwma_period} daily bars)"
-                )
-            elif not vwma_ok:
-                self.logger.info(
-                    f"🚫 DAILY BLOCK | VWMA{self.es_vwma_period} failed | "
-                    f"D1_Close={self._es_d1_close:.2f} ≤ D1_VWMA={self._es_d1_vwma:.2f}"
                 )
             if not macro_ok:
                 self.logger.info(
@@ -664,8 +654,9 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
             self._daily_blocked = True
             self._notify(
                 f"🚫 STRATEGY BLOCKED FOR DAY | "
-                f"EMA={'✓' if ema_ok else '✗'} VWMA={'✓' if vwma_ok else '✗'} "
-                f"Macro={'✓' if macro_ok else '✗'} Reclaim={'✓' if reclaim_ok else '✗'}"
+                f"EMA Ready={'✓' if ema_ready else '✗'} VWMA Ready={'✓' if vwma_ready else '✗'} "
+                f"Macro={'✓' if macro_ok else '✗'} Reclaim={'✓' if reclaim_ok else '✗'} "
+                f"Two-Day={'✓' if two_day_ok else '✗'}"
             )
             self.save_state()
             return
@@ -686,18 +677,35 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
             self._or_breakout_logged = True
             self.logger.info(
                 f"📊 OR BREAKOUT CONFIRMED | Close={close_price:.2f} > OR={self.or_high:.2f} | "
-                f"Hard filters all passed | Waiting for SMA{self.es_sma_period} confirmation",
+                f"Hard filters all passed | Waiting for EMA{self.es_ema_period}, VWMA{self.es_vwma_period}, SMA{self.es_sma_period} confirmation",
                 extra={"extra": {"event_type": "or_breakout_confirmed",
                                  "close": close_price, "or_high": self.or_high}}
             )
 
-        # ── SMA10 (1-min) — soft filter, re-evaluates each minute ─────────────
+        # ── EMA, VWMA, SMA10 (1-min) — soft filters, re-evaluates each minute ─────────────
         es_price = self._es_current_price
+
+        if self._es_d1_ema is None or es_price <= self._es_d1_ema:
+            ema_str = f"{self._es_d1_ema:.2f}" if self._es_d1_ema else "not ready"
+            self.logger.info(
+                f"⏳ WAITING | Daily EMA{self.es_ema_period} not met | "
+                f"ES(1m)={es_price:.2f} vs Daily EMA={ema_str} | Will retry next minute"
+            )
+            return
+
+        if self._es_d1_vwma is None or es_price <= self._es_d1_vwma:
+            vwma_str = f"{self._es_d1_vwma:.2f}" if self._es_d1_vwma else "not ready"
+            self.logger.info(
+                f"⏳ WAITING | Daily VWMA{self.es_vwma_period} not met | "
+                f"ES(1m)={es_price:.2f} vs Daily VWMA={vwma_str} | Will retry next minute"
+            )
+            return
+
         if self._es_sma_value is None or es_price <= self._es_sma_value:
             sma_str = f"{self._es_sma_value:.2f}" if self._es_sma_value else "not ready"
             self.logger.info(
                 f"⏳ WAITING | SMA{self.es_sma_period}(1m) not met | "
-                f"ES={es_price:.2f} vs SMA={sma_str} | Will retry next minute"
+                f"ES(1m)={es_price:.2f} vs SMA={sma_str} | Will retry next minute"
             )
             return
 
@@ -705,8 +713,8 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
         self.logger.info(
             f"🔥 ALL ENTRY CONDITIONS MET | "
             f"SPX Close={close_price:.2f} > OR={self.or_high:.2f} | "
-            f"ES={es_price:.2f} > EMA={self._es_ema_value:.2f} "
-            f"VWMA={self._es_vwma_value:.2f} SMA={self._es_sma_value:.2f}",
+            f"ES={es_price:.2f} > Daily EMA={self._es_d1_ema:.2f} "
+            f"Daily VWMA={self._es_d1_vwma:.2f} SMA(1m)={self._es_sma_value:.2f}",
             extra={"extra": {"event_type": "entry_signal",
                              "spx_close": close_price, "or_high": self.or_high,
                              "es_price": es_price}}
@@ -1556,24 +1564,20 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
     def _evaluate_daily_block_at_open(self, event=None):
         """
         Run hard daily filter checks at the start of each trading day.
-        Sets _daily_blocked=True immediately if EMA20, VWMA14, strong reclaim,
-        or two-day confirmation is not satisfied. This avoids the first call to
+        Sets _daily_blocked=True immediately if EMA/VWMA are not ready, strong reclaim, 
+        macro filter, or two-day confirmation is not satisfied. This avoids the first call to
         _check_entry_signal() having to discover the block.
         Called at the end of _reset_daily_state() and from on_start_safe() (via timer).
         """
         fail_reasons = []
         warnings = []
         
-        # Check warmup status first to generate warnings, but _ema_ok handles the actual pass logic
+        # Block if indicators are not ready yet
         if self._es_d1_ema is None:
-            warnings.append(f"EMA{self.es_ema_period} warming up ({len(self._es_daily_closes)}/{self.es_ema_period} bars) → ALLOWING TRADE")
-        elif not self._ema_ok:
-            fail_reasons.append(f"EMA{self.es_ema_period} failed (D1_Close={self._es_d1_close:.2f} ≤ EMA={self._es_d1_ema:.2f})")
+            fail_reasons.append(f"EMA{self.es_ema_period} not ready ({len(self._es_daily_closes)}/{self.es_ema_period} bars)")
             
         if self._es_d1_vwma is None:
-            warnings.append(f"VWMA{self.es_vwma_period} warming up ({len(self._es_daily_closes)}/{self.es_vwma_period} bars) → ALLOWING TRADE")
-        elif not self._vwma_ok:
-            fail_reasons.append(f"VWMA{self.es_vwma_period} failed (D1_Close={self._es_d1_close:.2f} ≤ VWMA={self._es_d1_vwma:.2f})")
+            fail_reasons.append(f"VWMA{self.es_vwma_period} not ready ({len(self._es_daily_closes)}/{self.es_vwma_period} bars)")
             
         if not self._macro_clear_today:
             fail_reasons.append("Macro event date")

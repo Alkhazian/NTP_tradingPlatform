@@ -22,7 +22,7 @@
         "entry_price_adjustment": 0.5,
         "entry_timeout_seconds": 60,
         "fill_timeout_seconds": 600,
-        "require_strong_reclaim": true,
+        "require_strong_reclaim": false,
         "require_two_day_confirmation": false,
         "enable_macro_filter": false,
         "macro_day_before": false,
