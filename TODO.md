@@ -25,7 +25,7 @@
 - [x] [Options] SPX ORB 15 min long call - search strike using $ value 
 - [x] [Options] SPX ORB 15 min long put - search strike using $ value
 - [x] [Options] SPX ORB 15 min 5 size with vertical credit spreads (call credit and put credit)
-- [ ] [Options] SPX ORB 60 min 10 size with vertical credit spreads §(call credit and put credit)
+- [x] [Options] SPX ORB 60 min 10 size with vertical credit spreads §(call credit and put credit)
 - [ ] [Futures] MNQ ORB 5 min + Fair Value Gap (FVG)
 
 
