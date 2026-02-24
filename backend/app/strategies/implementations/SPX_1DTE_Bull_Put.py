@@ -28,7 +28,7 @@ from app.services.trading_data_service import TradingDataService
 from app.services.telegram_service import TelegramNotificationService
 
 
-class SPX1DTEBullPutSpreadStrategy(SPXBaseStrategy):
+class SPX1DTEBullPutStrategy(SPXBaseStrategy):
     """
     1DTE Bull Put Spread strategy for bullish markets.
 

@@ -1,9 +1,9 @@
 {
-    "id": "spx_1dte_bull_put_spread",
-    "name": "SPX 1DTE Bull Put Spread",
+    "id": "spx_30min_1dte_bull_only",
+    "name": "SPX 1DTE ORB30 Bull Only",
     "enabled": true,
     "instrument_id": "^SPX.CBOE",
-    "strategy_type": "SPX1DTEBullPutSpreadStrategy",
+    "strategy_type": "SPX1DTEBullPutStrategy",
     "order_size": 1,
     "parameters": {
         "timezone": "US/Eastern",
