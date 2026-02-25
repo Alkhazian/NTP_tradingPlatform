@@ -110,6 +110,14 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self._pending_close_data: Optional[Dict] = None  # Deferred DB write data (50ms window)
         self._entry_commission: float = 0.0  # Entry commission for cross-validation at close
         
+        # Spread quote liquidity filter
+        # Quotes with bid_size or ask_size <= MIN_QUOTE_SIZE are considered unreliable
+        # (thin liquidity can produce wildly inaccurate bid/ask prices)
+        self.MIN_QUOTE_SIZE: int = 2
+        self.MAX_CONSECUTIVE_SKIPS: int = 30  # Safety valve: accept after N consecutive skips
+        self._last_valid_spread_quote: Optional[QuoteTick] = None
+        self._skipped_quote_count: int = 0
+        
         # Calculate range end time for logging
         range_end_time = "Range Close" # Will be calculated/logged by base
         
@@ -847,8 +855,75 @@ class SPXRangeStrategy(SPXBaseStrategy):
         )
         # Entry will happen in _process_spread_tick when we get a quote
 
+    def _is_valid_spread_quote(self, quote: QuoteTick) -> bool:
+        """
+        Check if spread quote has sufficient liquidity to be trusted.
+        
+        Quotes with very small bid_size or ask_size (<=2) often have
+        wildly inaccurate prices due to temporary market maker withdrawal.
+        These can falsely trigger stop losses.
+        """
+        bid_size = int(quote.bid_size.as_double())
+        ask_size = int(quote.ask_size.as_double())
+        return bid_size > self.MIN_QUOTE_SIZE and ask_size > self.MIN_QUOTE_SIZE
+
     def _process_spread_tick(self, tick: QuoteTick):
         """Process spread ticks for entry and position management."""
+        # Liquidity filter: skip quotes with very thin bid/ask sizes
+        if not self._is_valid_spread_quote(tick):
+            self._skipped_quote_count += 1
+            bid_size = int(tick.bid_size.as_double())
+            ask_size = int(tick.ask_size.as_double())
+            bid = tick.bid_price.as_double()
+            ask = tick.ask_price.as_double()
+            
+            # Safety valve: after MAX_CONSECUTIVE_SKIPS, accept the quote anyway
+            # to avoid being completely blind if the market stays thin
+            if self._skipped_quote_count >= self.MAX_CONSECUTIVE_SKIPS:
+                self.logger.warning(
+                    f"⚠️ LIQUIDITY FILTER OVERRIDE | Accepting thin quote after {self._skipped_quote_count} consecutive skips "
+                    f"| Bid: {bid:.4f} (size={bid_size}) | Ask: {ask:.4f} (size={ask_size})",
+                    extra={
+                        "extra": {
+                            "event_type": "quote_filter_override",
+                            "skipped_count": self._skipped_quote_count,
+                            "bid": bid, "ask": ask,
+                            "bid_size": bid_size, "ask_size": ask_size
+                        }
+                    }
+                )
+                # Fall through to process the tick
+            else:
+                # Log first skip and then every 5th skip to avoid log spam
+                if self._skipped_quote_count == 1 or self._skipped_quote_count % 5 == 0:
+                    self.logger.info(
+                        f"🔇 QUOTE SKIPPED (thin liquidity) | #{self._skipped_quote_count} "
+                        f"| Bid: {bid:.4f} (size={bid_size}) | Ask: {ask:.4f} (size={ask_size})",
+                        extra={
+                            "extra": {
+                                "event_type": "quote_skipped_thin_liquidity",
+                                "skipped_count": self._skipped_quote_count,
+                                "bid": bid, "ask": ask,
+                                "bid_size": bid_size, "ask_size": ask_size
+                            }
+                        }
+                    )
+                return
+        
+        # Valid quote - reset skip counter and store
+        if self._skipped_quote_count > 0:
+            self.logger.info(
+                f"✅ QUOTE RESTORED | Skipped {self._skipped_quote_count} thin quotes before valid quote",
+                extra={
+                    "extra": {
+                        "event_type": "quote_restored",
+                        "skipped_count": self._skipped_quote_count
+                    }
+                }
+            )
+        self._skipped_quote_count = 0
+        self._last_valid_spread_quote = tick
+
         if self.entry_in_progress and not self.traded_today:
             self._check_and_submit_entry(tick)
         elif self.get_effective_spread_quantity() != 0:
@@ -1263,8 +1338,10 @@ class SPXRangeStrategy(SPXBaseStrategy):
             else:
                 health = "🔴 LOSS"
             
+            bid_size = int(quote.bid_size.as_double())
+            ask_size = int(quote.ask_size.as_double())
             self.logger.info(
-                f"📊 POSITION STATUS | {health} | Qty: {current_qty:.1f} | P&L: ${total_pnl:+.2f} | Mid: {mid:.4f} | Bid: {bid:.4f} | Ask: {ask:.4f} | SL: {stop_price:.4f} | TP: {tp_price:.4f}",
+                f"📊 POSITION STATUS | {health} | Qty: {current_qty:.1f} | P&L: ${total_pnl:+.2f} | Mid: {mid:.4f} | Bid: {bid:.4f} ({bid_size}) | Ask: {ask:.4f} ({ask_size}) | SL: {stop_price:.4f} | TP: {tp_price:.4f}",
                 extra={
                     "extra": {
                         "event_type": "position_status",
@@ -1622,8 +1699,10 @@ class SPXRangeStrategy(SPXBaseStrategy):
             limit = -self._spread_entry_price if self._spread_entry_price else None
             distance = round(mid - limit, 4) if limit is not None else None
 
+            bid_size = int(quote.bid_size.as_double())
+            ask_size = int(quote.ask_size.as_double())
             self.logger.info(
-                f"⏳ WAITING FOR FILL | Bid: {bid:.4f} | Ask: {ask:.4f} | Mid: {mid:.4f} "
+                f"⏳ WAITING FOR FILL | Bid: {bid:.4f} ({bid_size}) | Ask: {ask:.4f} ({ask_size}) | Mid: {mid:.4f} "
                 f"| Limit: {limit:.4f} | Distance: {distance:+.4f} | Order: {self._entry_order_id}",
                 extra={
                     "extra": {
@@ -1857,6 +1936,8 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self._closing_in_progress = False
         self._sl_triggered = False
         self._entry_order_id = None
+        self._skipped_quote_count = 0
+        self._last_valid_spread_quote = None
         
         # Cancel fill timeout timer if active
         try:
@@ -2392,6 +2473,8 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self._current_trade_id = None
         self._total_commission = 0.0
         self._entry_commission = 0.0
+        self._skipped_quote_count = 0
+        self._last_valid_spread_quote = None
         
         # Clean up tracked order limits to prevent stale entries
         self._active_spread_order_limits.clear()
