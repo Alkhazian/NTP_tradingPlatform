@@ -1006,8 +1006,8 @@ class SPXBaseStrategy(BaseStrategy):
 
                 # Calculate IV from mid-price
                 iv = BlackScholes.implied_volatility(
-                    option_type=opt_type, S=spx, K=strike, T=T, r=r,
-                    market_price=mid, q=q
+                    target_price=mid, option_type=opt_type, S=spx, K=strike, T=T, r=r,
+                    q=q
                 )
                 if iv is None or iv <= 0.01:
                     continue
