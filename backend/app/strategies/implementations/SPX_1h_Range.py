@@ -107,6 +107,8 @@ class SPX1hRangeStrategy(SPXBaseStrategy):
         self._trading_data = TradingDataService(db_path="data/trading.db")
         self._current_trade_id: Optional[str] = None
         self._total_commission: float = 0.0  # Track total commission for the trade
+        self._pending_close_data: Optional[Dict] = None  # Deferred DB write data (50ms window)
+        self._entry_commission: float = 0.0  # Entry commission for cross-validation at close
         
         # Calculate range end time for logging
         range_end_time = "Range Close" # Will be calculated/logged by base
@@ -1897,7 +1899,15 @@ class SPX1hRangeStrategy(SPXBaseStrategy):
             self._current_trade_id = None
         
         self._total_commission = 0.0
+        self._entry_commission = 0.0
+        self._pending_close_data = None
         self._processed_executions = set()
+        
+        # Cancel deferred close timer if active
+        try:
+            self.clock.cancel_timer(f"{self.id}_deferred_close")
+        except Exception:
+            pass
 
         
         self.logger.info(
@@ -1930,6 +1940,7 @@ class SPX1hRangeStrategy(SPXBaseStrategy):
             "_sl_triggered": self._sl_triggered,
             "_current_trade_id": self._current_trade_id,
             "_total_commission": self._total_commission,
+            "_entry_commission": self._entry_commission,
         })
         return state
 
@@ -1948,6 +1959,7 @@ class SPX1hRangeStrategy(SPXBaseStrategy):
         self._sl_triggered = state.get("_sl_triggered", False)
         self._current_trade_id = state.get("_current_trade_id")
         self._total_commission = state.get("_total_commission", 0.0)
+        self._entry_commission = state.get("_entry_commission", 0.0)
         
         self.logger.info(
             f"State restored | Range: {self.daily_low}-{self.daily_high} | Calculated: {self.range_calculated} | Traded: {self.traded_today} | Dir: {self._signal_direction}",
@@ -1977,6 +1989,18 @@ class SPX1hRangeStrategy(SPXBaseStrategy):
                 }
             }
         )
+        
+        # Flush deferred close if strategy is stopping in the 50ms window
+        if self._pending_close_data is not None:
+            self.logger.warning(
+                "🛑 on_stop_safe: flushing pending deferred close synchronously",
+                extra={"extra": {"event_type": "deferred_close_flush_on_stop"}}
+            )
+            try:
+                self.clock.cancel_timer(f"{self.id}_deferred_close")
+            except Exception:
+                pass
+            self._execute_deferred_close(event=None)
         
         # Close any open positions
         if position_qty != 0:
@@ -2059,6 +2083,15 @@ class SPX1hRangeStrategy(SPXBaseStrategy):
                             entry_venue_order_id=fills_data["venue_order_id"],
                             entry_fill_time=fills_data["fill_time"],
                         )
+                    
+                    # Snapshot entry commission from Source A (spread fills) for cross-validation at close.
+                    # Using _total_commission here (Source A) ensures consistent source comparison
+                    # when computing exit_comm_A = _total_commission - _entry_commission later.
+                    self._entry_commission = self._total_commission
+                    self.logger.info(
+                        f"📌 Entry commission captured (Source A): ${self._entry_commission:.2f}",
+                        extra={"extra": {"event_type": "entry_commission_captured", "entry_commission": self._entry_commission}}
+                    )
         
         # Track commission from any fill (Entry or Exit) with deduplication
         if event.commission:
@@ -2085,22 +2118,26 @@ class SPX1hRangeStrategy(SPXBaseStrategy):
                     
                     try:
                         instrument = self.cache.instrument(event.instrument_id)
-                        is_spread = hasattr(instrument, "legs") or type(instrument).__name__ == "OptionSpread"
+                        legs = getattr(instrument, 'legs', None)
+                        if callable(legs):
+                            legs = legs()  # NautilusTrader may make legs a method
+                        is_spread = bool(legs and len(legs) > 0)  # True only for real OptionSpread
                     except:
                         is_spread = False
 
-                    # If it's a spread execution, or if we haven't seen this execution ID before (and it might be a leg fill where spread fill is missing), we take it.
-                    # BUT, to be safe against double counting (Spread + Legs), we can choose to ONLY count commissions attached to the SPREAD instrument itself.
+                    # IB reports the full per-side commission on the parent OptionSpread fill event.
+                    # The commission in LEG fill events is a breakdown of that same amount — NOT additional cost.
+                    # We capture spread-level events only (is_spread=True) to avoid triple-counting.
+                    # LEG commissions are redundant with the spread commission and must be ignored here.
+                    # Independent verification is done via _leg_fill_accumulator in _execute_deferred_close().
                     
                     if is_spread:
                         comm = event.commission.as_double()
                         self._total_commission += comm
                         self.logger.info(f"💵 Commission captured (Spread): ${comm:.2f} | Total: ${self._total_commission:.2f}")
                     else:
-                        # It's a leg fill. Log it but don't add to total if we expect spread fills.
-                        # However, if the broker only reports on legs, we might miss it.
-                        # Given the logs showed $7.75 (Spread) vs $3.87 (Leg), the Spread one is correct/full.
-                        # So we safely IGNORE leg commissions to avoid duplication.
+                        # It's a leg fill. Log it but don't add to total.
+                        # LEG commission is a breakdown of the spread commission, not extra cost.
                         self.logger.info(f"💵 Commission ignored for Leg fill: ${event.commission.as_double():.2f}")
                         
             except Exception as e:
@@ -2112,15 +2149,10 @@ class SPX1hRangeStrategy(SPXBaseStrategy):
             effective_qty = self.get_effective_spread_quantity()
             
             if effective_qty == 0:
+                # ── Compute fill_price, exit_reason, final_pnl immediately ──
+                # (these don't depend on commission and must be captured before state changes)
+                
                 # 1. Determine Fill Price
-                # Priority: Tracked Limit > Order Avg Px (with sanity check) > Event Last Price
-                #
-                # IMPORTANT: IB reports combo/spread order fills in two ways:
-                #   a) A fill on the parent combo order (e.g. O-...-265) with avg_px = leg price (e.g. 11.10)
-                #   b) Individual LEG fills (e.g. O-...-265-LEG-SPXW...)
-                # The parent order's avg_px in IB reflects the individual leg's fill price, NOT
-                # the net spread price. Therefore, _active_spread_order_limits (the limit we sent)
-                # is the most reliable source for the spread's net exit price.
                 fill_price = 0.0
 
                 # Extract parent order ID if this is a LEG order
@@ -2130,26 +2162,23 @@ class SPX1hRangeStrategy(SPXBaseStrategy):
                     order_id_to_check = ClientOrderId(parent_order_id_str)
                     self.logger.info(f"🔍 LEG order detected | LEG: {event.client_order_id} | Parent: {order_id_to_check}")
 
-                # PRIORITY 0: Actual net spread price from accumulated LEG fills (Real-time reconciliation)
+                # PRIORITY 0: Actual net spread price from accumulated LEG fills
                 fills_data = self.get_accumulated_spread_price(str(order_id_to_check))
                 if fills_data:
                     fill_price = fills_data["net_price"]
                     self.logger.info(f"✅ Using accumulated LEG fills for spread exit price: {fill_price} (from order {order_id_to_check})")
                 
                 if fill_price == 0.0:
-                    # PRIORITY 1: Tracked limit price — always reliable for our limit orders.
-                    # This is the exact spread price we submitted (e.g. -1.80 for a SL order).
+                    # PRIORITY 1: Tracked limit price
                     tracked_limit = self._active_spread_order_limits.get(order_id_to_check)
                     if tracked_limit is not None:
                         fill_price = tracked_limit
                         self.logger.info(f"✅ Using tracked LIMIT price for spread exit: {fill_price} (from order {order_id_to_check})")
                     else:
-                        # PRIORITY 2: avg_px from the order object — only if it looks like a spread price.
+                        # PRIORITY 2: avg_px from the order object
                         order = self.cache.order(order_id_to_check)
                         if order and hasattr(order, "avg_px") and order.avg_px is not None:
                             avg_px_val = order.avg_px.as_double() if hasattr(order.avg_px, "as_double") else float(order.avg_px)
-                            # Spread prices are small values (e.g. -1.80, -0.60). If abs(avg_px) > 5.0,
-                            # it is almost certainly a single leg option price (e.g. 11.10), not a spread price.
                             if abs(avg_px_val) > 5.0:
                                 self.logger.warning(
                                     f"⚠️ order.avg_px={avg_px_val:.4f} exceeds sanity threshold (|avg_px|>5.0) — "
@@ -2169,31 +2198,13 @@ class SPX1hRangeStrategy(SPXBaseStrategy):
                             fill_price = event.last_px.as_double() if hasattr(event.last_px, "as_double") else float(event.last_px)
 
                 entry_credit = self._spread_entry_price if self._spread_entry_price is not None else 0.0
-                # Note: spread prices are credits (negative) or debits (negative/positive depending on view).
-                # Our entry is stored as absolute value in _spread_entry_price usually? 
-                # No, database has -0.5. Strategy state usually keeps absolute credit? 
-                # Let's check _check_and_submit_entry: "credit_received = abs(mid)..." 
-                # But _spread_entry_price seems to be used as credit amount elsewhere.
-                
-                # RE-VERIFY P&L LOGIC
-                # Entry Credit: 0.50 (captured as abs value usually, but let's check init)
-                # Exit Cost (Debit): fill_price (e.g. -0.10, which means we PAY 0.10)
-                # But wait, limit price -0.10 means we pay.
-                # If fill_price is -0.10.
-                # P&L = Credit - Debit = 0.50 - 0.10 = 0.40.
-                
-                # If _spread_entry_price is stored as positive credit (0.50):
-                # And fill_price is -0.10 (Tracked limit).
-                # We need abs(fill_price) = 0.10 is the Cost.
-                
                 current_cost = abs(fill_price)
-                final_pnl = (entry_credit - current_cost) * 100  # P&L per spread (already closed)
+                final_pnl = (entry_credit - current_cost) * 100
                 
-                # Close trade and record exit order
                 now = self.clock.utc_now().astimezone(self.tz)
                 exit_time_iso = now.isoformat()
                 
-                # Determine exit reason based on what triggered the close
+                # Determine exit reason
                 stop_price = -(entry_credit + self.fixed_stop_loss_amount / 100.0)
                 tp_points = self.take_profit_amount / 100.0
                 required_debit = entry_credit - tp_points
@@ -2208,82 +2219,175 @@ class SPX1hRangeStrategy(SPXBaseStrategy):
                 else:
                     exit_reason = "MANUAL"
                 
-                # Close trade record
-                if self._current_trade_id:
-                    self._trading_data.close_trade(
-                        trade_id=self._current_trade_id,
-                        exit_price=fill_price,
-                        exit_reason=exit_reason,
-                        exit_time=exit_time_iso,
-                        commission=self._total_commission,
-                    )
-                    
-                    # Reconcile exit from accumulated LEG fills (ensuring precision for all fields)
-                    fills_data = self.get_accumulated_spread_price(str(order_id_to_check))
-                    if fills_data:
-                        self.logger.info(
-                            f"🔄 Reconciling EXIT | Trade: {self._current_trade_id} | "
-                            f"Price: {fills_data['net_price']} | Comm: ${fills_data['total_commission']:.2f}"
-                        )
-                        self._trading_data.reconcile_trade_fills(
-                            trade_id=self._current_trade_id,
-                            actual_exit_price=fills_data["net_price"],
-                            exit_commission=fills_data["total_commission"],
-                            exit_venue_order_id=fills_data["venue_order_id"],
-                            exit_fill_time=fills_data["fill_time"],
-                        )
-                    
-                    # Record exit order
-                    trade_type = "CALL_CREDIT_SPREAD" if self._signal_direction == 'bearish' else "PUT_CREDIT_SPREAD"
-                    self._trading_data.record_order(
-                        strategy_id=self.strategy_id,
-                        instrument_id=str(self.spread_instrument.id) if self.spread_instrument else "UNKNOWN",
-                        trade_type=trade_type,
-                        trade_direction="EXIT",
-                        order_side="SELL",
-                        order_type="LIMIT",
-                        quantity=self.config_quantity,
-                        status="FILLED",
-                        price_limit=fill_price, # We use the effective fill limit
-                        submitted_time=exit_time_iso,
-                        trade_id=self._current_trade_id,
-                        client_order_id=f"{self._current_trade_id}-EXIT",
-                        filled_time=exit_time_iso,
-                        filled_quantity=self.config_quantity,
-                        filled_price=fill_price,
-                        commission=self._total_commission, # Include commission
-                        raw_data={"trigger": exit_reason, "pnl": final_pnl},
-                    )
+                # ── Defer DB write by 50ms to wait for all IB commission events ──
+                self._pending_close_data = {
+                    "order_id_to_check": order_id_to_check,
+                    "fill_price":        fill_price,
+                    "exit_reason":       exit_reason,
+                    "exit_time_iso":     exit_time_iso,
+                    "final_pnl":         final_pnl,
+                    "trade_id":          self._current_trade_id,
+                }
                 
-                # Get max drawdown for logging
-
-                trade_data = self._trading_data.get_trade(self._current_trade_id) if self._current_trade_id else {}
-                max_dd = trade_data.get("max_unrealized_loss", 0) if trade_data else 0
+                # Cancel any previous deferred close timer (guard against duplicates)
+                try:
+                    self.clock.cancel_timer(f"{self.id}_deferred_close")
+                except Exception:
+                    pass
                 
-                self.logger.info(
-                    "✅ Position close confirmed | Resetting spread state",
-                    extra={
-                        "extra": {
-                            "event_type": "position_close_confirmed",
-                            "trade_id": self._current_trade_id,
-                            "previous_entry_price": self._spread_entry_price,
-                            "exit_price": fill_price,
-                            "exit_reason": exit_reason,
-                            "max_drawdown": max_dd,
-                            "final_pnl": final_pnl
-                        }
-                    }
+                # Schedule deferred close — 50ms window for remaining IB commission events
+                self.clock.set_time_alert(
+                    name=f"{self.id}_deferred_close",
+                    alert_time=self.clock.utc_now() + timedelta(milliseconds=50),
+                    callback=self._execute_deferred_close,
                 )
-                self._spread_entry_price = None
-                self._closing_in_progress = False
-                self._sl_triggered = False
-                self._current_trade_id = None
-                self._total_commission = 0.0  # Reset for next time (though typically once per day)
-                
-                # Clean up tracked order limits to prevent stale entries
-                self._active_spread_order_limits.clear()
-                
-                self.save_state()
+                self.logger.info(
+                    f"⏳ Close deferred 50ms | waiting for remaining commission events | "
+                    f"fill={fill_price} | reason={exit_reason} | _total_commission=${self._total_commission:.2f}",
+                    extra={"extra": {"event_type": "deferred_close_scheduled", "fill_price": fill_price, "exit_reason": exit_reason}}
+                )
+
+    def _execute_deferred_close(self, event):
+        """
+        Execute the deferred DB write after 50ms window.
+        Cross-validates commission from two independent sources:
+          Source A: _total_commission (spread fill events)
+          Source B: LEG fill accumulator (get_accumulated_spread_price)
+        """
+        if self._pending_close_data is None:
+            return  # Already executed or data lost
+        
+        # Read and immediately clear to prevent re-entry
+        data = self._pending_close_data
+        self._pending_close_data = None
+        
+        order_id_to_check = data["order_id_to_check"]
+        fill_price = data["fill_price"]
+        exit_reason = data["exit_reason"]
+        exit_time_iso = data["exit_time_iso"]
+        final_pnl = data["final_pnl"]
+        trade_id = data["trade_id"]
+        
+        # ── Source A: spread-level commission events ──
+        exit_comm_A = self._total_commission - self._entry_commission
+        a_available = exit_comm_A > 0
+        
+        # ── Source B: LEG fill accumulator ──
+        fills_data = self.get_accumulated_spread_price(str(order_id_to_check))
+        exit_comm_B = fills_data["total_commission"] if fills_data else None
+        b_available = exit_comm_B is not None
+        
+        # ── Cross-validation and commission selection ──
+        if a_available and b_available:
+            if abs(exit_comm_A - exit_comm_B) < 0.05:
+                commission = self._total_commission  # A+B agree → use round-trip total
+                self.logger.info(
+                    f"✅ Commission cross-validated: A=${exit_comm_A:.2f} B=${exit_comm_B:.2f} → total=${commission:.2f}",
+                    extra={"extra": {"event_type": "commission_cross_validated", "source_a": exit_comm_A, "source_b": exit_comm_B, "total": commission}}
+                )
+            else:
+                commission = self._total_commission  # Conflict — use A (spread events) + log ERROR
+                self.logger.error(
+                    f"⚠️ Commission mismatch: A=${exit_comm_A:.2f} B=${exit_comm_B:.2f} | using A (spread events) | total=${commission:.2f}",
+                    extra={"extra": {"event_type": "commission_mismatch", "source_a": exit_comm_A, "source_b": exit_comm_B, "total": commission}}
+                )
+                self._notify("⚠️ Commission mismatch — check logs")
+        elif a_available:
+            commission = self._total_commission
+            self.logger.warning(
+                f"⚠️ Commission: using spread fill only (LEG accumulator missing) | total=${commission:.2f}",
+                extra={"extra": {"event_type": "commission_leg_missing", "total": commission}}
+            )
+        elif b_available:
+            commission = self._entry_commission + exit_comm_B
+            self.logger.warning(
+                f"⚠️ Commission: using LEG accumulator only (spread fill missing) | entry=${self._entry_commission:.2f} + exit_B=${exit_comm_B:.2f} = ${commission:.2f}",
+                extra={"extra": {"event_type": "commission_spread_missing", "total": commission}}
+            )
+        else:
+            commission = 0.0
+            self.logger.error(
+                "❌ Commission: both sources unavailable — recording 0.0",
+                extra={"extra": {"event_type": "commission_both_missing"}}
+            )
+            self._notify("❌ Commission data missing — manual check required")
+        
+        # ── DB writes ──
+        if trade_id:
+            self._trading_data.close_trade(
+                trade_id=trade_id,
+                exit_price=fill_price,
+                exit_reason=exit_reason,
+                exit_time=exit_time_iso,
+                commission=commission,
+            )
+            
+            # Reconcile exit from accumulated LEG fills
+            if fills_data:
+                self.logger.info(
+                    f"🔄 Reconciling EXIT | Trade: {trade_id} | "
+                    f"Price: {fills_data['net_price']} | Comm: ${fills_data['total_commission']:.2f}"
+                )
+                self._trading_data.reconcile_trade_fills(
+                    trade_id=trade_id,
+                    actual_exit_price=fills_data["net_price"],
+                    exit_commission=fills_data["total_commission"],
+                    exit_venue_order_id=fills_data["venue_order_id"],
+                    exit_fill_time=fills_data["fill_time"],
+                )
+            
+            # Record exit order
+            trade_type = "CALL_CREDIT_SPREAD" if self._signal_direction == 'bearish' else "PUT_CREDIT_SPREAD"
+            self._trading_data.record_order(
+                strategy_id=self.strategy_id,
+                instrument_id=str(self.spread_instrument.id) if self.spread_instrument else "UNKNOWN",
+                trade_type=trade_type,
+                trade_direction="EXIT",
+                order_side="SELL",
+                order_type="LIMIT",
+                quantity=self.config_quantity,
+                status="FILLED",
+                price_limit=fill_price,
+                submitted_time=exit_time_iso,
+                trade_id=trade_id,
+                client_order_id=f"{trade_id}-EXIT",
+                filled_time=exit_time_iso,
+                filled_quantity=self.config_quantity,
+                filled_price=fill_price,
+                commission=commission,
+                raw_data={"trigger": exit_reason, "pnl": final_pnl},
+            )
+        
+        # Get max drawdown for logging
+        trade_data = self._trading_data.get_trade(trade_id) if trade_id else {}
+        max_dd = trade_data.get("max_unrealized_loss", 0) if trade_data else 0
+        
+        self.logger.info(
+            "✅ Position close confirmed | Resetting spread state",
+            extra={
+                "extra": {
+                    "event_type": "position_close_confirmed",
+                    "trade_id": trade_id,
+                    "previous_entry_price": self._spread_entry_price,
+                    "exit_price": fill_price,
+                    "exit_reason": exit_reason,
+                    "max_drawdown": max_dd,
+                    "final_pnl": final_pnl,
+                    "commission": commission
+                }
+            }
+        )
+        self._spread_entry_price = None
+        self._closing_in_progress = False
+        self._sl_triggered = False
+        self._current_trade_id = None
+        self._total_commission = 0.0
+        self._entry_commission = 0.0
+        
+        # Clean up tracked order limits to prevent stale entries
+        self._active_spread_order_limits.clear()
+        
+        self.save_state()
 
     # --- Close Order Failsafe Handlers ---
 
