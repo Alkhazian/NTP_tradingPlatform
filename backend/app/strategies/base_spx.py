@@ -433,6 +433,39 @@ class SPXBaseStrategy(BaseStrategy):
         )
     
     # =========================================================================
+    # INSTRUMENT DISCOVERY
+    # =========================================================================
+    
+    def request_option_chain(self, expiry_date: str):
+        """
+        Request the entire SPX option chain for a specific expiry date.
+        Uses the 'build_options_chain' capability of the IB provider.
+        
+        Args:
+            expiry_date: Expiry date in 'YYYYMMDD' format
+        """
+        self.logger.info(f"Requesting SPX option chain for expiry: {expiry_date}")
+        
+        try:
+            self.request_instruments(
+                venue=Venue("IB"),
+                params={
+                    "ib_contracts": (
+                        {
+                            "secType": "IND",
+                            "symbol": "SPX",
+                            "exchange": "CBOE",
+                            "build_options_chain": True,
+                            "lastTradeDateOrContractMonth": expiry_date,
+                        },
+                    )
+                }
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to request SPX option chain for {expiry_date}: {e}")
+
+    
+    # =========================================================================
     # OPTION SEARCH BY PREMIUM
     # =========================================================================
     
@@ -699,7 +732,7 @@ class SPXBaseStrategy(BaseStrategy):
             self.logger.warning(f"No valid option quotes for search {search_id[:8]}... after filtering")
             
             # --- CRITICAL FIX: Unsubscribe from ALL options since none were selected ---
-            self._unsubscribe_from_options(subscribed_instrument_ids, None)
+            self._unsubscribe_from_options(subscribed_instrument_ids, keep_instrument_ids=None, exclude_search_id=search_id)
             
             if callback:
                 callback(search_id, None, None)
@@ -715,7 +748,7 @@ class SPXBaseStrategy(BaseStrategy):
         
         # --- CRITICAL FIX: Unsubscribe from all options EXCEPT the selected one ---
         # This prevents IB market data limit errors from accumulating subscriptions
-        self._unsubscribe_from_options(subscribed_instrument_ids, selected_option.id)
+        self._unsubscribe_from_options(subscribed_instrument_ids, keep_instrument_ids=[selected_option.id], exclude_search_id=search_id)
         
         self.logger.info(
             f"✅ Search {search_id[:8]}... selected: Strike ${best_option_data['strike']:.0f}, "
@@ -731,22 +764,43 @@ class SPXBaseStrategy(BaseStrategy):
     def _unsubscribe_from_options(
         self, 
         subscribed_instrument_ids: List[InstrumentId], 
-        keep_instrument_id: Optional[InstrumentId]
+        keep_instrument_ids: Optional[List[InstrumentId]] = None,
+        exclude_search_id: Optional[str] = None
     ):
         """
-        Unsubscribe from option quotes, optionally keeping one subscription.
+        Unsubscribe from option quotes, optionally keeping specific subscriptions.
         
         CRITICAL: This prevents IB market data limit errors by cleaning up
         subscriptions to options we didn't select.
         
         Args:
             subscribed_instrument_ids: List of instrument IDs to unsubscribe from
-            keep_instrument_id: Optional ID to keep subscribed (the selected option)
+            keep_instrument_ids: Optional list of IDs to keep subscribed
+            exclude_search_id: Optional search_id that is calling this, to check other active searches
         """
+        if keep_instrument_ids is None:
+            keep_instrument_ids = []
+            
         unsubscribed_count = 0
         for instrument_id in subscribed_instrument_ids:
-            if keep_instrument_id is not None and instrument_id == keep_instrument_id:
+            # Don't unsubscribe from the ones we want to keep
+            if instrument_id in keep_instrument_ids:
                 continue
+                
+            # Check if any OTHER active search still needs this instrument
+            is_needed_elsewhere = False
+            for s_id, s_state in self._premium_searches.items():
+                if exclude_search_id and s_id == exclude_search_id:
+                    continue
+                if not s_state.get('active'):
+                    continue
+                if instrument_id in s_state.get('subscribed_instrument_ids', []):
+                    is_needed_elsewhere = True
+                    break
+            
+            if is_needed_elsewhere:
+                continue
+
             try:
                 self.unsubscribe_quote_ticks(instrument_id)
                 unsubscribed_count += 1
@@ -754,9 +808,9 @@ class SPXBaseStrategy(BaseStrategy):
                 self.logger.warning(f"Failed to unsubscribe from {instrument_id}: {e}")
         
         if unsubscribed_count > 0:
+            kept_info = f"{len(keep_instrument_ids)} kept" if keep_instrument_ids else "none"
             self.logger.info(
-                f"🧹 Cleaned up {unsubscribed_count} option subscriptions "
-                f"(kept: {keep_instrument_id if keep_instrument_id else 'none'})"
+                f"🧹 Cleaned up {unsubscribed_count} option subscriptions ({kept_info})"
             )
     
     def cancel_premium_search(self, search_id: str) -> bool:
@@ -775,7 +829,7 @@ class SPXBaseStrategy(BaseStrategy):
             
             # Unsubscribe from all options in this search
             subscribed_ids = state.get('subscribed_instrument_ids', [])
-            self._unsubscribe_from_options(subscribed_ids, None)
+            self._unsubscribe_from_options(subscribed_ids, None, exclude_search_id=search_id)
             
             # Cancel the timer
             timer_name = f"{self.id}.premium_search.{search_id}"
@@ -818,121 +872,128 @@ class SPXBaseStrategy(BaseStrategy):
         dividend_yield: float = 0.013,
     ) -> Optional[str]:
         """
-        Search for SPX options by target delta using Black-Scholes.
-
-        Requests a wide range of strikes, collects quotes, computes implied
-        volatility from mid-price, then calculates delta for each option.
-        Selects the option with delta closest to the target.
-
+        Find an SPX option with a specific target delta using Nautilus Greeks.
+        
         Args:
-            target_delta: Target delta (e.g. -0.25 for short put, 0.30 for call).
-                          Sign convention: puts are negative, calls positive.
-            option_kind: OptionKind.CALL or OptionKind.PUT
-            expiry_date: Expiry in YYYYMMDD format. Default = today (0DTE).
-            strike_range: Number of strikes to request (default 40 for ~200pt range).
-            strike_step: Step between strikes in points (default 5).
-            max_spread: Maximum allowed bid-ask spread, None = no filter.
-            selection_delay_seconds: Delay before selecting best option.
-            callback: fn(search_id, selected_option, option_data) or (search_id, None, None).
-            risk_free_rate: Annualized risk-free rate for B-S.
-            dividend_yield: Annualized dividend yield for B-S.
-
+            target_delta: Target delta (e.g. -0.25 for put, 0.25 for call)
+            option_kind: CALL or PUT
+            expiry_date: Date string YYYYMMDD (defaults to 0DTE or next trading day)
+            strike_range: [Ignored] - uses all cached options
+            strike_step: [Ignored] - uses all cached options
+            max_spread: Optional maximum allowed bid-ask spread
+            selection_delay_seconds: Seconds to wait for quotes before selection
+            callback: Called with (search_id, selected_option, best_stats)
+            risk_free_rate: [Ignored] - uses Nautilus engine greeks
+            dividend_yield: [Ignored] - uses Nautilus engine greeks
+            
         Returns:
             search_id (str) or None on immediate failure.
         """
-        if self.current_spx_price == 0:
-            self.logger.error("Cannot search for options: SPX price not available")
-            if callback:
-                callback(None, None, None)
-            return None
-
         search_id = str(uuid.uuid4())
+        
+        # Determine expiry date
+        if expiry_date is None:
+            expiry_date = self.clock.utc_now().date().strftime("%Y%m%d")
 
+        self.logger.info(
+            f"🔍 Delta Search {search_id[:8]} started | Target Δ={target_delta} | Expiry={expiry_date}"
+        )
+
+        # Store search state
         self._premium_searches[search_id] = {
             'search_id': search_id,
-            'search_type': 'delta',          # distinguishes from premium searches
+            'search_type': 'delta',
             'target_delta': target_delta,
             'option_kind': option_kind,
+            'expiry_date': expiry_date,
             'max_spread': max_spread,
             'callback': callback,
             'received_options': [],
             'subscribed_instrument_ids': [],
             'active': True,
-            'risk_free_rate': risk_free_rate,
-            'dividend_yield': dividend_yield,
         }
 
-        atm_strike = round(self.current_spx_price / strike_step) * strike_step
-        abs_target = abs(target_delta)
+        # Filter cached instruments for matching options
+        all_instruments = self.cache.instruments()
+        match_count = 0
+        
+        # Year format can be problematic in IB (YYYY vs YY)
+        expiry_short = expiry_date[2:] if len(expiry_date) == 8 else expiry_date
+        
+        # Filter range based on current SPX price to avoid hitting IB ticker limit (usually 100)
+        # 1DTE/0DTE SPX is around 6000, 150 points is ~2.5%, very safe for delta targets -0.4 to -0.1
+        current_price = self.current_spx_price
+        if current_price <= 0:
+             # Fallback to cache lookup if live price hasn't arrived yet
+             last_trade = self.cache.trade_tick(self.spx_instrument_id)
+             if last_trade:
+                 current_price = float(last_trade.price)
+        
+        strike_limit_range = 150.0 # Points
+        
+        for inst in all_instruments:
+            # Must be an option
+            if not hasattr(inst, 'option_kind') or inst.option_kind != option_kind:
+                continue
+            
+            # Must match symbol (SPX or SPXW)
+            symbol = str(inst.id.symbol)
+            if not (symbol.startswith("SPX") or symbol.startswith("SPXW")):
+                continue
+                
+            # Must match expiry
+            # We check both the instrument attribute and the ID string
+            inst_expiry = ""
+            if hasattr(inst, 'expiry'):
+                inst_expiry = str(inst.expiry)
+            elif hasattr(inst, 'last_trade_date'):
+                inst_expiry = str(inst.last_trade_date)
+            
+            # Broad check for expiry string match
+            if expiry_date not in inst_expiry and expiry_short not in symbol:
+                continue
 
-        if option_kind == OptionKind.PUT:
-            # For puts: request OTM strikes (below ATM).
-            # Start from just below ATM and go further OTM.
-            strikes = [atm_strike - (i * strike_step) for i in range(strike_range)]
-        else:
-            # For calls: request OTM strikes (above ATM).
-            strikes = [atm_strike + (i * strike_step) for i in range(strike_range)]
+            # --- MASS TICKER LIMIT PROTECTION ---
+            # Only subscribe to options within a reasonable range of current price
+            if current_price > 0:
+                strike = float(inst.strike_price.as_double())
+                if abs(strike - current_price) > strike_limit_range:
+                    continue
 
-        if expiry_date is None:
-            expiry_date = self.clock.utc_now().date().strftime("%Y%m%d")
+            # This is a candidate
+            self.subscribe_quote_ticks(inst.id)
+            self._premium_searches[search_id]['received_options'].append(inst)
+            self._premium_searches[search_id]['subscribed_instrument_ids'].append(inst.id)
+            match_count += 1
 
-        right = "C" if option_kind == OptionKind.CALL else "P"
-
-        self.logger.info(
-            f"🔍 Delta search [{search_id[:8]}] | Target Δ={target_delta:.3f} | "
-            f"{option_kind.name} | ATM=${atm_strike:.0f} | "
-            f"Strikes: ${strikes[0]:.0f}..${strikes[-1]:.0f} ({len(strikes)} × {strike_step}pt) | "
-            f"Expiry: {expiry_date}"
-        )
-
-        contracts = []
-        for strike in strikes:
-            contracts.append({
-                "secType": "OPT",
-                "symbol": "SPX",
-                "tradingClass": "SPXW",
-                "exchange": "CBOE",
-                "currency": "USD",
-                "lastTradeDateOrContractMonth": expiry_date,
-                "strike": float(strike),
-                "right": right,
-                "multiplier": "100"
-            })
-
-        try:
-            self.request_instruments(
-                venue=Venue("CBOE"),
-                params={"ib_contracts": contracts}
+        if match_count == 0:
+            self.logger.warning(
+                f"❌ Delta search {search_id[:8]} found NO options matching expiry {expiry_date} in cache"
             )
-
-            self.logger.info(
-                f"✅ Requested {len(contracts)} {option_kind.name} options "
-                f"for delta search [{search_id[:8]}]"
-            )
-
-            timer_name = f"{self.id}.premium_search.{search_id}"
-            self.clock.set_time_alert(
-                name=timer_name,
-                alert_time=self.clock.utc_now() + timedelta(seconds=selection_delay_seconds),
-                callback=self._on_delta_search_complete
-            )
-
-            return search_id
-
-        except Exception as e:
-            self.logger.error(f"❌ Failed to request options for delta search: {e}", exc_info=True)
             self._premium_searches.pop(search_id, None)
             if callback:
                 callback(search_id, None, None)
             return None
 
+        self.logger.info(
+            f"📡 Delta search {search_id[:8]} found {match_count} candidates in cache for expiry {expiry_date}"
+        )
+
+        # Set selection timer
+        timer_name = f"{self.id}.premium_search.{search_id}"
+        self.clock.set_time_alert(
+            name=timer_name,
+            alert_time=self.clock.utc_now() + timedelta(seconds=selection_delay_seconds),
+            callback=self._on_delta_search_complete
+        )
+
+        return search_id
+
     def _on_delta_search_complete(self, timer_event):
         """
-        Timer callback for delta search. Computes IV and delta for each
-        received option using greeks.py, selects closest to target delta.
+        Processes collected option data and selects the best delta match.
+        Uses Nautilus built-in Greeks for maximum accuracy.
         """
-        from .greeks import BlackScholes
-
         timer_name = timer_event.name if hasattr(timer_event, 'name') else str(timer_event)
         parts = timer_name.rsplit('.', 1)
         if len(parts) < 2:
@@ -942,7 +1003,6 @@ class SPXBaseStrategy(BaseStrategy):
         search_id = parts[-1]
         state = self._premium_searches.get(search_id)
         if not state or not state.get('active'):
-            self.logger.warning(f"Delta search {search_id[:8]} not found or completed")
             return
 
         state['active'] = False
@@ -950,43 +1010,33 @@ class SPXBaseStrategy(BaseStrategy):
         target_delta = state['target_delta']
         max_spread = state['max_spread']
         callback = state['callback']
-        r = state.get('risk_free_rate', 0.05)
-        q = state.get('dividend_yield', 0.013)
-        option_kind = state['option_kind']
         subscribed_ids = state.get('subscribed_instrument_ids', [])
 
+        # Essential: Remove from active searches
         self._premium_searches.pop(search_id, None)
 
         if not received_options:
-            self.logger.warning(f"Delta search {search_id[:8]}: no options received")
-            self._unsubscribe_from_options(subscribed_ids, None)
+            self.logger.warning(f"Delta search {search_id[:8]}: no options to evaluate")
+            self._unsubscribe_from_options(subscribed_ids, keep_instrument_ids=None, exclude_search_id=search_id)
             if callback:
                 callback(search_id, None, None)
             return
 
         self.logger.info(
             f"🔍 Completing delta search {search_id[:8]} | "
-            f"{len(received_options)} options received | Target Δ={target_delta:.3f}"
+            f"{len(received_options)} options to evaluate | Target Δ={target_delta:.3f}"
         )
 
-        spx = self.current_spx_price
-        if spx <= 0:
-            self.logger.error("SPX price not available for delta calculation")
-            self._unsubscribe_from_options(subscribed_ids, None)
-            if callback:
-                callback(search_id, None, None)
-            return
-
-        opt_type = 'C' if option_kind == OptionKind.CALL else 'P'
         abs_target = abs(target_delta)
         candidates = []
 
-        # Calculate days to expiry from the expiry date
-        # Use 1/365 as default if we can't parse
-        T = 1.0 / 365.0
-
         for option in received_options:
             try:
+                # Use Nautilus greeks_calculator
+                greeks_data = self.greeks.instrument_greeks(option.id)
+                if not greeks_data or greeks_data.delta is None:
+                    continue
+
                 quote = self.cache.quote_tick(option.id)
                 if not quote:
                     continue
@@ -998,22 +1048,12 @@ class SPXBaseStrategy(BaseStrategy):
 
                 mid = (bid + ask) / 2.0
                 spread = ask - bid
-
+                
                 if max_spread is not None and spread > max_spread:
                     continue
 
                 strike = float(option.strike_price.as_double())
-
-                # Calculate IV from mid-price
-                iv = BlackScholes.implied_volatility(
-                    target_price=mid, option_type=opt_type, S=spx, K=strike, T=T, r=r,
-                    q=q
-                )
-                if iv is None or iv <= 0.01:
-                    continue
-
-                # Calculate delta
-                delta = BlackScholes.delta(opt_type, spx, strike, T, r, iv, q=q)
+                delta = float(greeks_data.delta)
                 abs_delta = abs(delta)
 
                 candidates.append({
@@ -1023,32 +1063,45 @@ class SPXBaseStrategy(BaseStrategy):
                     'mid': mid,
                     'spread': spread,
                     'strike': strike,
-                    'iv': iv,
+                    'iv': greeks_data.vol,
                     'bid': bid,
                     'ask': ask,
                 })
 
-                self.logger.info(
-                    f"  ${strike:.0f}: Δ={delta:.4f} IV={iv:.2%} "
+                self.logger.debug(
+                    f"  ${strike:.0f}: Δ={delta:.4f} IV={greeks_data.vol:.2%} "
                     f"Mid=${mid:.2f} Spread=${spread:.2f}"
                 )
 
             except Exception as e:
-                self.logger.warning(f"Delta calc failed for {option.id}: {e}")
+                self.logger.warning(f"Greeks retrieval failed for {option.id}: {e}")
 
         if not candidates:
-            self.logger.warning(f"Delta search {search_id[:8]}: no valid candidates")
-            self._unsubscribe_from_options(subscribed_ids, None)
+            self.logger.warning(f"Delta search {search_id[:8]}: no valid candidates after evaluation")
+            self._unsubscribe_from_options(subscribed_ids, None, exclude_search_id=search_id)
             if callback:
                 callback(search_id, None, None)
             return
 
+        # Sort candidates by proximity to target delta
+        candidates.sort(key=lambda x: abs(x['abs_delta'] - abs_target))
+        
+        # Log top 10 closest strikes for transparency
+        self.logger.info(f"📊 Top 10 closest strikes for search {search_id[:8]}:")
+        for i, c in enumerate(candidates[:10]):
+            dist = abs(c['abs_delta'] - abs_target)
+            self.logger.info(
+                f"  {i+1}. Strike ${c['strike']:.0f} | Δ={c['delta']:.4f} | "
+                f"Dist={dist:.4f} | Mid=${c['mid']:.2f} | IV={c['iv']:.2%}"
+            )
+
         # Select option closest to target delta (by absolute value)
-        best = min(candidates, key=lambda x: abs(x['abs_delta'] - abs_target))
+        best = candidates[0]
         selected_option = best['option']
 
         # Unsubscribe from all EXCEPT selected
-        self._unsubscribe_from_options(subscribed_ids, selected_option.id)
+        self._unsubscribe_from_options(subscribed_ids, keep_instrument_ids=[selected_option.id], exclude_search_id=search_id)
+
 
         self.logger.info(
             f"✅ Delta search {search_id[:8]} selected: "
@@ -1056,8 +1109,223 @@ class SPXBaseStrategy(BaseStrategy):
             f"(target={target_delta:.3f}) IV={best['iv']:.2%} Mid=${best['mid']:.2f}"
         )
 
+    def find_options_by_deltas(
+        self,
+        target_deltas: List[float],
+        option_kind: OptionKind,
+        expiry_date: Optional[str] = None,
+        selection_delay_seconds: float = 12.0,
+        callback: Optional[Callable] = None,
+        max_spread: Optional[float] = None,
+    ) -> Optional[str]:
+        """
+        Find multiple SPX options with specific target deltas in parallel.
+        
+        This method is more efficient than calling find_option_by_delta 
+        multiple times sequentially, as it reduces total wait time and 
+        ensures consistency.
+        
+        Args:
+            target_deltas: List of target deltas (e.g. [-0.25, -0.14])
+            option_kind: CALL or PUT
+            expiry_date: Date string YYYYMMDD
+            selection_delay_seconds: Seconds to wait for quotes
+            callback: Called with (search_id, List[selected_options], List[stats])
+            max_spread: Optional maximum allowed bid-ask spread
+            
+        Returns:
+            search_id (str) or None on immediate failure.
+        """
+        search_id = str(uuid.uuid4())
+        
+        # Determine expiry date
+        if expiry_date is None:
+            expiry_date = self.clock.utc_now().date().strftime("%Y%m%d")
+
+        self.logger.info(
+            f"🔍 Multi-Delta Search {search_id[:8]} started | Targets={target_deltas} | Expiry={expiry_date}"
+        )
+
+        # Store search state
+        self._premium_searches[search_id] = {
+            'search_id': search_id,
+            'search_type': 'multi_delta',
+            'target_deltas': target_deltas,
+            'option_kind': option_kind,
+            'expiry_date': expiry_date,
+            'max_spread': max_spread,
+            'callback': callback,
+            'received_options': [],
+            'subscribed_instrument_ids': [],
+            'active': True,
+        }
+
+        # Filter range based on current SPX price to avoid hitting IB ticker limit
+        current_price = self.current_spx_price
+        if current_price <= 0:
+             # Fallback to cache lookup if live price hasn't arrived yet
+             last_trade = self.cache.trade_tick(self.spx_instrument_id)
+             if last_trade:
+                 current_price = float(last_trade.price)
+        
+        strike_limit_range = 150.0 # Points
+        
+        # Filter cached instruments for matching options
+        all_instruments = self.cache.instruments()
+        match_count = 0
+        
+        # Year format fallback
+        expiry_short = expiry_date[2:] if len(expiry_date) == 8 else expiry_date
+        
+        for inst in all_instruments:
+            # Must be an option
+            if not hasattr(inst, 'option_kind') or inst.option_kind != option_kind:
+                continue
+            
+            # Must match symbol (SPX or SPXW)
+            symbol = str(inst.id.symbol)
+            if not (symbol.startswith("SPX") or symbol.startswith("SPXW")):
+                continue
+                
+            # Must match expiry
+            inst_expiry = ""
+            if hasattr(inst, 'expiry'):
+                inst_expiry = str(inst.expiry)
+            elif hasattr(inst, 'last_trade_date'):
+                inst_expiry = str(inst.last_trade_date)
+            
+            if expiry_date not in inst_expiry and expiry_short not in symbol:
+                continue
+
+            # --- MASS TICKER LIMIT PROTECTION ---
+            if current_price > 0:
+                strike = float(inst.strike_price.as_double())
+                if abs(strike - current_price) > strike_limit_range:
+                    continue
+
+            # This is a candidate
+            self.subscribe_quote_ticks(inst.id)
+            self._premium_searches[search_id]['received_options'].append(inst)
+            self._premium_searches[search_id]['subscribed_instrument_ids'].append(inst.id)
+            match_count += 1
+
+        if match_count == 0:
+            self.logger.warning(
+                f"❌ Multi-delta search {search_id[:8]} found NO options matching expiry {expiry_date} in cache"
+            )
+            self._premium_searches.pop(search_id, None)
+            if callback:
+                callback(search_id, [], [])
+            return None
+
+        self.logger.info(
+            f"📡 Multi-delta search {search_id[:8]} found {match_count} candidates in cache for expiry {expiry_date}"
+        )
+
+        # Set selection timer
+        timer_name = f"{self.id}.premium_search.{search_id}"
+        self.clock.set_time_alert(
+            name=timer_name,
+            alert_time=self.clock.utc_now() + timedelta(seconds=selection_delay_seconds),
+            callback=self._on_multi_delta_search_complete
+        )
+
+        return search_id
+
+    def _on_multi_delta_search_complete(self, timer_event):
+        """
+        Finalizes multi-delta discovery. Selects best match for EACH target delta.
+        """
+        timer_name = timer_event.name if hasattr(timer_event, 'name') else str(timer_event)
+        search_id = timer_name.rsplit('.', 1)[-1]
+        
+        state = self._premium_searches.get(search_id)
+        if not state or not state.get('active'):
+            return
+
+        state['active'] = False
+        received_options = state['received_options']
+        target_deltas = state['target_deltas']
+        max_spread = state['max_spread']
+        callback = state['callback']
+        subscribed_ids = state.get('subscribed_instrument_ids', [])
+
+        # Remove from active searches
+        self._premium_searches.pop(search_id, None)
+
+        if not received_options:
+            self.logger.warning(f"Multi-delta search {search_id[:8]}: no options to evaluate")
+            self._unsubscribe_from_options(subscribed_ids, None, exclude_search_id=search_id)
+            if callback:
+                callback(search_id, [], [])
+            return
+
+        # 1. Evaluate all candidates once to get their Greeks/Prices
+        candidates = []
+        for option in received_options:
+            try:
+                greeks_data = self.greeks.instrument_greeks(option.id)
+                if not greeks_data or greeks_data.delta is None:
+                    continue
+
+                quote = self.cache.quote_tick(option.id)
+                if not quote: continue
+
+                bid = quote.bid_price.as_double()
+                ask = quote.ask_price.as_double()
+                if bid <= 0 or ask <= 0: continue
+
+                mid = (bid + ask) / 2.0
+                spread = ask - bid
+                if max_spread is not None and spread > max_spread:
+                    continue
+
+                candidates.append({
+                    'option': option,
+                    'delta': float(greeks_data.delta),
+                    'abs_delta': abs(float(greeks_data.delta)),
+                    'mid': mid,
+                    'strike': float(option.strike_price.as_double()),
+                    'iv': greeks_data.vol,
+                    'bid': bid,
+                    'ask': ask,
+                    'spread': spread
+                })
+            except Exception:
+                continue
+
+        if not candidates:
+            self.logger.warning(f"Multi-delta search {search_id[:8]}: evaluation failed for all options")
+            self._unsubscribe_from_options(subscribed_ids, None, exclude_search_id=search_id)
+            if callback: callback(search_id, [], [])
+            return
+
+        # 2. For each target, find the best match
+        results_options = [None] * len(target_deltas)
+        results_stats = [None] * len(target_deltas)
+        keep_instrument_ids = []
+
+        for i, target in enumerate(target_deltas):
+            abs_target = abs(target)
+            
+            # Find closest delta for THIS target
+            best = min(candidates, key=lambda x: abs(x['abs_delta'] - abs_target))
+            
+            results_options[i] = best['option']
+            results_stats[i] = best
+            keep_instrument_ids.append(best['option'].id)
+
+            self.logger.info(
+                f"✅ Multi-delta {search_id[:8]} match for Target {target:.3f}: "
+                f"Strike ${best['strike']:.0f} Δ={best['delta']:.4f}"
+            )
+
+        # 3. Comprehensive cleanup
+        self._unsubscribe_from_options(subscribed_ids, keep_instrument_ids=keep_instrument_ids, exclude_search_id=search_id)
+
+        # 4. Final Callback
         if callback:
-            callback(search_id, selected_option, best)
+            callback(search_id, results_options, results_stats)
 
     def on_instrument(self, instrument: Instrument):
         """

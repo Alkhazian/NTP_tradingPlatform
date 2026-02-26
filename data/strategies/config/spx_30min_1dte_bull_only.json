@@ -1,7 +1,7 @@
 {
     "id": "spx_30min_1dte_bull_only",
     "name": "SPX 1DTE ORB30 Bull Only",
-    "enabled": false,
+    "enabled": true,
     "instrument_id": "^SPX.CBOE",
     "strategy_type": "SPX1DTEBullPutStrategy",
     "order_size": 1,
@@ -19,7 +19,7 @@
         "opening_range_minutes": 30,
         "entry_cutoff_time_str": "15:00:00",
         "signal_max_age_seconds": 180,
-        "entry_price_adjustment": 0.5,
+        "entry_price_adjustment": 0.75,
         "entry_timeout_seconds": 60,
         "fill_timeout_seconds": 600,
         "require_strong_reclaim": false,

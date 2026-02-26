@@ -184,8 +184,11 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
     # =========================================================================
 
     def on_start_safe(self):
-        """Called after primary instrument ready. Subscribe to ES data."""
+        """Called after primary instrument ready. Subscribe to ES data and warm up option chain."""
         super().on_start_safe()
+
+
+
 
         # Set up ES bar types
         self._es_daily_bar_type = BarType.from_str(
@@ -198,6 +201,13 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
         # Subscribe to ES bars
         self._subscribe_es_data()
         self._macro_clear_today = self._is_macro_clear()
+
+        # Warm up option chain for 1DTE expiry
+        try:
+            target_expiry = self._get_target_expiry()
+            self.request_option_chain(target_expiry)
+        except Exception as e:
+            self.logger.error(f"Failed to warm up option chain: {e}")
 
 
         self.logger.info(
@@ -729,13 +739,28 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
     # ENTRY SEQUENCE — DELTA-BASED OPTION SEARCH
     # =========================================================================
 
+    def _get_target_expiry(self) -> str:
+        """
+        Calculate the 1DTE expiry date (next trading day).
+        Returns: Expiry date in 'YYYYMMDD' format.
+        """
+        today = self.clock.utc_now().astimezone(self.tz).date()
+        tomorrow = today + timedelta(days=1)
+        
+        # Skip weekends
+        if tomorrow.weekday() == 5:  # Saturday
+            tomorrow += timedelta(days=2)
+        elif tomorrow.weekday() == 6:  # Sunday
+            tomorrow += timedelta(days=1)
+            
+        return tomorrow.strftime("%Y%m%d")
+
     def _initiate_entry(self):
         """Start the entry sequence: search for put options by delta."""
         self.entry_in_progress = True
         # NOTE: traded_today is intentionally NOT set here.
         # It is only set in _check_and_submit_entry() on successful order submission.
-        # Setting it here prematurely would permanently block re-entry on days where
-        # the delta search fails (e.g. no suitable options found, IB timeout).
+        
         # Store signal time as UTC so age comparison in _check_and_submit_entry
         # (which uses clock.utc_now()) is always apples-to-apples.
         self._signal_time = self.clock.utc_now()
@@ -750,95 +775,79 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
         
         self.save_state()
 
-        # Calculate 1DTE expiry (tomorrow)
-        today = self.clock.utc_now().astimezone(self.tz).date()
-        tomorrow = today + timedelta(days=1)
-        # Skip weekends
-        if tomorrow.weekday() == 5:  # Saturday
-            tomorrow += timedelta(days=2)
-        elif tomorrow.weekday() == 6:  # Sunday
-            tomorrow += timedelta(days=1)
-        self._1dte_expiry = tomorrow.strftime("%Y%m%d")
+        # Calculate 1DTE expiry
+        self._1dte_expiry = self._get_target_expiry()
 
         self.logger.info(
             f"📋 Starting entry sequence | 1DTE Expiry: {self._1dte_expiry} | "
             f"Short Δ={self.short_put_delta} Long Δ={self.long_put_delta}"
         )
 
-        # Search for short put (closer to ATM, higher absolute delta)
-        self._short_put_search_id = self.find_option_by_delta(
-            target_delta=self.short_put_delta,
+        # Search for BOTH legs in parallel (cutting setup time in half)
+        self.find_options_by_deltas(
+            target_deltas=[self.short_put_delta, self.long_put_delta],
             option_kind=OptionKind.PUT,
             expiry_date=self._1dte_expiry,
-            strike_range=40,   # 200pt range to cover 100-150pt OTM
-            strike_step=5,
-            selection_delay_seconds=20.0,
-            callback=self._on_short_put_found
+            selection_delay_seconds=10.0,
+            callback=self._on_spread_legs_found
         )
 
-    def _on_short_put_found(self, search_id, selected_option, option_data):
-        """Callback when short put delta search completes."""
-        if not selected_option or not option_data:
-            self._abort_entry("No short put found matching target delta")
+    def _on_spread_legs_found(self, search_id, selected_options, options_data):
+        """Callback when multi-delta search completes for both legs."""
+        if not self.entry_in_progress:
             return
 
-        short_strike = option_data['strike']
-        self._target_short_strike = short_strike
-        self._found_legs[short_strike] = selected_option
-
-        self.logger.info(
-            f"✅ SHORT PUT selected | Strike=${short_strike:.0f} | "
-            f"Δ={option_data['delta']:.4f} (target={self.short_put_delta}) | "
-            f"IV={option_data['iv']:.2%} | Mid=${option_data['mid']:.2f}",
-            extra={"extra": {"event_type": "short_put_selected",
-                             "strike": short_strike, "delta": option_data['delta'],
-                             "iv": option_data['iv'], "mid": option_data['mid']}}
-        )
-        self._notify(
-            f"✅ Short Put: ${short_strike:.0f} Δ={option_data['delta']:.4f} "
-            f"IV={option_data['iv']:.2%} Mid=${option_data['mid']:.2f}"
-        )
-
-        # Now search for long put (further OTM, lower absolute delta)
-        self._long_put_search_id = self.find_option_by_delta(
-            target_delta=self.long_put_delta,
-            option_kind=OptionKind.PUT,
-            expiry_date=self._1dte_expiry,
-            strike_range=40,
-            strike_step=5,
-            selection_delay_seconds=20.0,
-            callback=self._on_long_put_found
-        )
-
-    def _on_long_put_found(self, search_id, selected_option, option_data):
-        """Callback when long put delta search completes."""
-        if not selected_option or not option_data:
-            self._abort_entry("No long put found matching target delta")
+        if len(selected_options) < 2 or any(opt is None for opt in selected_options):
+            self._abort_entry("Failed to find both legs for the bull put spread")
             return
 
-        long_strike = option_data['strike']
+        # Short put is first in target_deltas list
+        short_opt = selected_options[0]
+        short_data = options_data[0]
+        short_strike = short_data['strike']
+        
+        # Long put is second
+        long_opt = selected_options[1]
+        long_data = options_data[1]
+        long_strike = long_data['strike']
 
-        # Ensure long strike is below short strike
-        if self._target_short_strike and long_strike >= self._target_short_strike:
+        # Ensure long strike is below short strike (safety check)
+        if long_strike >= short_strike:
             self._abort_entry(
-                f"Long strike ${long_strike:.0f} >= Short strike ${self._target_short_strike:.0f}"
+                f"Invalid Spread: Long strike ${long_strike:.0f} >= Short strike ${short_strike:.0f}"
             )
             return
 
-        self._target_long_strike = long_strike
-        self._found_legs[long_strike] = selected_option
-
+        # Handle Short leg
+        self._target_short_strike = short_strike
+        self._found_legs[short_strike] = short_opt
         self.logger.info(
-            f"✅ LONG PUT selected | Strike=${long_strike:.0f} | "
-            f"Δ={option_data['delta']:.4f} (target={self.long_put_delta}) | "
-            f"IV={option_data['iv']:.2%} | Mid=${option_data['mid']:.2f}",
-            extra={"extra": {"event_type": "long_put_selected",
-                             "strike": long_strike, "delta": option_data['delta'],
-                             "iv": option_data['iv'], "mid": option_data['mid']}}
+            f"✅ SHORT PUT selected | Strike=${short_strike:.0f} | "
+            f"Δ={short_data['delta']:.4f} (target={self.short_put_delta}) | "
+            f"IV={short_data['iv']:.2%} | Mid=${short_data['mid']:.2f}",
+            extra={"extra": {"event_type": "short_put_selected",
+                             "strike": short_strike, "delta": short_data['delta'],
+                             "iv": short_data['iv'], "mid": short_data['mid']}}
         )
         self._notify(
-            f"✅ Long Put: ${long_strike:.0f} Δ={option_data['delta']:.4f} "
-            f"IV={option_data['iv']:.2%} Mid=${option_data['mid']:.2f}"
+            f"✅ Short Put: ${short_strike:.0f} Δ={short_data['delta']:.4f} "
+            f"IV={short_data['iv']:.2%} Mid=${short_data['mid']:.2f}"
+        )
+
+        # Handle Long leg
+        self._target_long_strike = long_strike
+        self._found_legs[long_strike] = long_opt
+        self.logger.info(
+            f"✅ LONG PUT selected | Strike=${long_strike:.0f} | "
+            f"Δ={long_data['delta']:.4f} (target={self.long_put_delta}) | "
+            f"IV={long_data['iv']:.2%} | Mid=${long_data['mid']:.2f}",
+            extra={"extra": {"event_type": "long_put_selected",
+                             "strike": long_strike, "delta": long_data['delta'],
+                             "iv": long_data['iv'], "mid": long_data['mid']}}
+        )
+        self._notify(
+            f"✅ Long Put: ${long_strike:.0f} Δ={long_data['delta']:.4f} "
+            f"IV={long_data['iv']:.2%} Mid=${long_data['mid']:.2f}"
         )
 
         # Both legs found — create spread
