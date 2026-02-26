@@ -881,46 +881,13 @@ class SPXRangeStrategy(SPXBaseStrategy):
             # to avoid being completely blind if the market stays thin
             if self._skipped_quote_count >= self.MAX_CONSECUTIVE_SKIPS:
                 self.logger.warning(
-                    f"⚠️ LIQUIDITY FILTER OVERRIDE | Accepting thin quote after {self._skipped_quote_count} consecutive skips "
-                    f"| Bid: {bid:.4f} (size={bid_size}) | Ask: {ask:.4f} (size={ask_size})",
-                    extra={
-                        "extra": {
-                            "event_type": "quote_filter_override",
-                            "skipped_count": self._skipped_quote_count,
-                            "bid": bid, "ask": ask,
-                            "bid_size": bid_size, "ask_size": ask_size
-                        }
-                    }
+                    f"⚠️ LIQUIDITY FILTER OVERRIDE | Accepting low liquidity quote after {self._skipped_quote_count} consecutive skips | Bid: {bid:.4f} (size={bid_size}) | Ask: {ask:.4f} (size={ask_size})",
                 )
                 # Fall through to process the tick
             else:
-                # Log first skip and then every 5th skip to avoid log spam
-                if self._skipped_quote_count == 1 or self._skipped_quote_count % 5 == 0:
-                    self.logger.info(
-                        f"🔇 QUOTE SKIPPED (thin liquidity) | #{self._skipped_quote_count} "
-                        f"| Bid: {bid:.4f} (size={bid_size}) | Ask: {ask:.4f} (size={ask_size})",
-                        extra={
-                            "extra": {
-                                "event_type": "quote_skipped_thin_liquidity",
-                                "skipped_count": self._skipped_quote_count,
-                                "bid": bid, "ask": ask,
-                                "bid_size": bid_size, "ask_size": ask_size
-                            }
-                        }
-                    )
                 return
         
         # Valid quote - reset skip counter and store
-        if self._skipped_quote_count > 0:
-            self.logger.info(
-                f"✅ QUOTE RESTORED | Skipped {self._skipped_quote_count} thin quotes before valid quote",
-                extra={
-                    "extra": {
-                        "event_type": "quote_restored",
-                        "skipped_count": self._skipped_quote_count
-                    }
-                }
-            )
         self._skipped_quote_count = 0
         self._last_valid_spread_quote = tick
 
