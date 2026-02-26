@@ -216,20 +216,20 @@ class TradingDataService:
                     strategy_id,
                     instrument_id,
                     trade_type,
-                    entry_price,
-                    quantity,
+                    self._r2(entry_price),
+                    self._r2(quantity),
                     direction,
                     entry_time,
                     self._safe_json(entry_reason),
-                    entry_target_price,
-                    entry_stop_loss,
+                    self._r2(entry_target_price),
+                    self._r2(entry_stop_loss),
                     self._safe_json(strikes),
                     expiration,
                     self._safe_json(legs),
                     self._safe_json(strategy_config),
-                    max_profit,
-                    max_loss,
-                    entry_premium_per_contract,
+                    self._r2(max_profit),
+                    self._r2(max_loss),
+                    self._r2(entry_premium_per_contract),
                 ))
                 
                 conn.commit()
@@ -280,6 +280,9 @@ class TradingDataService:
             
             timestamp = timestamp or datetime.utcnow().isoformat() + "Z"
             updates_needed = False
+            
+            # Round current_pnl before tracking to avoid float precision noise
+            current_pnl = self._r2(current_pnl)
             
             # Update max profit
             if current_pnl > trade_data["max_unrealized_profit"]:
@@ -407,15 +410,15 @@ class TradingDataService:
                     WHERE trade_id = ?
                 """, (
                     exit_time,
-                    exit_price,
+                    self._r2(exit_price),
                     exit_reason,
                     duration_seconds,
-                    round(pnl, 2),
-                    total_commission,
-                    round(net_pnl, 2),
+                    self._r2(pnl),
+                    self._r2(total_commission),
+                    self._r2(net_pnl),
                     result,
-                    trade_data.get("max_unrealized_profit", 0),
-                    trade_data.get("max_unrealized_loss", 0),
+                    self._r2(trade_data.get("max_unrealized_profit", 0)),
+                    self._r2(trade_data.get("max_unrealized_loss", 0)),
                     max_dd_time,
                     self._safe_json(trade_data.get("pnl_snapshots", [])),
                     trade_id,
@@ -488,14 +491,14 @@ class TradingDataService:
                     trade_direction,
                     order_side,
                     order_type,
-                    quantity,
-                    price_limit,
+                    self._r2(quantity),
+                    self._r2(price_limit),
                     status,
                     submitted_time,
                     filled_time,
-                    filled_quantity,
-                    filled_price,
-                    commission,
+                    self._r2(filled_quantity),
+                    self._r2(filled_price),
+                    self._r2(commission),
                     self._safe_json(raw_data),
                 ))
                 
@@ -541,13 +544,13 @@ class TradingDataService:
                     params.append(filled_time)
                 if filled_quantity is not None:
                     updates.append("filled_quantity = ?")
-                    params.append(filled_quantity)
+                    params.append(self._r2(filled_quantity))
                 if filled_price is not None:
                     updates.append("filled_price = ?")
-                    params.append(filled_price)
+                    params.append(self._r2(filled_price))
                 if commission is not None:
                     updates.append("commission = ?")
-                    params.append(commission)
+                    params.append(self._r2(commission))
                 
                 if not updates:
                     return True
@@ -717,6 +720,14 @@ class TradingDataService:
             return json.dumps(data)
         except Exception:
             return None
+
+    def _r2(self, val: Any) -> Any:
+        """Safely round numbers to 2 decimal places."""
+        if val is None:
+            return None
+        if isinstance(val, (int, float)):
+            return round(float(val), 2)
+        return val
     
     def _load_active_trade(self, trade_id: str) -> bool:
         """Load a trade into active tracking from database."""
@@ -758,8 +769,8 @@ class TradingDataService:
                         updated_at = datetime('now')
                     WHERE trade_id = ?
                 """, (
-                    trade_data.get("max_unrealized_profit", 0),
-                    trade_data.get("max_unrealized_loss", 0),
+                    self._r2(trade_data.get("max_unrealized_profit", 0)),
+                    self._r2(trade_data.get("max_unrealized_loss", 0)),
                     trade_data.get("max_dd_time"),
                     trade_id,
                 ))
