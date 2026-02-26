@@ -1796,9 +1796,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
             # SCENARIO 2: Partial fill — cancel remainder, keep partial position
             # ----------------------------------------------------------------
             self.logger.warning(
-                f"⏱️ FILL TIMEOUT | Partial Fill | Filled: {filled_qty:.0f}/{total_qty:.0f} "
-                f"(effective_qty={actual_filled_qty:.0f}, order.filled_qty={order_filled_qty:.0f}) | "
-                f"Cancelling unfilled: {unfilled_qty:.0f} contracts | Order: {self._entry_order_id}",
+                f"⏱️ FILL TIMEOUT | Partial Fill | Filled: {filled_qty:.0f}/{total_qty:.0f} (effective_qty={actual_filled_qty:.0f}, order.filled_qty={order_filled_qty:.0f}) | Cancelling unfilled: {unfilled_qty:.0f} contracts | Order: {self._entry_order_id}",
                 extra={
                     "extra": {
                         "event_type": "fill_timeout_partial",
@@ -1813,8 +1811,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
                 }
             )
             self._notify(
-                f"⏱️ FILL TIMEOUT | Filled: {filled_qty:.0f}/{total_qty:.0f} | "
-                f"Cancelling unfilled: {unfilled_qty:.0f} contracts"
+                f"⏱️ FILL TIMEOUT | Filled: {filled_qty:.0f}/{total_qty:.0f} | Cancelling unfilled: {unfilled_qty:.0f} contracts"
             )
             self.cancel_order(order)
             # Position already exists with filled_qty contracts.
@@ -1823,8 +1820,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
             # DB SYNC: Update trade quantity to reflect actual filled amount.
             if self._current_trade_id:
                 self.logger.info(
-                    f"📝 Updating DB trade quantity | Trade: {self._current_trade_id} | "
-                    f"Original: {total_qty:.0f} → Actual: {filled_qty:.0f}",
+                    f"📝 Updating DB trade quantity | Trade: {self._current_trade_id} | Original: {total_qty:.0f} → Actual: {filled_qty:.0f}",
                     extra={
                         "extra": {
                             "event_type": "fill_timeout_db_quantity_update",
@@ -1843,8 +1839,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
             # SCENARIO 1: Zero fills — cancel order, remove DB record entirely
             # ----------------------------------------------------------------
             self.logger.warning(
-                f"⏱️ FILL TIMEOUT | No fills received in {self.fill_timeout_seconds}s | "
-                f"Cancelling order: {self._entry_order_id}",
+                f"⏱️ FILL TIMEOUT | No fills received in {self.fill_timeout_seconds}s | Cancelling order: {self._entry_order_id}",
                 extra={
                     "extra": {
                         "event_type": "fill_timeout_no_fills",
@@ -1926,8 +1921,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
                 if self._spread_entry_price is not None:
                     # Scenario A: real filled trade, never closed → close as EXPIRED (0DTE)
                     self.logger.warning(
-                        f"📅 Closing unclosed trade from previous day as EXPIRED | "
-                        f"Trade: {self._current_trade_id}",
+                        f"📅 Closing unclosed trade from previous day as EXPIRED | Trade: {self._current_trade_id}",
                         extra={
                             "extra": {
                                 "event_type": "daily_reset_trade_expired",
@@ -1944,8 +1938,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
                 else:
                     # Scenario B: orphan — order was submitted but never filled
                     self.logger.info(
-                        f"🗑️ Deleting orphan trade from previous day | "
-                        f"Trade: {self._current_trade_id}",
+                        f"🗑️ Deleting orphan trade from previous day | Trade: {self._current_trade_id}",
                         extra={
                             "extra": {
                                 "event_type": "daily_reset_trade_deleted",
@@ -2111,8 +2104,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
                     pass
                 reason = "order_fully_filled" if order_fully_filled else "legs_fully_filled"
                 self.logger.info(
-                    f"⏱️ Fill timeout cancelled | Entry fully filled | ID: {self._entry_order_id} | "
-                    f"Reason: {reason} | effective_qty={actual_qty:.0f} | order.status={order.status.name if order else 'N/A'}",
+                    f"⏱️ Fill timeout cancelled | Entry fully filled | ID: {self._entry_order_id} | Reason: {reason} | effective_qty={actual_qty:.0f} | order.status={order.status.name if order else 'N/A'}",
                     extra={
                         "extra": {
                             "event_type": "fill_timeout_cancelled",
@@ -2132,9 +2124,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
                     fills_data = self.get_accumulated_spread_price(str(entry_oid))
                     if fills_data:
                         self.logger.info(
-                            f"🔄 Reconciling ENTRY | Trade: {self._current_trade_id} | "
-                            f"Price: {fills_data['net_price']} | Qty: {fills_data['total_qty']} | "
-                            f"Comm: ${fills_data['total_commission']:.2f}"
+                            f"🔄 Reconciling ENTRY | Trade: {self._current_trade_id} | Price: {fills_data['net_price']} | Qty: {fills_data['total_qty']} | Comm: ${fills_data['total_commission']:.2f}"
                         )
                         self._trading_data.reconcile_trade_fills(
                             trade_id=self._current_trade_id,
