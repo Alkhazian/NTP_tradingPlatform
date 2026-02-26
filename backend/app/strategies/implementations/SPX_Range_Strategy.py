@@ -1250,6 +1250,8 @@ class SPXRangeStrategy(SPXBaseStrategy):
 
         bid = quote.bid_price.as_double()
         ask = quote.ask_price.as_double()
+        bid_size = int(quote.bid_size.as_double())
+        ask_size = int(quote.ask_size.as_double())
         mid = (bid + ask) / 2
         
         # Calculate current P&L
@@ -1305,8 +1307,6 @@ class SPXRangeStrategy(SPXBaseStrategy):
             else:
                 health = "🔴 LOSS"
             
-            bid_size = int(quote.bid_size.as_double())
-            ask_size = int(quote.ask_size.as_double())
             self.logger.info(
                 f"📊 POSITION STATUS | {health} | Qty: {current_qty:.1f} | P&L: ${total_pnl:+.2f} | Mid: {mid:.4f} | Bid: {bid:.4f} ({bid_size}) | Ask: {ask:.4f} ({ask_size}) | SL: {stop_price:.4f} | TP: {tp_price:.4f}",
                 extra={
@@ -1350,13 +1350,15 @@ class SPXRangeStrategy(SPXBaseStrategy):
                     orders_cancelled = True
             
             self.logger.info(
-                f"🛑 STOP LOSS TRIGGERED | Bid: {bid:.4f} | Ask: {ask:.4f} | Mid: {mid:.4f} <= Stop: {stop_price:.4f} | P&L: ${total_pnl:.2f}",
+                f"🛑 STOP LOSS TRIGGERED | Bid: {bid:.4f} ({bid_size}) | Ask: {ask:.4f} ({ask_size}) | Mid: {mid:.4f} <= Stop: {stop_price:.4f} | P&L: ${total_pnl:.2f}",
                 extra={
                     "extra": {
                         "event_type": "stop_loss_trigger",
                         "current_mid": mid,
                         "current_bid": bid,
+                        "current_bid_size": bid_size,
                         "current_ask": ask,
+                        "current_ask_size": ask_size,
                         "stop_price": stop_price,
                         "pnl": total_pnl,
                         "entry_credit": entry_credit,
@@ -1366,7 +1368,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
                 }
             )
             self._notify(
-                f"🛑 STOP LOSS TRIGGERED | Bid: {bid:.4f} | Ask: {ask:.4f} | Mid: {mid:.4f} <= Stop: {stop_price:.4f} | P&L: ${total_pnl:.2f}"
+                f"🛑 STOP LOSS TRIGGERED | Bid: {bid:.4f} ({bid_size}) | Ask: {ask:.4f} ({ask_size}) | Mid: {mid:.4f} <= Stop: {stop_price:.4f} | P&L: ${total_pnl:.2f}"
             )
             self._closing_in_progress = True
             self._sl_triggered = True
@@ -1385,13 +1387,15 @@ class SPXRangeStrategy(SPXBaseStrategy):
         # Check TAKE PROFIT (tp_price already calculated above)
         if mid >= tp_price:
             self.logger.info(
-                f"💰 TAKE PROFIT TRIGGERED | Bid: {bid:.4f} | Ask: {ask:.4f} | Mid: {mid:.4f} >= TP: {tp_price:.4f} | P&L: ${total_pnl:.2f}",
+                f"💰 TAKE PROFIT TRIGGERED | Bid: {bid:.4f} ({bid_size}) | Ask: {ask:.4f} ({ask_size}) | Mid: {mid:.4f} >= TP: {tp_price:.4f} | P&L: ${total_pnl:.2f}",
                 extra={
                     "extra": {
                         "event_type": "take_profit_trigger",
                         "current_mid": mid,
                         "current_bid": bid,
+                        "current_bid_size": bid_size,
                         "current_ask": ask,
+                        "current_ask_size": ask_size,
                         "tp_price": tp_price,
                         "pnl": total_pnl,
                         "entry_credit": entry_credit,
@@ -1400,7 +1404,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
                 }
             )
             self._notify(
-                f"💰 TAKE PROFIT TRIGGERED | Bid: {bid:.4f} | Ask: {ask:.4f} | Mid: {mid:.4f} >= TP: {tp_price:.4f} | P&L: ${total_pnl:.2f}"
+                f"💰 TAKE PROFIT TRIGGERED | Bid: {bid:.4f} ({bid_size}) | Ask: {ask:.4f} ({ask_size}) | Mid: {mid:.4f} >= TP: {tp_price:.4f} | P&L: ${total_pnl:.2f}"
             )
             self._closing_in_progress = True
             
