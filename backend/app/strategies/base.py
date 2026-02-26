@@ -1832,10 +1832,17 @@ class BaseStrategy(Strategy):
         aggregates those fills (accumulated during on_order_filled) and
         computes the weighted-average net spread price.
 
-        For a **credit spread** the net price is:
-            net = -(sell_avg - buy_avg)
-        where sell_avg and buy_avg are the qty-weighted average fill prices
-        across all partial fills of the respective legs.
+        Sign convention (matches the DB entry_price/exit_price convention):
+            net_price is ALWAYS negative: net = -(|sell_avg - buy_avg|)
+
+        This works for both entry and exit of a credit spread:
+          - Entry: sell_avg > buy_avg (sold expensive leg)  → negative credit received
+          - Exit:  buy_avg  > sell_avg (bought back cheap leg) → negative debit to close
+
+        The PnL formula in trading_data_service:
+            pnl = (exit_price - entry_price) * 100 * quantity
+        expects both prices to be negative, e.g.:
+            (-1.095 - (-1.55)) * 100 * 10 = +455.00 (profit)
 
         Args:
             parent_order_id: The parent spread order ID string
@@ -1843,7 +1850,7 @@ class BaseStrategy(Strategy):
 
         Returns:
             A dict with keys:
-                net_price        – net spread fill price (negative = credit)
+                net_price        – net spread fill price (always negative)
                 total_qty        – number of contracts filled
                 total_commission – total $ commission across all legs
                 fill_time        – timestamp of the last leg fill (ISO str)
@@ -1871,9 +1878,10 @@ class BaseStrategy(Strategy):
         sell_avg = sell_wp / sell_qty if sell_qty else 0.0
         buy_avg = buy_wp / buy_qty if buy_qty else 0.0
 
-        # Credit spread: we sell the more expensive leg, buy the cheaper one.
-        # Net price as negative credit: -(sell - buy)
-        net_price = -(sell_avg - buy_avg)
+        # Always negative: -(|sell - buy|)
+        # Entry: sell_avg > buy_avg → negative credit received (-1.55)
+        # Exit:  buy_avg  > sell_avg → negative debit to close (-1.095)
+        net_price = -(abs(sell_avg - buy_avg))
 
         return {
             "net_price": round(net_price, 4),
