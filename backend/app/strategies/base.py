@@ -1619,20 +1619,10 @@ class BaseStrategy(Strategy):
 
                 qty = float(event.last_qty)
                 px = float(event.last_px)
-                comm = 0.0
-                if event.commission:
-                    try:
-                        comm = event.commission.as_double()
-                    except Exception:
-                        try:
-                            comm = float(str(event.commission).split()[0])
-                        except Exception:
-                            pass
-
                 if event.order_side == OrderSide.SELL:
-                    acc["sell_fills"].append((qty, px, comm))
+                    acc["sell_fills"].append((qty, px))
                 else:
-                    acc["buy_fills"].append((qty, px, comm))
+                    acc["buy_fills"].append((qty, px))
 
                 # Derive parent venue_order_id (strip the -LEG-… suffix)
                 try:
@@ -1852,7 +1842,6 @@ class BaseStrategy(Strategy):
             A dict with keys:
                 net_price        – net spread fill price (always negative)
                 total_qty        – number of contracts filled
-                total_commission – total $ commission across all legs
                 fill_time        – timestamp of the last leg fill (ISO str)
                 venue_order_id   – broker order number (str or None)
             Or None if no fills have been accumulated for this order.
@@ -1867,13 +1856,11 @@ class BaseStrategy(Strategy):
         if not sell_fills or not buy_fills:
             return None
 
-        sell_qty = sum(q for q, _, _ in sell_fills)
-        sell_wp = sum(q * p for q, p, _ in sell_fills)
-        sell_comm = sum(c for _, _, c in sell_fills)
+        sell_qty = sum(q for q, _ in sell_fills)
+        sell_wp = sum(q * p for q, p in sell_fills)
 
-        buy_qty = sum(q for q, _, _ in buy_fills)
-        buy_wp = sum(q * p for q, p, _ in buy_fills)
-        buy_comm = sum(c for _, _, c in buy_fills)
+        buy_qty = sum(q for q, _ in buy_fills)
+        buy_wp = sum(q * p for q, p in buy_fills)
 
         sell_avg = sell_wp / sell_qty if sell_qty else 0.0
         buy_avg = buy_wp / buy_qty if buy_qty else 0.0
@@ -1886,7 +1873,6 @@ class BaseStrategy(Strategy):
         return {
             "net_price": round(net_price, 4),
             "total_qty": min(sell_qty, buy_qty),
-            "total_commission": round(sell_comm + buy_comm, 2),
             "fill_time": acc["last_fill_time"],
             "venue_order_id": acc["venue_order_id"],
         }

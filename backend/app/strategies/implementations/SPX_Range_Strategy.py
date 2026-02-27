@@ -93,6 +93,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self._closing_in_progress: bool = False  # Prevents duplicate close orders and log spam
         self._sl_triggered: bool = False  # Prevents SL from re-triggering after first fire
         self._entry_order_id: Optional[ClientOrderId] = None  # Track entry order for fill timeout
+        self._actual_qty: float = 0.0  # Track actual filled quantity for commission
         
         # Telegram
         self.telegram = TelegramNotificationService()
@@ -106,9 +107,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
         # Trading data service (orders + trades + drawdown tracking)
         self._trading_data = TradingDataService(db_path="data/trading.db")
         self._current_trade_id: Optional[str] = None
-        self._total_commission: float = 0.0  # Track total commission for the trade
         self._pending_close_data: Optional[Dict] = None  # Deferred DB write data (50ms window)
-        self._entry_commission: float = 0.0  # Entry commission for cross-validation at close
         
         # Spread quote liquidity filter
         # Quotes with bid_size or ask_size <= MIN_QUOTE_SIZE are considered unreliable
@@ -179,6 +178,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self.entry_timeout_seconds = int(params.get("entry_timeout_seconds", 35))
         self.fill_timeout_seconds = int(params.get("fill_timeout_seconds", 0))  # 0 = disabled
         self.entry_price_adjustment = float(params.get("entry_price_adjustment", 0.25))  # Bid + (Spread * adjustment)
+        self.commission_per_contract = float(params.get("commission_per_contract", 0.0))
         
         range_end_time = "Range Close" # Will be calculated/logged by base
         
@@ -1943,7 +1943,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
                         trade_id=self._current_trade_id,
                         exit_price=0.0,  # 0DTE expired worthless
                         exit_reason="EXPIRED",
-                        commission=self._total_commission,
+                        commission=0.0,
                     )
                 else:
                     # Scenario B: orphan — order was submitted but never filled
@@ -1957,15 +1957,11 @@ class SPXRangeStrategy(SPXBaseStrategy):
                         }
                     )
                     self._trading_data.delete_trade(self._current_trade_id)
-            else:
                 # Trade already closed or not found — just clean up in-memory
                 self._trading_data.cancel_trade(self._current_trade_id)
             self._current_trade_id = None
-        
-        self._total_commission = 0.0
-        self._entry_commission = 0.0
+        self._actual_qty = 0.0
         self._pending_close_data = None
-        self._processed_executions = set()
         
         # Cancel deferred close timer if active
         try:
@@ -2003,8 +1999,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
             "_closing_in_progress": self._closing_in_progress,
             "_sl_triggered": self._sl_triggered,
             "_current_trade_id": self._current_trade_id,
-            "_total_commission": self._total_commission,
-            "_entry_commission": self._entry_commission,
+            "_actual_qty": self._actual_qty,
         })
         return state
 
@@ -2022,8 +2017,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self._closing_in_progress = state.get("_closing_in_progress", False)
         self._sl_triggered = state.get("_sl_triggered", False)
         self._current_trade_id = state.get("_current_trade_id")
-        self._total_commission = state.get("_total_commission", 0.0)
-        self._entry_commission = state.get("_entry_commission", 0.0)
+        self._actual_qty = state.get("_actual_qty", 0.0)
         
         self.logger.info(
             f"State restored | Range: {self.daily_low}-{self.daily_high} | Calculated: {self.range_calculated} | Traded: {self.traded_today} | Dir: {self._signal_direction}",
@@ -2129,80 +2123,22 @@ class SPXRangeStrategy(SPXBaseStrategy):
                 entry_oid = self._entry_order_id
                 self._entry_order_id = None
                 
-                # Reconcile entry from accumulated LEG fills (captured in base.py)
                 if self._current_trade_id:
                     fills_data = self.get_accumulated_spread_price(str(entry_oid))
                     if fills_data:
                         self.logger.info(
-                            f"🔄 Reconciling ENTRY | Trade: {self._current_trade_id} | Price: {fills_data['net_price']} | Qty: {fills_data['total_qty']} | Comm: ${fills_data['total_commission']:.2f}"
+                            f"🔄 Reconciling ENTRY | Trade: {self._current_trade_id} | Price: {fills_data['net_price']} | Qty: {fills_data['total_qty']}"
                         )
                         self._trading_data.reconcile_trade_fills(
                             trade_id=self._current_trade_id,
                             actual_entry_price=fills_data["net_price"],
                             actual_quantity=fills_data["total_qty"],
-                            entry_commission=fills_data["total_commission"],
                             entry_venue_order_id=fills_data["venue_order_id"],
                             entry_fill_time=fills_data["fill_time"],
                         )
-                    
-                    # Snapshot entry commission from Source A (spread fills) for cross-validation at close.
-                    # Using _total_commission here (Source A) ensures consistent source comparison
-                    # when computing exit_comm_A = _total_commission - _entry_commission later.
-                    self._entry_commission = self._total_commission
-                    self.logger.info(
-                        f"📌 Entry commission captured (Source A): ${self._entry_commission:.2f}",
-                        extra={"extra": {"event_type": "entry_commission_captured", "entry_commission": self._entry_commission}}
-                    )
+                        self._actual_qty = float(fills_data["total_qty"])
         
-        # Track commission from any fill (Entry or Exit) with deduplication
-        if event.commission:
-            try:
-                # Deduplication logic:
-                # 1. Use trade_id (execution ID) to identify unique fills
-                # 2. Prefer OptionSpread fills over leg fills if available (to capture full commission in one go)
-                
-                exec_id = getattr(event, "trade_id", None)
-                is_duplicate = False
-                
-                if exec_id:
-                    if exec_id in self._processed_executions:
-                        self.logger.info(f"🔁 Duplicate execution commission ignored: {exec_id}")
-                        is_duplicate = True
-                    else:
-                        self._processed_executions.add(exec_id)
-                
-                if not is_duplicate:
-                    # Check instrument type - if we are trading spreads, we generally want to capture 
-                    # the commission from the spread fill event, not individual legs, unless the broker 
-                    # reports commissions ONLY on legs.
-                    # Interactive Brokers can report both.
-                    
-                    try:
-                        instrument = self.cache.instrument(event.instrument_id)
-                        legs = getattr(instrument, 'legs', None)
-                        if callable(legs):
-                            legs = legs()  # NautilusTrader may make legs a method
-                        is_spread = bool(legs and len(legs) > 0)  # True only for real OptionSpread
-                    except:
-                        is_spread = False
-
-                    # IB reports the full per-side commission on the parent OptionSpread fill event.
-                    # The commission in LEG fill events is a breakdown of that same amount — NOT additional cost.
-                    # We capture spread-level events only (is_spread=True) to avoid triple-counting.
-                    # LEG commissions are redundant with the spread commission and must be ignored here.
-                    # Independent verification is done via _leg_fill_accumulator in _execute_deferred_close().
-                    
-                    if is_spread:
-                        comm = event.commission.as_double()
-                        self._total_commission += comm
-                        self.logger.info(f"💵 Commission captured (Spread): ${comm:.2f} | Total: ${self._total_commission:.2f}")
-                    else:
-                        # It's a leg fill. Log it but don't add to total.
-                        # LEG commission is a breakdown of the spread commission, not extra cost.
-                        self.logger.info(f"💵 Commission ignored for Leg fill: ${event.commission.as_double():.2f}")
-                        
-            except Exception as e:
-                self.logger.warning(f"Failed to capture commission: {e}")
+        # Track any fill for close detection
 
             # Check if this is a close order fill (we were in closing state)
         if self._closing_in_progress:
@@ -2280,7 +2216,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
                 else:
                     exit_reason = "MANUAL"
                 
-                # ── Defer DB write by 50ms to wait for all IB commission events ──
+                # ── Defer DB write by 50ms to wait for all IB fills/state to settle ──
                 self._pending_close_data = {
                     "order_id_to_check": order_id_to_check,
                     "fill_price":        fill_price,
@@ -2288,6 +2224,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
                     "exit_time_iso":     exit_time_iso,
                     "final_pnl":         final_pnl,
                     "trade_id":          self._current_trade_id,
+                    "actual_qty":        self._actual_qty, # Use tracked quantity
                 }
                 
                 # Cancel any previous deferred close timer (guard against duplicates)
@@ -2303,17 +2240,15 @@ class SPXRangeStrategy(SPXBaseStrategy):
                     callback=self._execute_deferred_close,
                 )
                 self.logger.info(
-                    f"⏳ Close deferred 50ms | waiting for remaining commission events | "
-                    f"fill={fill_price} | reason={exit_reason} | _total_commission=${self._total_commission:.2f}",
+                    f"⏳ Close deferred 50ms | waiting for state to settle | "
+                    f"fill={fill_price} | reason={exit_reason}",
                     extra={"extra": {"event_type": "deferred_close_scheduled", "fill_price": fill_price, "exit_reason": exit_reason}}
                 )
 
     def _execute_deferred_close(self, event):
         """
         Execute the deferred DB write after 50ms window.
-        Cross-validates commission from two independent sources:
-          Source A: _total_commission (spread fill events)
-          Source B: LEG fill accumulator (get_accumulated_spread_price)
+        Calculates commission using the fixed commission_per_contract parameter.
         """
         if self._pending_close_data is None:
             return  # Already executed or data lost
@@ -2328,50 +2263,26 @@ class SPXRangeStrategy(SPXBaseStrategy):
         exit_time_iso = data["exit_time_iso"]
         final_pnl = data["final_pnl"]
         trade_id = data["trade_id"]
+        actual_qty = data["actual_qty"]
         
-        # ── Source A: spread-level commission events ──
-        exit_comm_A = self._total_commission - self._entry_commission
-        a_available = exit_comm_A > 0
+        # Calculate total round-trip commission based on contract count
+        commission = round(self.commission_per_contract * actual_qty, 2)
         
-        # ── Source B: LEG fill accumulator ──
+        self.logger.info(
+            f"💰 Final Commission calculated: ${commission:.2f} "
+            f"({actual_qty} contracts @ ${self.commission_per_contract:.2f} round-trip)",
+            extra={
+                "extra": {
+                    "event_type": "commission_calculated",
+                    "actual_qty": actual_qty,
+                    "commission_per_contract": self.commission_per_contract,
+                    "total_commission": commission
+                }
+            }
+        )
+
+        # ── Source B: LEG fill accumulator (Optional logs for auditing) ──
         fills_data = self.get_accumulated_spread_price(str(order_id_to_check))
-        exit_comm_B = fills_data["total_commission"] if fills_data else None
-        b_available = exit_comm_B is not None
-        
-        # ── Cross-validation and commission selection ──
-        if a_available and b_available:
-            if abs(exit_comm_A - exit_comm_B) < 0.05:
-                commission = self._total_commission  # A+B agree → use round-trip total
-                self.logger.info(
-                    f"✅ Commission cross-validated: A=${exit_comm_A:.2f} B=${exit_comm_B:.2f} → total=${commission:.2f}",
-                    extra={"extra": {"event_type": "commission_cross_validated", "source_a": exit_comm_A, "source_b": exit_comm_B, "total": commission}}
-                )
-            else:
-                commission = self._total_commission  # Conflict — use A (spread events) + log ERROR
-                self.logger.error(
-                    f"⚠️ Commission mismatch: A=${exit_comm_A:.2f} B=${exit_comm_B:.2f} | using A (spread events) | total=${commission:.2f}",
-                    extra={"extra": {"event_type": "commission_mismatch", "source_a": exit_comm_A, "source_b": exit_comm_B, "total": commission}}
-                )
-                self._notify("⚠️ Commission mismatch — check logs")
-        elif a_available:
-            commission = self._total_commission
-            self.logger.warning(
-                f"⚠️ Commission: using spread fill only (LEG accumulator missing) | total=${commission:.2f}",
-                extra={"extra": {"event_type": "commission_leg_missing", "total": commission}}
-            )
-        elif b_available:
-            commission = self._entry_commission + exit_comm_B
-            self.logger.warning(
-                f"⚠️ Commission: using LEG accumulator only (spread fill missing) | entry=${self._entry_commission:.2f} + exit_B=${exit_comm_B:.2f} = ${commission:.2f}",
-                extra={"extra": {"event_type": "commission_spread_missing", "total": commission}}
-            )
-        else:
-            commission = 0.0
-            self.logger.error(
-                "❌ Commission: both sources unavailable — recording 0.0",
-                extra={"extra": {"event_type": "commission_both_missing"}}
-            )
-            self._notify("❌ Commission data missing — manual check required")
         
         # ── DB writes ──
         if trade_id:
@@ -2387,12 +2298,11 @@ class SPXRangeStrategy(SPXBaseStrategy):
             if fills_data:
                 self.logger.info(
                     f"🔄 Reconciling EXIT | Trade: {trade_id} | "
-                    f"Price: {fills_data['net_price']} | Comm: ${fills_data['total_commission']:.2f}"
+                    f"Price: {fills_data['net_price']}"
                 )
                 self._trading_data.reconcile_trade_fills(
                     trade_id=trade_id,
                     actual_exit_price=fills_data["net_price"],
-                    exit_commission=fills_data["total_commission"],
                     exit_venue_order_id=fills_data["venue_order_id"],
                     exit_fill_time=fills_data["fill_time"],
                 )
@@ -2442,8 +2352,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self._closing_in_progress = False
         self._sl_triggered = False
         self._current_trade_id = None
-        self._total_commission = 0.0
-        self._entry_commission = 0.0
+        self._actual_qty = 0.0
         self._skipped_quote_count = 0
         self._last_valid_spread_quote = None
         

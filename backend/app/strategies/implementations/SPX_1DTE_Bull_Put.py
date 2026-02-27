@@ -61,6 +61,7 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
         # --- Risk Management (% of credit) ---
         self.stop_loss_pct = float(params.get("stop_loss_pct_of_credit", 180.0))
         self.take_profit_pct = float(params.get("take_profit_pct_of_credit", 40.0))
+        self.commission_per_contract = float(params.get("commission_per_contract", 0.0))
 
         # --- Entry Timing ---
 
@@ -125,8 +126,7 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
         self._sl_triggered = False
         self._entry_order_id: Optional[ClientOrderId] = None
         self._current_trade_id: Optional[str] = None
-        self._total_commission: float = 0.0
-        self._processed_executions: set = set()
+        self._actual_qty: float = 0.0
         self._last_log_minute: int = -1
         self._last_metrics_update_time: Optional[datetime] = None  # throttle DB writes
         self._last_position_log_time: Optional[datetime] = None   # throttle position status logs
@@ -1278,7 +1278,7 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
     # =========================================================================
 
     def on_order_filled_safe(self, event):
-        """Handle fills — track commission and detect position close."""
+        """Handle fills - track commission and detect position close."""
         # Cancel fill timeout on full entry fill
         if self._entry_order_id and event.client_order_id == self._entry_order_id:
             order = self.cache.order(self._entry_order_id)
@@ -1292,23 +1292,13 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
                 except Exception:
                     pass
                 self._entry_order_id = None
-
-        # Track commission (spread fills only, avoid leg double-counting)
-        if event.commission:
-            try:
-                exec_id = getattr(event, "trade_id", None)
-                if exec_id and exec_id not in self._processed_executions:
-                    self._processed_executions.add(exec_id)
-                    try:
-                        instrument = self.cache.instrument(event.instrument_id)
-                        is_spread = hasattr(instrument, "legs") or type(instrument).__name__ == "OptionSpread"
-                    except Exception:
-                        is_spread = False
-                    if is_spread:
-                        comm = event.commission.as_double()
-                        self._total_commission += comm
-            except Exception as e:
-                self.logger.warning(f"Commission tracking error: {e}")
+                
+                # Capture actual quantity for commission calculation later
+                if self._current_trade_id:
+                    fills_data = self.get_accumulated_spread_price(str(event.client_order_id))
+                    if fills_data:
+                        self._actual_qty = float(fills_data["total_qty"])
+                        self.logger.info(f"🔄 Entry quantity captured: {self._actual_qty} lots")
 
         # Handle close confirmation
         if self._closing_in_progress:
@@ -1356,39 +1346,36 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
 
         now_iso = self.clock.utc_now().astimezone(self.tz).isoformat()
 
+        # Calculate commission using simplified model
+        commission = round(self.commission_per_contract * self._actual_qty, 2)
+
         if self._current_trade_id and self._trading_data:
             try:
                 self._trading_data.close_trade(
                     trade_id=self._current_trade_id,
                     exit_price=fill_price, exit_reason=exit_reason,
-                    exit_time=now_iso, commission=self._total_commission
+                    exit_time=now_iso, commission=commission
                 )
                 self._trading_data.record_order(
                     strategy_id=self.strategy_id,
                     instrument_id=str(self.spread_instrument.id) if self.spread_instrument else "UNKNOWN",
                     trade_type="PUT_CREDIT_SPREAD", trade_direction="EXIT",
                     order_side="SELL", order_type="LIMIT",
-                    # BUGFIX: Do NOT call get_effective_spread_quantity() here — the position
-                    # is already flat (== 0) by the time this runs, so the call always
-                    # returns 0 and the fallback config_quantity is always used anyway.
-                    # Use config_quantity directly (consistent with template strategy).
-                    # If a partial fill occurred on entry, _on_fill_timeout already called
-                    # update_trade_quantity() on the trade record.
-                    quantity=self.config_quantity,
+                    quantity=self._actual_qty,
                     status="FILLED",
                     price_limit=fill_price, submitted_time=now_iso,
                     trade_id=self._current_trade_id,
                     client_order_id=f"{self._current_trade_id}-EXIT",
                     filled_time=now_iso,
-                    filled_quantity=self.config_quantity,
-                    filled_price=fill_price, commission=self._total_commission,
+                    filled_quantity=self._actual_qty,
+                    filled_price=fill_price, commission=commission,
                     raw_data={"trigger": exit_reason, "pnl": final_pnl}
                 )
             except Exception as e:
                 self.logger.error(f"Failed to record exit: {e}")
 
         self.logger.info(
-            f"✅ POSITION CLOSED | Exit={exit_reason} | PnL=${final_pnl:.2f} | Commission=${self._total_commission:.2f}",
+            f"✅ POSITION CLOSED | Exit={exit_reason} | PnL=${final_pnl:.2f} | Commission=${commission:.2f} ({self._actual_qty} contracts @ ${self.commission_per_contract:.2f})",
             extra={"extra": {"event_type": "position_closed",
                              "exit_reason": exit_reason, "pnl": final_pnl}}
         )
@@ -1400,7 +1387,7 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
         self._sl_triggered = False
         self.entry_in_progress = False  # Safety: clear in case of unexpected re-entry race
         self._current_trade_id = None
-        self._total_commission = 0.0
+        self._actual_qty = 0.0
         self._active_spread_order_limits.clear()
         self.save_state()
 
@@ -1429,6 +1416,7 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
                 pass
             if self._current_trade_id and self._trading_data:
                 self._trading_data.update_trade_quantity(self._current_trade_id, filled_qty)
+                self._actual_qty = filled_qty
         else:
             self.logger.warning(f"⏱️ FILL TIMEOUT | No fills in {self.fill_timeout_seconds}s")
             self._notify(f"⏱️ FILL TIMEOUT | No fills, order cancelled")
@@ -1568,14 +1556,13 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
                         self._trading_data.close_trade(
                             trade_id=self._current_trade_id,
                             exit_price=0.0, exit_reason="EXPIRED",
-                            commission=self._total_commission
+                            commission=0.0
                         )
                     else:
                         self._trading_data.delete_trade(self._current_trade_id)
                 self._current_trade_id = None
 
-            self._total_commission = 0.0
-            self._processed_executions = set()
+            self._actual_qty = 0.0
         else:
             self.logger.info(
                 f"🌙 OVERNIGHT POSITION | Maintaining state for Day 2 | Qty: {position_qty} | Trade ID: {self._current_trade_id}"
@@ -1654,7 +1641,7 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
             "_closing_in_progress": self._closing_in_progress,
             "_sl_triggered": self._sl_triggered,
             "_current_trade_id": self._current_trade_id,
-            "_total_commission": self._total_commission,
+            "_actual_qty": self._actual_qty,
             "_es_ema_value": self._es_ema_value,
             "_es_vwma_value": self._es_vwma_value,
             "_es_sma_value": self._es_sma_value,
@@ -1689,7 +1676,7 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
         self._closing_in_progress = state.get("_closing_in_progress", False)
         self._sl_triggered = state.get("_sl_triggered", False)
         self._current_trade_id = state.get("_current_trade_id")
-        self._total_commission = state.get("_total_commission", 0.0)
+        self._actual_qty = state.get("_actual_qty", 0.0)
         self._es_ema_value = state.get("_es_ema_value")
         self._es_vwma_value = state.get("_es_vwma_value")
         self._es_sma_value = state.get("_es_sma_value")
