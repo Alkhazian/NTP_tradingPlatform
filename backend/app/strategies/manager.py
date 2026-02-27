@@ -271,6 +271,54 @@ class StrategyManager:
             logger.error(f"Failed to get state for strategy {strategy_id}: {e}")
             state = {"error": str(e)}
 
+        # Get strategy positions
+        positions = self._get_strategy_positions(strategy)
+        
+        # 10. OVERRIDE: Inject custom status from strategy (the log values)
+        # This fulfills the user's request: "can you use just those values do be displayed on the UI?"
+        if hasattr(strategy, "get_custom_status"):
+            try:
+                custom_status = strategy.get_custom_status()
+                if custom_status:
+                    # Update unrealized P&L in metrics
+                    metrics["unrealized_pnl"] = custom_status.get("pnl", 0.0)
+                    
+                    # If this is a spread strategy and we have a custom status,
+                    # we might want to ensure a "virtual" position exists that matches the status.
+                    # This handles the case where Nautilus cache might be missing or inconsistent.
+                    has_matching_position = False
+                    for p in positions:
+                        if p["symbol"] == custom_status.get("symbol"):
+                            # Update the existing cached position with strategy-calculated P&L
+                            p["unrealized_pnl"] = custom_status.get("pnl", 0.0)
+                            p["mid"] = custom_status.get("mid")
+                            p["bid"] = custom_status.get("bid")
+                            p["ask"] = custom_status.get("ask")
+                            p["entry_price"] = custom_status.get("entry")
+                            p["sl"] = custom_status.get("sl")
+                            p["tp"] = custom_status.get("tp")
+                            has_matching_position = True
+                            break
+                    
+                    if not has_matching_position and custom_status.get("quantity", 0) != 0:
+                        # Inject a virtual position so the UI sees what the strategy sees in logs
+                        positions.append({
+                            "symbol": custom_status.get("symbol"),
+                            "quantity": custom_status.get("quantity"),
+                            "unrealized_pnl": custom_status.get("pnl", 0.0),
+                            "avg_price": custom_status.get("entry"),
+                            "current_price": custom_status.get("mid"),
+                            "mid": custom_status.get("mid"),
+                            "bid": custom_status.get("bid"),
+                            "ask": custom_status.get("ask"),
+                            "sl": custom_status.get("sl"),
+                            "tp": custom_status.get("tp"),
+                            "health": custom_status.get("health"),
+                            "is_virtual": True  # Flag to indicate this came from internal strategy state
+                        })
+            except Exception as e:
+                logger.error(f"Error injecting custom status for {strategy_id}: {e}")
+
         return {
             "id": strategy_id,
             "running": display_running,
@@ -278,7 +326,7 @@ class StrategyManager:
             "config": strategy.strategy_config.dict(),
             "state": state,
             "metrics": metrics,
-            "positions": self._get_strategy_positions(strategy)
+            "positions": positions
         }
 
     def _get_strategy_positions(self, strategy: BaseStrategy) -> list:

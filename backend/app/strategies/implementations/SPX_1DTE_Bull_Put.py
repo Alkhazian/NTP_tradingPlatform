@@ -143,6 +143,9 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
         # One-shot flag: set True the first time close_price > or_high while hard filters pass.
         # Prevents repeated OR breakout log lines when SMA10 is the only remaining blocker.
         self._or_breakout_logged: bool = False
+        
+        # Custom status for UI broadcasting
+        self._last_position_status: Dict[str, Any] = {}
 
         # --- Option Search State ---
         self._short_put_search_id: Optional[str] = None
@@ -1225,6 +1228,23 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
                 }}
             )
 
+        # Update custom status for UI broadcasting
+        # We update this every tick, not just when logging, to ensure UI is fresh
+        if self.spread_instrument:
+            self._last_position_status = {
+                "symbol": str(self.spread_instrument.id),
+                "health": "🟢 PROFIT" if total_pnl > 0 else "🔴 LOSS" if total_pnl < -50 else "🟡 SLIGHT LOSS",
+                "quantity": abs(position_qty),
+                "pnl": total_pnl,
+                "mid": mid,
+                "bid": bid,
+                "ask": ask,
+                "entry": entry_credit,
+                "sl": sl_price,
+                "tp": tp_price,
+                "last_update": now_utc.isoformat()
+            }
+
         # STOP LOSS — check before closing flag (SL overrides TP)
         if mid <= sl_price and not self._sl_triggered:
             if self.spread_instrument:
@@ -1730,6 +1750,13 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
                 self.es_subscribed = False
             except Exception as e:
                 self.logger.error(f"Failed to unsubscribe ES bars: {e}")
-
+        
         super().on_stop_safe()
         self.logger.info("🛑 SPX1DTEBullPutSpreadStrategy stopped")
+
+    def get_custom_status(self) -> Dict[str, Any]:
+        """Return the latest position status for UI broadcasting."""
+        # Only return status if we actually have an active position
+        if self.get_effective_spread_quantity() != 0:
+            return self._last_position_status
+        return {}

@@ -117,6 +117,9 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self._last_valid_spread_quote: Optional[QuoteTick] = None
         self._skipped_quote_count: int = 0
         
+        # Custom status for UI broadcasting
+        self._last_position_status: Dict[str, Any] = {}
+        
         # Calculate range end time for logging
         range_end_time = "Range Close" # Will be calculated/logged by base
         
@@ -1325,6 +1328,23 @@ class SPXRangeStrategy(SPXBaseStrategy):
                     }
                 }
             )
+
+        # Update custom status for UI broadcasting
+        # We update this every tick, not just when logging, to ensure UI is fresh
+        if self.spread_instrument:
+            self._last_position_status = {
+                "symbol": str(self.spread_instrument.id),
+                "health": "🟢 PROFIT" if total_pnl > 0 else "🔴 LOSS" if total_pnl < -50 else "🟡 SLIGHT LOSS",
+                "quantity": current_qty,
+                "pnl": total_pnl,
+                "mid": mid,
+                "bid": bid,
+                "ask": ask,
+                "entry": entry_credit,
+                "sl": stop_price,
+                "tp": tp_price,
+                "last_update": now.isoformat()
+            }
         
         # STOP LOSS
         # Check SL trigger BEFORE checking closing flag to allow override
@@ -2398,3 +2418,10 @@ class SPXRangeStrategy(SPXBaseStrategy):
         )
         self._closing_in_progress = False
         self.save_state()
+
+    def get_custom_status(self) -> Dict[str, Any]:
+        """Return the latest position status for UI broadcasting."""
+        # Only return status if we actually have an active position
+        if self.get_effective_spread_quantity() != 0:
+            return self._last_position_status
+        return {}
