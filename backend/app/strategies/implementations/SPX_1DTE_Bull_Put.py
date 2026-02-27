@@ -63,6 +63,7 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
         self.take_profit_pct = float(params.get("take_profit_pct_of_credit", 40.0))
 
         # --- Entry Timing ---
+
         cutoff_str = params.get("entry_cutoff_time_str", "12:00:00")
         h, m, s = [int(x) for x in cutoff_str.split(":")]
         self.entry_cutoff_time = time(h, m, s)
@@ -187,8 +188,15 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
         """Called after primary instrument ready. Subscribe to ES data and warm up option chain."""
         super().on_start_safe()
 
-
-
+        params = self.strategy_config.parameters
+        
+        # Strategy-specific time settings
+        start_time_str = params.get("start_time_str", "09:30:03")
+        t = datetime.strptime(start_time_str, "%H:%M:%S").time()
+        self.start_time = t
+        # CRITICAL: Override base class market_open_time to use config value
+        # Without this, the range calculation ignores start_time_str!
+        self.market_open_time = t
 
         # Set up ES bar types
         self._es_daily_bar_type = BarType.from_str(
@@ -210,15 +218,25 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
             self.logger.error(f"Failed to warm up option chain: {e}")
 
 
+        range_end_time = "Range Close" # Will be calculated/logged by base
+
         self.logger.info(
-            f"🚀 SPX 1DTE Bull Put Spread STARTED | "
-            f"OR={self.opening_range_minutes}m | "
-            f"ES Daily: EMA({self.es_ema_period}), VWMA({self.es_vwma_period}) | "
-            f"ES 1min: SMA({self.es_sma_period}) | "
-            f"Cutoff: {self.entry_cutoff_time}"
+            f"🚀 {self.strategy_id} STARTED | {self.tz} | Window: {self.start_time}-{range_end_time} | Cutoff: {self.entry_cutoff_time} | "
+            f"ES Daily: EMA({self.es_ema_period}), VWMA({self.es_vwma_period}) | ES 1min: SMA({self.es_sma_period})",
+            extra={
+                "extra": {
+                    "event_type": "strategy_start",
+                    "strategy": "SPX1DTEBullPutStrategy",
+                    "full_config": self.strategy_config.dict(),
+                    "timezone": str(self.tz),
+                    "start_time": str(self.start_time),
+                    "window_minutes": self.opening_range_minutes,
+                    "entry_cutoff": str(self.entry_cutoff_time),
+                }
+            }
         )
         self._notify(
-            f"🚀 Strategy STARTED | OR={self.opening_range_minutes}m | "
+            f"🚀 STARTED | {self.tz} | Window: {self.start_time}-{range_end_time} | Cutoff: {self.entry_cutoff_time} | "
             f"SL={self.stop_loss_pct}% TP={self.take_profit_pct}%"
         )
 
