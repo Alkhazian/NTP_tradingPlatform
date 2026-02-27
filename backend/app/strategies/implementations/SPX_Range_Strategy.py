@@ -881,10 +881,8 @@ class SPXRangeStrategy(SPXBaseStrategy):
             # Safety valve: after MAX_CONSECUTIVE_SKIPS, accept the quote anyway
             # to avoid being completely blind if the market stays thin
             if self._skipped_quote_count >= self.MAX_CONSECUTIVE_SKIPS:
-                self.logger.warning(
-                    f"⚠️ LIQUIDITY FILTER OVERRIDE | Accepting low liquidity quote after {self._skipped_quote_count} consecutive skips | Bid: {bid:.4f} (size={bid_size}) | Ask: {ask:.4f} (size={ask_size})",
-                )
                 # Fall through to process the tick
+                pass
             else:
                 return
         
