@@ -574,10 +574,11 @@ class SPXRangeStrategy(SPXBaseStrategy):
         )
         
         try:
-            self.request_instruments(
-                venue=Venue("CBOE"),
-                params={"ib_contracts": contracts}
-            )
+            for contract in contracts:
+                self.request_instruments(
+                    venue=Venue("CBOE"),
+                    params={"ib_contracts": [contract]}
+                )
             self.logger.info(
                 f"✅ request_instruments() called successfully | Count: {len(contracts)}",
                 extra={
@@ -602,16 +603,16 @@ class SPXRangeStrategy(SPXBaseStrategy):
             return
         
         # Store expected instrument IDs for cache polling
-        # NautilusTrader/IB format: SPXW260121P06810000.CBOE (uses 2-digit year!)
+        # NautilusTrader/IB format: SPXW  260121P06810000.CBOE (padded with 2 spaces after SPXW)
         self._expected_instrument_ids = []
         
         # Convert YYYYMMDD to YYMMDD (IB uses 2-digit year format)
         expiry_yy = expiry_str[2:]  # e.g. "20260121" -> "260121"
         
         for strike in [self._target_short_strike, self._target_long_strike]:
-            # Format: SPXW260121P06810000.CBOE
+            # Format: SPXW  260121P06810000.CBOE
             strike_str = f"{int(strike):05d}000"  # e.g., 6810 -> 06810000
-            inst_id_str = f"SPXW{expiry_yy}{option_right}{strike_str}.CBOE"
+            inst_id_str = f"SPXW  {expiry_yy}{option_right}{strike_str}.CBOE"
             self._expected_instrument_ids.append(inst_id_str)
         
         self.logger.info(
@@ -1817,6 +1818,13 @@ class SPXRangeStrategy(SPXBaseStrategy):
             # Position already exists with filled_qty contracts.
             # SL/TP will work correctly via get_effective_spread_quantity().
 
+            # Clean up entry order tracking & fill wait monitor
+            self._entry_order_id = None
+            try:
+                self.clock.cancel_timer(f"{self.id}_fill_wait_monitor")
+            except Exception:
+                pass
+
             # DB SYNC: Update trade quantity to reflect actual filled amount.
             if self._current_trade_id:
                 self.logger.info(
@@ -1857,6 +1865,10 @@ class SPXRangeStrategy(SPXBaseStrategy):
             # Clean up in-memory entry state — we never entered a position.
             self._spread_entry_price = None
             self._entry_order_id = None
+            try:
+                self.clock.cancel_timer(f"{self.id}_fill_wait_monitor")
+            except Exception:
+                pass
 
             # DB SYNC: Delete the pre-recorded trade and its orders.
             # The record was written optimistically in _check_and_submit_entry

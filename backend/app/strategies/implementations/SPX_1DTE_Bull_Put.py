@@ -1404,6 +1404,11 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
             self.logger.warning(f"⏱️ FILL TIMEOUT | Partial: {filled_qty}/{float(order.quantity)}")
             self._notify(f"⏱️ FILL TIMEOUT | Partial fill: {filled_qty}")
             self.cancel_order(order)
+            self._entry_order_id = None
+            try:
+                self.clock.cancel_timer(f"{self.id}_fill_wait_monitor")
+            except Exception:
+                pass
             if self._current_trade_id and self._trading_data:
                 self._trading_data.update_trade_quantity(self._current_trade_id, filled_qty)
         else:
@@ -1412,6 +1417,10 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
             self.cancel_order(order)
             self._spread_entry_price = None
             self._entry_order_id = None
+            try:
+                self.clock.cancel_timer(f"{self.id}_fill_wait_monitor")
+            except Exception:
+                pass
             if self._current_trade_id and self._trading_data:
                 self._trading_data.delete_trade(self._current_trade_id)
                 self._current_trade_id = None
