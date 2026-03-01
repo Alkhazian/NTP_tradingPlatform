@@ -21,6 +21,7 @@ from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.model.enums import OptionKind, OrderSide, TimeInForce
 
 from app.strategies.base import BaseStrategy
+from app.services.telegram_service import TelegramNotificationService
 
 IB_VENUE = Venue("IB")
 
@@ -133,9 +134,8 @@ class TFMITHStrategy(BaseStrategy):
         self._option_instrument_id: Optional[InstrumentId] = None
 
         # Telegram
-        self._telegram = None
-        if integration_manager:
-            self._telegram = getattr(integration_manager, 'telegram_service', None)
+        self._telegram = TelegramNotificationService()
+
 
         # TradingDataService
         self._trading_data = None
@@ -158,43 +158,21 @@ class TFMITHStrategy(BaseStrategy):
     # LIFECYCLE
     # =========================================================================
 
-    def on_start_safe(self):
-        """Called after primary instrument ready. Subscribe to underlying + option chain."""
-        self.logger.info(
-            f"🚀 TFMITH starting | Symbol={self.underlying_symbol} | "
-            f"Delta={self.option_delta} | Threshold={self.entry_threshold_pct}% | "
-            f"LossStreak={self.loss_streak} | Allocation=${self.current_allocation:.2f}"
-        )
-        self._subscribe_to_underlying()
-
-    def _subscribe_data(self):
-        """Subscribe to quote ticks for the primary instrument."""
-        self.subscribe_quote_ticks(self.instrument_id)
-
-    # =========================================================================
-    # UNDERLYING SUBSCRIPTION (analogous to SPXBaseStrategy._subscribe_to_spx)
-    # =========================================================================
-
-    def _subscribe_to_underlying(self):
+    def _request_instrument(self):
         """
-        Subscribe to the underlying stock instrument.
-        Uses secType="STK" — analogous to SPXBaseStrategy._subscribe_to_spx().
+        Override BaseStrategy to explicitly request the underlying STK from IB
+        if it's not already in the cache.
         """
-        # Try cache first
-        for inst in self.cache.instruments():
-            symbol = str(inst.id.symbol)
-            if symbol == self.underlying_symbol or symbol.startswith(self.underlying_symbol):
-                if not hasattr(inst, 'option_kind'):  # Stock, not option
-                    self.underlying_instrument = inst
-                    self.underlying_instrument_id = inst.id
-                    break
-
-        if self.underlying_instrument is not None:
-            self._on_underlying_ready()
+        self.instrument = self.cache.instrument(self.instrument_id)
+        
+        if self.instrument is not None:
+            self.logger.info(f"Underlying {self.underlying_symbol} found in cache.")
+            self._on_instrument_ready()
         else:
             self.logger.info(
-                f"Underlying {self.underlying_symbol} not in cache, requesting from IB..."
+                f"Underlying {self.underlying_symbol} not in cache, requesting STK from IB..."
             )
+            # Explicitly request the stock contract
             self.request_instruments(
                 venue=IB_VENUE,
                 update_catalog=True,
@@ -208,52 +186,38 @@ class TFMITHStrategy(BaseStrategy):
                     },)
                 }
             )
-            # Poll for availability
+            # Set timeout for instrument availability securely
             self.clock.set_time_alert(
-                name=f"{self.id}.underlying_poll",
-                alert_time=self.clock.utc_now() + timedelta(seconds=5),
-                callback=self._poll_underlying_availability,
+                name=f"{self.id}.instrument_timeout",
+                alert_time=self.clock.utc_now() + timedelta(seconds=60),
+                callback=self._on_instrument_timeout
             )
 
-    def _poll_underlying_availability(self, event):
-        """Poll cache until underlying is available."""
-        if self.underlying_subscribed:
-            return
-
-        for inst in self.cache.instruments():
-            symbol = str(inst.id.symbol)
-            if symbol == self.underlying_symbol or symbol.startswith(self.underlying_symbol):
-                if not hasattr(inst, 'option_kind'):
-                    self.underlying_instrument = inst
-                    self.underlying_instrument_id = inst.id
-                    self._on_underlying_ready()
-                    return
-
-        # Retry
-        try:
-            self.clock.set_time_alert(
-                name=f"{self.id}.underlying_poll_{uuid.uuid4().hex[:6]}",
-                alert_time=self.clock.utc_now() + timedelta(seconds=5),
-                callback=self._poll_underlying_availability,
-            )
-        except Exception as e:
-            self.logger.error(f"Failed to set poll timer: {e}")
-
-    def _on_underlying_ready(self):
-        """Called when the underlying instrument is available."""
-        if self.underlying_subscribed:
-            return
-
-        self.underlying_subscribed = True
-        self.subscribe_quote_ticks(self.underlying_instrument_id)
+    def on_start_safe(self):
+        """Called after primary instrument ready. Subscribe to underlying + option chain."""
         self.logger.info(
-            f"✅ Underlying ready: {self.underlying_instrument_id} | "
-            f"Subscribed to quotes"
+            f"🚀 TFMITH starting | Symbol={self.underlying_symbol} | "
+            f"Delta={self.option_delta} | Threshold={self.entry_threshold_pct}% | "
+            f"LossStreak={self.loss_streak} | Allocation=${self.current_allocation:.2f}"
+        )
+        self._notify(
+            f"🚀 STARTED | {self.tz} | Symbol={self.underlying_symbol} | "
+            f"Delta={self.option_delta} | Threshold={self.entry_threshold_pct}% | "
+            f"LossStreak={self.loss_streak} | Allocation=${self.current_allocation:.2f}"
         )
         self._notify(f"✅ Underlying {self.underlying_symbol} ready")
-
-        # Request option chain
+        
+        # Link our custom underlying vars to the loaded base instrument
+        self.underlying_instrument = self.instrument
+        self.underlying_instrument_id = self.instrument.id
+        self.underlying_subscribed = True
+        
+        # Request options chain
         self._request_option_chain()
+
+    def _subscribe_data(self):
+        """Subscribe to quote ticks for the primary instrument."""
+        self.subscribe_quote_ticks(self.instrument_id)
 
     # =========================================================================
     # OPTION CHAIN (analogous to SPXBaseStrategy.request_option_chain)

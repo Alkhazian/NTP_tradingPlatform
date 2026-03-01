@@ -134,11 +134,17 @@ class NautilusManager:
                         localSymbol="ESH6",
                         lastTradeDateOrContractMonth="202603",
                     ),
-
+                    IBContract(
+                        secType="STK", 
+                        symbol="QQQ", 
+                        exchange="SMART",
+                        primaryExchange="NASDAQ",
+                        currency="USD",
+                    ),
                 ),
                 symbology_method=SymbologyMethod.IB_SIMPLIFIED,
                 symbol_to_mic_venue={  
-                    "SPX": "CBOE",  "MES": "CME",  "ES": "CME",
+                    "SPX": "CBOE",  "MES": "CME",  "ES": "CME", "QQQ": "NASDAQ",
                 },  
                 convert_exchange_to_mic_venue=True,
                 #filter_sec_types=frozenset({"STK", "FUT", "OPT", "IND"}),
