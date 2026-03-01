@@ -211,10 +211,8 @@ class TFMITHStrategy(BaseStrategy):
         self.underlying_instrument = self.instrument
         self.underlying_instrument_id = self.instrument.id
         self.underlying_subscribed = True
-        
-        # Request options chain
-        self._request_option_chain()
-
+        # Option chain will be requested 2 minutes before start time
+        pass
     def _subscribe_data(self):
         """Subscribe to quote ticks for the primary instrument."""
         self.subscribe_quote_ticks(self.instrument_id)
@@ -361,13 +359,26 @@ class TFMITHStrategy(BaseStrategy):
         # loss_streak and current_allocation survive
 
         self.save_state()
-
+        
+        # Reset the flag so the chain requests again 2 minutes before today's start_time
+        self._option_chain_requested_today = False
     # =========================================================================
     # SCANNER (on_minute_closed → _check_entry)
     # =========================================================================
 
     def on_minute_closed(self, close_price: float, current_time: dtime):
         """Called on each minute close. Runs scanner and monitor."""
+        # ── Option Chain Pre-load ────────────────────────────────────────────
+        if not getattr(self, '_option_chain_requested_today', False):
+            current_minutes = current_time.hour * 60 + current_time.minute
+            start_minutes = self.start_time.hour * 60 + self.start_time.minute
+            
+            # Request 2 minutes before start_time (or immediately if started late)
+            if current_minutes >= start_minutes - 2:
+                self.logger.info(f"🔄 Pre-loading option chain 2 mins before start_time ({self.start_time})...")
+                self._request_option_chain()
+                self._option_chain_requested_today = True
+
         # ── Monitor existing position ────────────────────────────────────────
         if self.position_open and not self._closing_in_progress:
             self._check_monitor_exits(current_time)
