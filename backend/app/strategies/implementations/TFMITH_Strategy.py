@@ -205,7 +205,7 @@ class TFMITHStrategy(BaseStrategy):
             f"Delta={self.option_delta} | Threshold={self.entry_threshold_pct}% | "
             f"LossStreak={self.loss_streak} | Allocation=${self.current_allocation:.2f}"
         )
-        self._notify(f"✅ Underlying {self.underlying_symbol} ready")
+        #self._noify(f"✅ Underlying {self.underlying_symbol} ready")
         
         # Link our custom underlying vars to the loaded base instrument
         self.underlying_instrument = self.instrument
