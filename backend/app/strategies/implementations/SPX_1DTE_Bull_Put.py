@@ -146,6 +146,7 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
         
         # Custom status for UI broadcasting
         self._last_position_status: Dict[str, Any] = {}
+        self._option_chain_requested_today: bool = False
 
         # --- Option Search State ---
         self._short_put_search_id: Optional[str] = None
@@ -212,13 +213,6 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
         # Subscribe to ES bars
         self._subscribe_es_data()
         self._macro_clear_today = self._is_macro_clear()
-
-        # Warm up option chain for 1DTE expiry
-        try:
-            target_expiry = self._get_target_expiry()
-            self.request_option_chain(target_expiry)
-        except Exception as e:
-            self.logger.error(f"Failed to warm up option chain: {e}")
 
 
         range_end_time = "Range Close" # Will be calculated/logged by base
@@ -611,6 +605,18 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
                 f"EMA={ema_str} VWMA={vwma_str} SMA={sma_str} | "
                 f"Traded={self.traded_today} Entry={self.entry_in_progress}"
             )
+
+        # ── Pre-emptive Option Chain Request (TFMITH-style) ──────────────────
+        if not self._option_chain_requested_today and not self.traded_today:
+            # Calculate range end time
+            range_end_total_minutes = self.market_open_time.hour * 60 + self.market_open_time.minute + self.opening_range_minutes
+            trigger_total_minutes = range_end_total_minutes - 2
+            
+            if current_minute >= trigger_total_minutes:
+                target_expiry = self._get_target_expiry()
+                self.logger.info(f"🔄 Pre-loading option chain 2 mins before OR ends (Expiry={target_expiry})...")
+                self.request_option_chain(target_expiry)
+                self._option_chain_requested_today = True
 
         # ── Entry evaluation ──────────────────────────────────────────────────
         if (self.range_calculated
@@ -1588,6 +1594,9 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
                 f"🌙 OVERNIGHT POSITION | Maintaining state for Day 2 | Qty: {position_qty} | Trade ID: {self._current_trade_id}"
             )
 
+        # Reset flags
+        self._option_chain_requested_today = False
+        
         # Evaluate macro calendar once for the new day
         self._macro_clear_today = self._is_macro_clear()
 
