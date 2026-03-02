@@ -98,7 +98,8 @@ class TFMITHStrategy(BaseStrategy):
         self.position_open: bool = False
         self.entry_time: Optional[str] = None
         self.entry_price: Optional[float] = None
-        self.trade_direction: Optional[str] = None  # "CALL" or "PUT"
+        self.option_type: Optional[str] = None    # "CALL" or "PUT" → stored as trade_type in DB
+        self.trade_direction: Optional[str] = None  # "LONG" or "SHORT"
         self.actual_position_size: int = 0
         self.current_option_id: Optional[str] = None
 
@@ -125,6 +126,11 @@ class TFMITHStrategy(BaseStrategy):
         self._last_position_log_time = None
         self._position_log_interval_seconds: int = 30
         self._last_position_status: Dict[str, Any] = {}
+
+        # Private order tracking — NOT added to BaseStrategy's _pending_entry_orders
+        # so BaseStrategy._on_entry_filled never fires (same pattern as SPX strategies)
+        self._tfmith_entry_orders: Set = set()
+        self._tfmith_exit_orders: Set = set()
 
         # Option search state (analogous to base_spx._premium_searches)
         self._delta_searches: Dict[str, Dict] = {}
@@ -431,7 +437,8 @@ class TFMITHStrategy(BaseStrategy):
     def _initiate_entry(self, direction: str):
         """Start the entry process: find option by delta, then size and execute."""
         self.entry_in_progress = True
-        self.trade_direction = direction
+        self.option_type = direction      # "CALL" or "PUT"
+        self.trade_direction = "LONG"     # TFMITH always buys
 
         option_kind = OptionKind.CALL if direction == "CALL" else OptionKind.PUT
         # For puts, use negative delta; for calls, positive
@@ -566,34 +573,19 @@ class TFMITHStrategy(BaseStrategy):
         )
 
         self._entry_order_id = order.client_order_id
-        self._pending_entry_orders.add(order.client_order_id)
+        self._tfmith_entry_orders.add(order.client_order_id)  # private — bypasses BaseStrategy routing
 
         self.logger.info(
-            f"📈 ENTRY ORDER | {self.trade_direction} {contracts}x {option.id} | "
+            f"📈 ENTRY ORDER | {self.option_type} {contracts}x {option.id} | "
             f"MARKET | Mid=${mid_price:.2f}"
         )
         self._notify(
-            f"📈 ENTRY | {self.trade_direction} {contracts}x | "
+            f"📈 ENTRY | {self.option_type} {contracts}x | "
             f"Mid=${mid_price:.2f} | Streak={self.loss_streak}"
         )
 
-        # Record in DB
-        if self._trading_data:
-            trade_id = f"T-{self.strategy_id[:8]}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-            self._current_trade_id = trade_id
-            try:
-                self._trading_data.start_trade(
-                    trade_id=trade_id,
-                    strategy_id=self.strategy_id,
-                    instrument_id=str(option.id),
-                    trade_type="DAYTRADE",
-                    entry_price=mid_price,
-                    quantity=contracts,
-                    direction=self.trade_direction,
-                    entry_time=self.entry_time,
-                )
-            except Exception as e:
-                self.logger.error(f"Failed to start trade record: {e}")
+        # DB recording is handled by BaseStrategy._start_trade_record_async on fill.
+        # Do NOT record here — that caused the duplicate record.
 
         self.submit_order(order)
         self.entry_in_progress = False
@@ -995,7 +987,7 @@ class TFMITHStrategy(BaseStrategy):
         )
 
         self._exit_order_id = order.client_order_id
-        self._pending_exit_orders.add(order.client_order_id)
+        self._tfmith_exit_orders.add(order.client_order_id)   # private — bypasses BaseStrategy routing
         self._last_exit_reason = reason
 
         self.submit_order(order)
@@ -1007,8 +999,8 @@ class TFMITHStrategy(BaseStrategy):
     def on_order_filled_safe(self, event):
         """Handle fills — entry and exit."""
         order_id = event.client_order_id
-        is_entry = order_id in self._pending_entry_orders
-        is_exit = order_id in self._pending_exit_orders
+        is_entry = order_id in self._tfmith_entry_orders
+        is_exit = order_id in self._tfmith_exit_orders
 
         if is_entry:
             self._on_entry_fill(event)
@@ -1017,7 +1009,7 @@ class TFMITHStrategy(BaseStrategy):
 
     def _on_entry_fill(self, event):
         """Capture entry price and quantity from fill."""
-        self._pending_entry_orders.discard(event.client_order_id)
+        self._tfmith_entry_orders.discard(event.client_order_id)
         self.entry_price = float(event.last_px)
         self._actual_qty = float(event.last_qty)
         self.actual_position_size = int(self._actual_qty)
@@ -1031,42 +1023,55 @@ class TFMITHStrategy(BaseStrategy):
         self._total_commission = comm
 
         self.logger.info(
-            f"✅ ENTRY FILLED | {self.trade_direction} {self.actual_position_size}x "
+            f"✅ ENTRY FILLED | {self.option_type} {self.actual_position_size}x "
             f"@ ${self.entry_price:.2f} | Comm=${comm:.2f}"
         )
         self._notify(
-            f"✅ FILLED | {self.trade_direction} {self.actual_position_size}x "
+            f"✅ FILLED | {self.option_type} {self.actual_position_size}x "
             f"@ ${self.entry_price:.2f}"
         )
 
-        # Record order in DB
-        if self._trading_data and self._current_trade_id:
+        # ── Record in DB (SPX pattern: at fill time, with actual fill data) ────────
+        if self._trading_data:
+            from datetime import datetime
+            trade_id = f"T-{self.strategy_id[:8]}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            self._current_trade_id = trade_id
             try:
+                self._trading_data.start_trade(
+                    trade_id=trade_id,
+                    strategy_id=self.strategy_id,
+                    instrument_id=str(event.instrument_id),  # actual filled option
+                    trade_type=self.option_type,             # CALL or PUT
+                    entry_price=self.entry_price,            # actual fill price
+                    quantity=self.actual_position_size,
+                    direction="LONG",                        # TFMITH always buys
+                    entry_time=self.clock.utc_now().isoformat(),
+                )
                 self._trading_data.record_order(
                     strategy_id=self.strategy_id,
                     instrument_id=str(event.instrument_id),
-                    trade_type="DAYTRADE",
+                    trade_type=self.option_type,
                     trade_direction="ENTRY",
                     order_side="BUY",
                     order_type="MARKET",
-                    quantity=float(event.last_qty),
+                    quantity=self.actual_position_size,
                     status="FILLED",
                     submitted_time=self.entry_time,
-                    trade_id=self._current_trade_id,
+                    trade_id=trade_id,
                     client_order_id=str(event.client_order_id),
                     filled_time=self.clock.utc_now().isoformat(),
-                    filled_quantity=float(event.last_qty),
-                    filled_price=float(event.last_px),
+                    filled_quantity=self.actual_position_size,
+                    filled_price=self.entry_price,
                     commission=comm,
                 )
             except Exception as e:
-                self.logger.error(f"Failed to record entry order: {e}")
+                self.logger.error(f"Failed to record entry: {e}")
 
         self.save_state()
 
     def _on_exit_fill(self, event):
-        """Handle exit fill — PnL, streak, allocation update."""
-        self._pending_exit_orders.discard(event.client_order_id)
+        """Handle exit fill — PnL, streak, allocation update, DB recording."""
+        self._tfmith_exit_orders.discard(event.client_order_id)
         exit_price = float(event.last_px)
         exit_qty = float(event.last_qty)
 
@@ -1102,7 +1107,7 @@ class TFMITHStrategy(BaseStrategy):
 
         self.logger.info(
             f"{'🟢' if realized_pnl >= 0 else '🔴'} EXIT FILLED | "
-            f"{self.trade_direction} {self.actual_position_size}x @ ${exit_price:.2f} | "
+            f"{self.option_type} {self.actual_position_size}x @ ${exit_price:.2f} | "
             f"RawPnL=${raw_pnl:.2f} | Comm=${total_commission:.2f} | "
             f"NetPnL=${realized_pnl:.2f} ({pnl_pct:.1f}%) | "
             f"Streak {old_streak}→{self.loss_streak} | "
@@ -1114,13 +1119,13 @@ class TFMITHStrategy(BaseStrategy):
             f"Streak={self.loss_streak} | Alloc=${self.current_allocation:.2f}"
         )
 
-        # ── Record in DB ─────────────────────────────────────────────────────
+        # ── Record in DB (SPX pattern) ──────────────────────────────────────
         if self._trading_data and self._current_trade_id:
             try:
                 self._trading_data.record_order(
                     strategy_id=self.strategy_id,
                     instrument_id=str(event.instrument_id),
-                    trade_type="DAYTRADE",
+                    trade_type=self.option_type,
                     trade_direction="EXIT",
                     order_side="SELL",
                     order_type="MARKET",
@@ -1173,13 +1178,13 @@ class TFMITHStrategy(BaseStrategy):
             "position_open": self.position_open,
             "entry_time": self.entry_time,
             "entry_price": self.entry_price,
+            "option_type": self.option_type,
             "trade_direction": self.trade_direction,
             "actual_position_size": self.actual_position_size,
             "current_option_id": self.current_option_id,
             # Internal tracking
             "entry_in_progress": self.entry_in_progress,
             "_closing_in_progress": self._closing_in_progress,
-            "_current_trade_id": self._current_trade_id,
             "_actual_qty": self._actual_qty,
             "_total_commission": self._total_commission,
             "current_trading_day": str(self.current_trading_day) if self.current_trading_day else None,
@@ -1197,13 +1202,13 @@ class TFMITHStrategy(BaseStrategy):
         self.position_open = state.get("position_open", False)
         self.entry_time = state.get("entry_time")
         self.entry_price = state.get("entry_price")
+        self.option_type = state.get("option_type")
         self.trade_direction = state.get("trade_direction")
         self.actual_position_size = state.get("actual_position_size", 0)
         self.current_option_id = state.get("current_option_id")
         # Internal
         self.entry_in_progress = state.get("entry_in_progress", False)
         self._closing_in_progress = state.get("_closing_in_progress", False)
-        self._current_trade_id = state.get("_current_trade_id")
         self._actual_qty = state.get("_actual_qty", 0.0)
         self._total_commission = state.get("_total_commission", 0.0)
 

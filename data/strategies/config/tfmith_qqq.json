@@ -26,6 +26,6 @@
         "hard_end_time": "14:00",
         "start_time_str": "09:30:03",
         "allocation": 10000,
-        "commission_per_contract": 0.65
+        "commission_per_contract": 1.85
     }
 }
