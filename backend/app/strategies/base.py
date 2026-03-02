@@ -1636,7 +1636,7 @@ class BaseStrategy(Strategy):
 
                 self.logger.debug(
                     f"📊 LEG FILL ACCUMULATED | Parent: {parent_id} | "
-                    f"Side: {event.order_side.name} | Qty: {qty} | Px: {px} | Comm: ${comm:.2f}"
+                    f"Side: {event.order_side.name} | Qty: {qty} | Px: {px}"
                 )
 
             
