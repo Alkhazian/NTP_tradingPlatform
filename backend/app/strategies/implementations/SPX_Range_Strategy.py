@@ -117,6 +117,10 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self._last_valid_spread_quote: Optional[QuoteTick] = None
         self._skipped_quote_count: int = 0
         
+        # Entry process logging throttler. I put here 4 seconds because we have validity of the sygnal normally 5 (so to be inside the interval)
+        self._last_entry_log_time: Optional[datetime] = None
+        self._entry_log_interval_seconds: float = 4.0
+        
         # Custom status for UI broadcasting
         self._last_position_status: Dict[str, Any] = {}
         
@@ -495,6 +499,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
         """
         self.entry_in_progress = True
         self._found_legs.clear()  # Reset found legs
+        self._last_entry_log_time = None  # Reset logging throttler for new attempt
         
         # Calculate expiry date based on DTE config
         today = self.clock.utc_now().astimezone(self.tz).date()
@@ -925,19 +930,28 @@ class SPXRangeStrategy(SPXBaseStrategy):
         target_price = -(self.min_credit_amount / 100.0)
         credit_received = abs(mid) * 100 if mid < 0 else 0
         
-        self.logger.info(
-            f"Spread quote | Bid: {bid:.4f} | Ask: {ask:.4f} | Mid: {mid:.4f} | Credit: ${credit_received:.2f}",
-            extra={
-                "extra": {
-                    "event_type": "spread_quote_tick",
-                    "bid": bid,
-                    "ask": ask,
-                    "mid": mid,
-                    "spread_width": spread_width,
-                    "credit_received": credit_received
-                }
-            }
+        # Periodic entry status logging
+        now = self.clock.utc_now()
+        should_log_tick = (
+            self._last_entry_log_time is None or
+            (now - self._last_entry_log_time).total_seconds() >= self._entry_log_interval_seconds
         )
+        
+        if should_log_tick:
+            self._last_entry_log_time = now
+            self.logger.info(
+                f"Spread quote | Bid: {bid:.4f} | Ask: {ask:.4f} | Mid: {mid:.4f} | Credit: ${credit_received:.2f}",
+                extra={
+                    "extra": {
+                        "event_type": "spread_quote_tick",
+                        "bid": bid,
+                        "ask": ask,
+                        "mid": mid,
+                        "spread_width": spread_width,
+                        "credit_received": credit_received
+                    }
+                }
+            )
         
         # Validate signal freshness
         if self._signal_time:
@@ -1185,22 +1199,22 @@ class SPXRangeStrategy(SPXBaseStrategy):
             
             self.save_state()
         else:
-            # Log why we're not entering yet
-
-            self.logger.info(
-                f"Waiting for better price | Bid: {bid:.4f} | Ask: {ask:.4f} | Mid: {mid:.4f} > Target: {target_price:.4f} | Credit: ${credit_received:.2f} < Min: ${self.min_credit_amount:.2f}",
-                extra={
-                    "extra": {
-                        "event_type": "waiting_for_price",
-                        "current_bid": bid,
-                        "current_ask": ask,
-                        "current_mid": mid,
-                        "target_price": target_price,
-                        "credit_received": credit_received,
-                        "min_credit_required": self.min_credit_amount
+            # Log why we're not entering yet (throttled)
+            if should_log_tick:
+                self.logger.info(
+                    f"Waiting for better price | Bid: {bid:.4f} | Ask: {ask:.4f} | Mid: {mid:.4f} > Target: {target_price:.4f} | Credit: ${credit_received:.2f} < Min: ${self.min_credit_amount:.2f}",
+                    extra={
+                        "extra": {
+                            "event_type": "waiting_for_price",
+                            "current_bid": bid,
+                            "current_ask": ask,
+                            "current_mid": mid,
+                            "target_price": target_price,
+                            "credit_received": credit_received,
+                            "min_credit_required": self.min_credit_amount
+                        }
                     }
-                }
-            )
+                )
 
     def _cancel_entry(self):
         """Cancel the entry process and clean up."""
@@ -1219,6 +1233,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self._signal_close_price = None
         self._signal_direction = None
         self._found_legs.clear()
+        self._last_entry_log_time = None  # Reset logging throttler
 
     def _manage_open_position(self):
         """Monitor open position for stop loss and take profit."""
