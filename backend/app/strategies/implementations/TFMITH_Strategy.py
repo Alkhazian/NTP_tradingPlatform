@@ -897,17 +897,11 @@ class TFMITHStrategy(BaseStrategy):
             return
 
         # ── Position status logging (throttled) ──────────────────────────────
-        now = self.clock.utc_now()
-        if (self._last_position_log_time is None or
-                (now - self._last_position_log_time).total_seconds() >= self._position_log_interval_seconds):
-            self._last_position_log_time = now
-            self.logger.info(
-                f"📊 POSITION | {self.trade_direction} {self.actual_position_size}x | "
-                f"Entry=${self.entry_price:.2f} | PnL={pnl_pct:.1f}%"
-            )
+        # Logging moved to _monitor_position (tick-driven) for better frequency and data accuracy.
+        pass
 
     def _monitor_position(self, tick: QuoteTick):
-        """Called on every option tick — updates UI status."""
+        """Called on every option tick — updates UI status and logs status."""
         bid = float(tick.bid_price)
         ask = float(tick.ask_price)
         if bid <= 0 or ask <= 0:
@@ -917,9 +911,28 @@ class TFMITHStrategy(BaseStrategy):
 
         # Update UI status
         if self.entry_price is not None:
-            pnl = (mid - self.entry_price) * 100 * self.actual_position_size
+            pnl_dollars = (mid - self.entry_price) * 100 * self.actual_position_size
             pnl_pct = ((mid - self.entry_price) / self.entry_price * 100) if self.entry_price > 0 else 0
 
+            # Determine health indicator 🟢/🟡/🔴
+            if pnl_pct >= 2:
+                health = "🟢 PROFIT"
+            elif pnl_pct >= -5.0:
+                health = "🟡 SLIGHT LOSS"
+            else:
+                health = "🔴 LOSS"
+
+            # Delta (if available)
+            delta_str = ""
+            if hasattr(self, 'greeks') and self.greeks:
+                try:
+                    greeks_data = self.greeks.instrument_greeks(tick.instrument_id)
+                    if greeks_data and greeks_data.delta is not None:
+                        delta_str = f" | Δ={float(greeks_data.delta):.3f}"
+                except Exception:
+                    pass
+
+            # Update UI state
             self._last_position_status = {
                 "symbol": self.current_option_id,
                 "quantity": self.actual_position_size,
@@ -927,11 +940,26 @@ class TFMITHStrategy(BaseStrategy):
                 "mid": mid,
                 "bid": bid,
                 "ask": ask,
-                "pnl": pnl,
+                "pnl": pnl_dollars,
                 "pnl_pct": pnl_pct,
                 "direction": self.trade_direction,
-                "health": "ACTIVE",
+                "health": health,
+                "underlying_price": self.current_underlying_price,
+                "delta": delta_str.strip(" | Δ=") if delta_str else None
             }
+
+            # Periodic position status logging (30 seconds)
+            now = self.clock.utc_now()
+            if (self._last_position_log_time is None or
+                    (now - self._last_position_log_time).total_seconds() >= self._position_log_interval_seconds):
+                self._last_position_log_time = now
+                
+                self.logger.info(
+                    f"📊 POSITION | {health} | {self.trade_direction} {self.actual_position_size}x | "
+                    f"Entry=${self.entry_price:.2f} | Mid=${mid:.2f} | "
+                    f"PnL=${pnl_dollars:+.2f} ({pnl_pct:+.1f}%) | "
+                    f"{self.underlying_symbol}=${self.current_underlying_price:.2f}{delta_str}"
+                )
 
     def _get_position_pnl_pct(self) -> float:
         """Get current position PnL as percentage."""
