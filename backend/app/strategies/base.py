@@ -2054,7 +2054,7 @@ class BaseStrategy(Strategy):
                 
                 # Commission is a Money object in Nautilus Trader
                 if hasattr(event, 'commission') and event.commission is not None:
-                    commission = event.commission.as_double()
+                    commission = float(event.commission.as_double())
                 else:
                     commission = 0.0
                 exit_reason = getattr(self, '_last_exit_reason', 'UNKNOWN')

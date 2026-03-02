@@ -1109,6 +1109,9 @@ class SPXBaseStrategy(BaseStrategy):
             f"(target={target_delta:.3f}) IV={best['iv']:.2%} Mid=${best['mid']:.2f}"
         )
 
+        if callback:
+            callback(search_id, selected_option, best)
+
     def find_options_by_deltas(
         self,
         target_deltas: List[float],

@@ -16,6 +16,25 @@ ASK_SIZE = 3
 LAST_PRICE = 4
 LAST_SIZE = 5
 
+try:
+    from nautilus_trader.adapters.interactive_brokers.client.wrapper import InteractiveBrokersEWrapper
+    
+    _original_contract_details = InteractiveBrokersEWrapper.contractDetails
+    
+    def _patched_contract_details(self, reqId: int, contractDetails: Any):
+        """
+        Global patch for Nautilus IB wrapper. Scrubs IB's EU retail restriction objects
+        (IneligibilityReason) before Nautilus processes them to prevent msgspec crash.
+        """
+        if hasattr(contractDetails, "ineligibilityReasonList"):
+            contractDetails.ineligibilityReasonList = None
+        _original_contract_details(self, reqId, contractDetails)
+        
+    InteractiveBrokersEWrapper.contractDetails = _patched_contract_details
+    print("Successfully patched InteractiveBrokersEWrapper.contractDetails globally")
+except ImportError:
+    pass
+
 class CustomInteractiveBrokersDataClient(InteractiveBrokersDataClient):
     """
     Custom Data Client that monkey-patches the underlying IB wrapper to handle

@@ -8,5 +8,10 @@
         "strategy_type": "SPX1DTEBullPutStrategy",
         "module": "app.strategies.implementations.SPX_1DTE_Bull_Put",
         "class_name": "SPX1DTEBullPutStrategy"
+    },
+    {
+        "strategy_type": "TFMITHStrategy",
+        "module": "app.strategies.implementations.TFMITH_Strategy",
+        "class_name": "TFMITHStrategy"
     }
 ]
