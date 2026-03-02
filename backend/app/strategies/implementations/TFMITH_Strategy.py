@@ -659,6 +659,12 @@ class TFMITHStrategy(BaseStrategy):
             symbol = str(inst.id.symbol)
             if not symbol.startswith(self.underlying_symbol):
                 continue
+                
+            # SAFETY FILTER: Only trade standard 100-multiplier options.
+            # Corporate actions (splits/dividends) can create non-standard options
+            # (e.g. multiplier exactly 133 or 105). Those break our sizing math.
+            if float(inst.multiplier) != 100.0:
+                continue
 
             # Check expiry match
             inst_expiry = ""
