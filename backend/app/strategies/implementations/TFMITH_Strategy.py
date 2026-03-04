@@ -18,7 +18,7 @@ import pytz
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.identifiers import InstrumentId, Venue
 from nautilus_trader.model.instruments import Instrument
-from nautilus_trader.model.enums import OptionKind, OrderSide, TimeInForce
+from nautilus_trader.model.enums import OptionKind, OrderSide, TimeInForce, OrderStatus
 
 from app.strategies.base import BaseStrategy
 from app.services.telegram_service import TelegramNotificationService
@@ -131,6 +131,13 @@ class TFMITHStrategy(BaseStrategy):
         # so BaseStrategy._on_entry_filled never fires (same pattern as SPX strategies)
         self._tfmith_entry_orders: Set = set()
         self._tfmith_exit_orders: Set = set()
+
+        # Partial fill accumulators — accumulate qty and weighted avg price
+        # across multiple PARTIALLY_FILLED events before the final FILLED event
+        self._entry_fill_qty: float = 0.0   # running sum of entry partial fills
+        self._entry_fill_wavg: float = 0.0  # weighted avg price for entry fills
+        self._exit_fill_qty: float = 0.0    # running sum of exit partial fills
+        self._exit_fill_wavg: float = 0.0   # weighted avg price for exit fills
 
         # Option search state (analogous to base_spx._premium_searches)
         self._delta_searches: Dict[str, Dict] = {}
@@ -360,6 +367,12 @@ class TFMITHStrategy(BaseStrategy):
         self.entry_in_progress = False
         self._closing_in_progress = False
         self._last_minute = -1
+
+        # Reset partial fill accumulators on daily reset
+        self._entry_fill_qty = 0.0
+        self._entry_fill_wavg = 0.0
+        self._exit_fill_qty = 0.0
+        self._exit_fill_wavg = 0.0
 
         # ── Persistent state NOT cleared ─────────────────────────────────────
         # loss_streak and current_allocation survive
@@ -1025,34 +1038,102 @@ class TFMITHStrategy(BaseStrategy):
     # =========================================================================
 
     def on_order_filled_safe(self, event):
-        """Handle fills — entry and exit."""
+        """
+        Handle fills — entry and exit.
+
+        Mirrors base.py pattern: accumulate partial fills without discarding
+        the tracking order ID, and only dispatch to the final handler when the
+        order reaches FILLED status.
+        """
         order_id = event.client_order_id
         is_entry = order_id in self._tfmith_entry_orders
-        is_exit = order_id in self._tfmith_exit_orders
+        is_exit  = order_id in self._tfmith_exit_orders
 
+        if not is_entry and not is_exit:
+            return
+
+        # Check if this is a partial fill — if so, accumulate and wait.
+        # Only discard the order ID (and process final state) when FILLED.
+        order = self.cache.order(order_id)
+        if order and order.status == OrderStatus.PARTIALLY_FILLED:
+            self._accumulate_partial_fill(event, is_entry=is_entry)
+            return
+
+        # Order is fully filled (or status unavailable) — dispatch
         if is_entry:
             self._on_entry_fill(event)
         elif is_exit:
             self._on_exit_fill(event)
 
-    def _on_entry_fill(self, event):
-        """Capture entry price and quantity from fill."""
-        self._tfmith_entry_orders.discard(event.client_order_id)
-        self.entry_price = float(event.last_px)
-        self._actual_qty = float(event.last_qty)
-        self.actual_position_size = int(self._actual_qty)
+    def _accumulate_partial_fill(self, event, is_entry: bool):
+        """Accumulate qty and weighted-average price for a partial fill event."""
+        qty = float(event.last_qty)
+        px  = float(event.last_px)
 
-        # Commission
-        comm = 0.0
-        if hasattr(event, 'commission') and event.commission is not None:
-            comm = float(event.commission.as_double())
+        if is_entry:
+            prev_qty  = self._entry_fill_qty
+            prev_wavg = self._entry_fill_wavg
+            new_qty   = prev_qty + qty
+            self._entry_fill_wavg = (
+                (prev_wavg * prev_qty + px * qty) / new_qty
+            ) if new_qty > 0 else px
+            self._entry_fill_qty = new_qty
+            self.logger.warning(
+                f"⚡ ENTRY PARTIAL FILL | +{qty} contracts | "
+                f"Running total: {self._entry_fill_qty} | "
+                f"Avg fill px: ${self._entry_fill_wavg:.4f}"
+            )
         else:
-            comm = self._actual_qty * self.commission_per_contract
+            prev_qty  = self._exit_fill_qty
+            prev_wavg = self._exit_fill_wavg
+            new_qty   = prev_qty + qty
+            self._exit_fill_wavg = (
+                (prev_wavg * prev_qty + px * qty) / new_qty
+            ) if new_qty > 0 else px
+            self._exit_fill_qty = new_qty
+            self.logger.warning(
+                f"⚡ EXIT PARTIAL FILL | +{qty} contracts | "
+                f"Running total: {self._exit_fill_qty} | "
+                f"Avg fill px: ${self._exit_fill_wavg:.4f}"
+            )
+
+    def _on_entry_fill(self, event):
+        """
+        Capture entry price and quantity from the final fill event.
+
+        Merges any previously accumulated partial fills with this final fill
+        to produce the true total quantity and weighted-average fill price.
+        """
+        self._tfmith_entry_orders.discard(event.client_order_id)
+
+        this_qty  = float(event.last_qty)
+        this_px   = float(event.last_px)
+
+        # Merge accumulated partials + this final fill
+        total_qty = self._entry_fill_qty + this_qty
+        if total_qty > 0:
+            total_wavg = (
+                (self._entry_fill_wavg * self._entry_fill_qty + this_px * this_qty)
+                / total_qty
+            )
+        else:
+            total_wavg = this_px
+
+        self.entry_price          = total_wavg
+        self._actual_qty          = total_qty
+        self.actual_position_size = int(total_qty)
+
+        # Reset entry accumulators
+        self._entry_fill_qty  = 0.0
+        self._entry_fill_wavg = 0.0
+
+        # Commission on the FULL filled size
+        comm = self.actual_position_size * self.commission_per_contract
         self._total_commission = comm
 
         self.logger.info(
             f"✅ ENTRY FILLED | {self.option_type} {self.actual_position_size}x "
-            f"@ ${self.entry_price:.2f} | Comm=${comm:.2f}"
+            f"@ ${self.entry_price:.4f} | Comm=${comm:.2f}"
         )
         self._notify(
             f"✅ FILLED | {self.option_type} {self.actual_position_size}x "
@@ -1098,17 +1179,36 @@ class TFMITHStrategy(BaseStrategy):
         self.save_state()
 
     def _on_exit_fill(self, event):
-        """Handle exit fill — PnL, streak, allocation update, DB recording."""
-        self._tfmith_exit_orders.discard(event.client_order_id)
-        exit_price = float(event.last_px)
-        exit_qty = float(event.last_qty)
+        """
+        Handle exit fill — PnL, streak, allocation update, DB recording.
 
-        # Commission
-        exit_comm = 0.0
-        if hasattr(event, 'commission') and event.commission is not None:
-            exit_comm = float(event.commission.as_double())
+        Merges any previously accumulated partial exit fills with this final
+        fill to produce the true total exit quantity and weighted-average price.
+        """
+        self._tfmith_exit_orders.discard(event.client_order_id)
+
+        this_qty = float(event.last_qty)
+        this_px  = float(event.last_px)
+
+        # Merge accumulated partial exit fills + this final fill
+        total_exit_qty = self._exit_fill_qty + this_qty
+        if total_exit_qty > 0:
+            total_exit_wavg = (
+                (self._exit_fill_wavg * self._exit_fill_qty + this_px * this_qty)
+                / total_exit_qty
+            )
         else:
-            exit_comm = exit_qty * self.commission_per_contract
+            total_exit_wavg = this_px
+
+        # Reset exit accumulators
+        self._exit_fill_qty  = 0.0
+        self._exit_fill_wavg = 0.0
+
+        exit_price = total_exit_wavg
+        exit_qty   = total_exit_qty
+
+        # Commission on the full exit size
+        exit_comm = exit_qty * self.commission_per_contract
         total_commission = self._total_commission + exit_comm
 
         # ── Calculate PnL ────────────────────────────────────────────────────
