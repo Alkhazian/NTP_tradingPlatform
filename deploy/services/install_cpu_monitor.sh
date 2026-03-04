@@ -14,9 +14,33 @@ echo "Installing CPU Monitor using project root: $PROJECT_ROOT"
 # Ensure psutil is installed
 sudo apt update && sudo apt install -y python3-psutil
 
-# Update the service file with the correct absolute paths
-sed -i "s|ExecStart=/usr/bin/python3 .*|ExecStart=/usr/bin/python3 $PROJECT_ROOT/scripts/cpu_monitor.py|g" "$SERVICE_FILE"
-sed -i "s|ReadWritePaths=.*|ReadWritePaths=$PROJECT_ROOT/logs|g" "$SERVICE_FILE"
+# Generate the service file dynamically with correct absolute paths
+cat << EOF > "$SERVICE_FILE"
+[Unit]
+Description=NTD CPU/Memory Monitor with Telegram Alerts
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 $PROJECT_ROOT/scripts/cpu_monitor.py
+Restart=always
+RestartSec=10
+
+# Environment overrides (uncomment to customize)
+# Environment=MONITOR_POLL_INTERVAL=5
+# Environment=MONITOR_CPU_THRESHOLD=150
+# Environment=MONITOR_MEM_THRESHOLD=90
+# Environment=MONITOR_ALERT_COOLDOWN=300
+
+# Hardening
+ProtectSystem=strict
+ReadWritePaths=$PROJECT_ROOT/logs
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
 
 # Copy to systemd, reload, and start
 sudo cp "$SERVICE_FILE" /etc/systemd/system/
