@@ -1,0 +1,24 @@
+[Unit]
+Description=NTD CPU/Memory Monitor with Telegram Alerts
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /root/ntd_trader_dashboard/scripts/cpu_monitor.py
+Restart=always
+RestartSec=10
+
+# Environment overrides (uncomment to customize)
+# Environment=MONITOR_POLL_INTERVAL=5
+# Environment=MONITOR_CPU_THRESHOLD=150
+# Environment=MONITOR_MEM_THRESHOLD=90
+# Environment=MONITOR_ALERT_COOLDOWN=300
+
+# Hardening
+ProtectSystem=strict
+ReadWritePaths=/root/ntd_trader_dashboard/logs
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
