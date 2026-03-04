@@ -123,11 +123,20 @@ async def startup_event():
     
     async def start_nautilus():
         logger.info("Starting NautilusTrader Manager...")
-        try:
-            await nautilus_manager.start()
-            logger.info("NautilusTrader started successfully")
-        except Exception as e:
-            logger.error(f"Failed to start NautilusTrader: {e}")
+        max_retries = 12
+        for i in range(max_retries):
+            try:
+                await nautilus_manager.start()
+                logger.info("NautilusTrader started successfully")
+                return
+            except Exception as e:
+                logger.error(f"Failed to start NautilusTrader (attempt {i+1}/{max_retries}): {e}")
+                if "BusyLoading" in str(e) or "loading the dataset in memory" in str(e):
+                    logger.info("Redis is still loading dataset in memory. Retrying in 5 seconds...")
+                    await asyncio.sleep(5)
+                else:
+                    # Give it a few seconds before retrying any other transient error just in case
+                    await asyncio.sleep(5)
             
     asyncio.create_task(start_nautilus())
     asyncio.create_task(broadcast_status())
