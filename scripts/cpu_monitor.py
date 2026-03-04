@@ -38,7 +38,9 @@ ALERT_COOLDOWN = int(os.getenv("MONITOR_ALERT_COOLDOWN", "300"))      # seconds 
 TOP_PROCESSES = int(os.getenv("MONITOR_TOP_PROCESSES", "3"))          # how many top processes to show
 
 # Telegram config — read from the same .env used by docker-compose
-ENV_FILE = Path(os.getenv("MONITOR_ENV_FILE", "/root/ntd_trader_dashboard/.env"))
+# Dynamically resolve root directory relative to this script (assumes script is in <root>/scripts/)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ENV_FILE = Path(os.getenv("MONITOR_ENV_FILE", PROJECT_ROOT / ".env"))
 
 # ──────────────────────────────────────────────
 #  Logging
