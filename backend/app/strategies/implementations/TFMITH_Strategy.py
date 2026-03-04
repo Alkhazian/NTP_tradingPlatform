@@ -29,7 +29,7 @@ IB_VENUE = Venue("IB")
 MAX_DELTA_CANDIDATES = 20
 
 # Number of strikes to request above/below ATM when building option chain.
-# QQQ strikes are $1 apart → 25 each side = 50 total strikes × 2 (C+P) = 100 contracts max.
+# QQQ strikes are $1 apart → 15 each side = 30 total strikes × 2 (C+P) = 60 contracts max.
 # This replaces build_options_chain=True which loads ALL thousands of strikes.
 OPTION_CHAIN_STRIKE_RADIUS = 15
 
@@ -264,10 +264,11 @@ class TFMITHStrategy(BaseStrategy):
         atm = self.current_underlying_price
 
         # Build strike list: ±OPTION_CHAIN_STRIKE_RADIUS around ATM, $1 steps for QQQ.
-        # For SPX-style indices with $5 strikes, adjust strike_step in config if needed.
-        strike_step = 1.0  # QQQ strikes are $1 apart
+        # IMPORTANT: QQQ options only exist at whole-dollar strikes ($580, $581, ...).
+        # Round ATM to nearest integer FIRST, then generate clean integer strikes.
+        atm_rounded = round(atm)
         strikes = [
-            round(atm + i * strike_step, 2)
+            atm_rounded + i
             for i in range(-OPTION_CHAIN_STRIKE_RADIUS, OPTION_CHAIN_STRIKE_RADIUS + 1)
         ]
 
@@ -285,7 +286,7 @@ class TFMITHStrategy(BaseStrategy):
                     "symbol": self.underlying_symbol,
                     "exchange": self.exchange,
                     "lastTradeDateOrContractMonth": expiry_date,
-                    "strike": strike,
+                    "strike": float(strike),   # IB expects float; integer strikes for equity ETF options
                     "right": right,
                     "multiplier": "100",
                 })

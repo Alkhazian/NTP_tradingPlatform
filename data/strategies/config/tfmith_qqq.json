@@ -1,7 +1,7 @@
 {
     "id": "tfmith_qqq",
     "name": "TFMITH QQQ BleedingEdge",
-    "enabled": false,
+    "enabled": true,
     "instrument_id": "QQQ.NASDAQ",
     "strategy_type": "TFMITHStrategy",
     "order_size": 1,
