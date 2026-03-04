@@ -28,6 +28,11 @@ IB_VENUE = Venue("IB")
 # Maximum option candidates to subscribe for delta search (IB data limit protection)
 MAX_DELTA_CANDIDATES = 20
 
+# Number of strikes to request above/below ATM when building option chain.
+# QQQ strikes are $1 apart → 25 each side = 50 total strikes × 2 (C+P) = 100 contracts max.
+# This replaces build_options_chain=True which loads ALL thousands of strikes.
+OPTION_CHAIN_STRIKE_RADIUS = 15
+
 
 class TFMITHStrategy(BaseStrategy):
     """
@@ -235,12 +240,55 @@ class TFMITHStrategy(BaseStrategy):
     # =========================================================================
 
     def _request_option_chain(self):
-        """Request option chain for the underlying with target DTE."""
+        """
+        Request option chain for the underlying with target DTE.
+
+        IMPORTANT: We do NOT use build_options_chain=True because it loads the
+        entire options chain (thousands of contracts for QQQ) into self.cache as
+        Instrument objects, and the IB adapter cannot be cancelled mid-flight.
+        If the strategy aborts entry (e.g. no option found), the background download
+        continues and eventually causes OOM.
+
+        Instead, we request specific OPT contracts for a narrow strike range
+        (±OPTION_CHAIN_STRIKE_RADIUS) around the current ATM price, for both
+        CALL and PUT. This caps the number of contracts to ~100 max.
+        """
+        if self.current_underlying_price <= 0:
+            self.logger.warning(
+                "📋 Option chain request skipped — underlying price not yet available"
+            )
+            return
+
         now = self.clock.utc_now()
         expiry_date = (now.date() + timedelta(days=self.dte)).strftime("%Y%m%d")
+        atm = self.current_underlying_price
+
+        # Build strike list: ±OPTION_CHAIN_STRIKE_RADIUS around ATM, $1 steps for QQQ.
+        # For SPX-style indices with $5 strikes, adjust strike_step in config if needed.
+        strike_step = 1.0  # QQQ strikes are $1 apart
+        strikes = [
+            round(atm + i * strike_step, 2)
+            for i in range(-OPTION_CHAIN_STRIKE_RADIUS, OPTION_CHAIN_STRIKE_RADIUS + 1)
+        ]
+
         self.logger.info(
-            f"📋 Requesting option chain | {self.underlying_symbol} | Expiry={expiry_date}"
+            f"📋 Requesting option chain | {self.underlying_symbol} | Expiry={expiry_date} | "
+            f"ATM=${atm:.2f} | Strikes {strikes[0]:.0f}–{strikes[-1]:.0f} "
+            f"({len(strikes)} strikes × 2 sides)"
         )
+
+        ib_contracts = []
+        for strike in strikes:
+            for right in ("C", "P"):
+                ib_contracts.append({
+                    "secType": "OPT",
+                    "symbol": self.underlying_symbol,
+                    "exchange": self.exchange,
+                    "lastTradeDateOrContractMonth": expiry_date,
+                    "strike": strike,
+                    "right": right,
+                    "multiplier": "100",
+                })
 
         try:
             self.request_instruments(
@@ -248,17 +296,15 @@ class TFMITHStrategy(BaseStrategy):
                 update_catalog=True,
                 params={
                     "update_catalog": True,
-                    "ib_contracts": ({
-                        "secType": "STK",
-                        "symbol": self.underlying_symbol,
-                        "exchange": self.exchange,
-                        "primaryExchange": self.primary_exchange,
-                        "build_options_chain": True,
-                        "lastTradeDateOrContractMonth": expiry_date,
-                    },)
+                    "ib_contracts": tuple(ib_contracts),
                 }
             )
+            # NOTE: _option_chain_loaded stays False until we verify options exist in cache.
+            # It is used only as a diagnostic flag — do not gate logic on it.
             self._option_chain_loaded = True
+            self.logger.info(
+                f"📋 Option chain request sent | {len(ib_contracts)} contracts total"
+            )
         except Exception as e:
             self.logger.error(f"Failed to request option chain: {e}")
 
@@ -392,9 +438,9 @@ class TFMITHStrategy(BaseStrategy):
             current_minutes = current_time.hour * 60 + current_time.minute
             start_minutes = self.start_time.hour * 60 + self.start_time.minute
             
-            # Request 2 minutes before start_time (or immediately if started late)
-            if current_minutes >= start_minutes - 2:
-                self.logger.info(f"🔄 Pre-loading option chain 2 mins before start_time ({self.start_time})...")
+            # Request 3 minutes before start_time (or immediately if started late)
+            if current_minutes >= start_minutes - 3:
+                self.logger.info(f"🔄 Pre-loading option chain 3 mins before start_time ({self.start_time})...")
                 self._request_option_chain()
                 self._option_chain_requested_today = True
 
