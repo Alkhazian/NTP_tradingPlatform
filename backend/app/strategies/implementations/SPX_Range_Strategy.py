@@ -83,6 +83,8 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self.low_breached: bool = False
         self.traded_today: bool = False
         self.entry_in_progress: bool = False
+        self.entry_attempts: int = 0
+        self.max_entry_attempts: int = 10  # Default, overridden from config
         
         # Spread formation state
         self._target_short_strike: Optional[float] = None
@@ -186,6 +188,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self.fill_timeout_seconds = int(params.get("fill_timeout_seconds", 0))  # 0 = disabled
         self.entry_price_adjustment = float(params.get("entry_price_adjustment", 0.25))  # Bid + (Spread * adjustment)
         self.commission_per_contract = float(params.get("commission_per_contract", 0.0))
+        self.max_entry_attempts = int(params.get("max_entry_attempts", 10))
         
         range_end_time = "Range Close" # Will be calculated/logged by base
         
@@ -326,6 +329,21 @@ class SPXRangeStrategy(SPXBaseStrategy):
                     }
                 }
             )
+            return
+        if self.entry_attempts >= self.max_entry_attempts:
+            self.logger.info(
+                f"🚫 MAX ENTRY ATTEMPTS REACHED ({self.entry_attempts}/{self.max_entry_attempts}) | Stopping for today",
+                extra={
+                    "extra": {
+                        "event_type": "max_entry_attempts_reached",
+                        "attempts": self.entry_attempts,
+                        "max_attempts": self.max_entry_attempts
+                    }
+                }
+            )
+            self._notify(f"🚫 MAX ENTRY ATTEMPTS REACHED ({self.entry_attempts}/{self.max_entry_attempts}) | Stopping for today")
+            self.traded_today = True
+            self.save_state()
             return
         if self.entry_in_progress:
             self.logger.debug(
@@ -502,8 +520,20 @@ class SPXRangeStrategy(SPXBaseStrategy):
         Handles both bearish (Call Credit Spread) and bullish (Put Credit Spread) directions.
         """
         self.entry_in_progress = True
+        self.entry_attempts += 1
         self._found_legs.clear()  # Reset found legs
         self._last_entry_log_time = None  # Reset logging throttler for new attempt
+        
+        self.logger.info(
+            f"🔄 Entry attempt {self.entry_attempts}/{self.max_entry_attempts}",
+            extra={
+                "extra": {
+                    "event_type": "entry_attempt",
+                    "attempt": self.entry_attempts,
+                    "max_attempts": self.max_entry_attempts
+                }
+            }
+        )
         
         # Calculate expiry date based on DTE config
         today = self.clock.utc_now().astimezone(self.tz).date()
@@ -1942,6 +1972,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self.low_breached = False
         self.traded_today = False
         self.entry_in_progress = False
+        self.entry_attempts = 0
         self._found_legs.clear()
         self._spread_entry_price = None
         self._signal_direction = None
@@ -1953,6 +1984,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self._entry_order_id = None
         self._skipped_quote_count = 0
         self._last_valid_spread_quote = None
+        self._last_entry_log_time = None
         
         # Cancel fill timeout timer if active
         try:
@@ -2031,6 +2063,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
             "high_breached": self.high_breached,
             "low_breached": self.low_breached,
             "traded_today": self.traded_today,
+            "entry_attempts": self.entry_attempts,
             "_spread_entry_price": self._spread_entry_price,
             "_target_short_strike": self._target_short_strike,
             "_target_long_strike": self._target_long_strike,
@@ -2049,6 +2082,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self.high_breached = state.get("high_breached", False)
         self.low_breached = state.get("low_breached", False)
         self.traded_today = state.get("traded_today", False)
+        self.entry_attempts = state.get("entry_attempts", 0)
         self._spread_entry_price = state.get("_spread_entry_price")
         self._target_short_strike = state.get("_target_short_strike")
         self._target_long_strike = state.get("_target_long_strike")

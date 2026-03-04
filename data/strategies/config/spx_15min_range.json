@@ -21,6 +21,7 @@
         "entry_timeout_seconds": 35,
         "fill_timeout_seconds": 300,
         "entry_price_adjustment": 0.8,
-        "commission_per_contract": 5.16
+        "commission_per_contract": 5.16,
+        "max_entry_attempts": 10
     }
 }
