@@ -1,7 +1,7 @@
 {
     "id": "spx_1h_range_1dte",
     "name": "SPX 1-Hour Range 1DTE Credit Spread",
-    "enabled": false,
+    "enabled": true,
     "instrument_id": "^SPX.CBOE",
     "strategy_type": "SPXRangeStrategy",
     "order_size": 3,

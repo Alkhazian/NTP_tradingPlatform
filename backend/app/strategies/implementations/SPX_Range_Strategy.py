@@ -374,6 +374,8 @@ class SPXRangeStrategy(SPXBaseStrategy):
                 self._notify(
                     f"📉 BEARISH entry BLOCKED | Close below Low ({close_price:.2f} < {self.or_low:.2f}) but High breached earlier"
                 )
+                self.traded_today = True
+                self.save_state()
             else:
                 current_price = self.current_spx_price
                 price_deviation = current_price - self.or_low
@@ -441,6 +443,8 @@ class SPXRangeStrategy(SPXBaseStrategy):
                 self._notify(
                     f"📈 BULLISH entry BLOCKED | Close above High ({close_price:.2f} > {self.or_high:.2f}) but Low breached earlier"
                 )
+                self.traded_today = True
+                self.save_state()
             else:
                 current_price = self.current_spx_price
                 price_deviation = self.or_high - current_price
