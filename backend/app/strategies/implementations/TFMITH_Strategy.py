@@ -438,9 +438,10 @@ class TFMITHStrategy(BaseStrategy):
         if not getattr(self, '_option_chain_requested_today', False):
             current_minutes = current_time.hour * 60 + current_time.minute
             start_minutes = self.start_time.hour * 60 + self.start_time.minute
+            end_minutes = self.soft_end_time.hour * 60 + self.soft_end_time.minute
             
-            # Request 3 minutes before start_time (or immediately if started late)
-            if current_minutes >= start_minutes - 3:
+            # Request 3 minutes before start_time (or immediately if started late, but before end_time)
+            if start_minutes - 3 <= current_minutes <= end_minutes:
                 self.logger.info(f"🔄 Pre-loading option chain 3 mins before start_time ({self.start_time})...")
                 self._request_option_chain()
                 self._option_chain_requested_today = True

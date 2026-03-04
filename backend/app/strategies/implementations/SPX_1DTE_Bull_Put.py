@@ -611,8 +611,9 @@ class SPX1DTEBullPutStrategy(SPXBaseStrategy):
             # Calculate range end time
             range_end_total_minutes = self.market_open_time.hour * 60 + self.market_open_time.minute + self.opening_range_minutes
             trigger_total_minutes = range_end_total_minutes - 2
+            cutoff_total_minutes = self.entry_cutoff_time.hour * 60 + self.entry_cutoff_time.minute
             
-            if current_minute >= trigger_total_minutes:
+            if trigger_total_minutes <= current_minute <= cutoff_total_minutes:
                 target_expiry = self._get_target_expiry()
                 self.logger.info(f"🔄 Pre-loading option chain 2 mins before OR ends (Expiry={target_expiry})...")
                 self.request_option_chain(target_expiry)
