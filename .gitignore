@@ -45,3 +45,6 @@ trading.db
 data/historical_data
 data/catalog
 data/strategies/state
+
+# Monitoring
+ntd-cpu-monitor.service
