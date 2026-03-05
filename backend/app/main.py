@@ -1,4 +1,5 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from contextlib import asynccontextmanager
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
@@ -81,7 +82,40 @@ try:
 except Exception as e:
     logger.warning(f"VictoriaLogs handler not configured: {e}")
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup logic
+    await redis_manager.connect()
+    app.state.redis = redis_manager
+
+    async def start_nautilus():
+        logger.info("Starting NautilusTrader Manager...")
+        max_retries = 12
+        for i in range(max_retries):
+            try:
+                await nautilus_manager.start()
+                logger.info("NautilusTrader started successfully")
+                return
+            except Exception as e:
+                logger.error(f"Failed to start NautilusTrader (attempt {i+1}/{max_retries}): {e}")
+                if "BusyLoading" in str(e) or "loading the dataset in memory" in str(e):
+                    logger.info("Redis is still loading dataset in memory. Retrying in 5 seconds...")
+                    await asyncio.sleep(5)
+                else:
+                    await asyncio.sleep(5)
+            
+    asyncio.create_task(start_nautilus())
+    asyncio.create_task(broadcast_status())
+    asyncio.create_task(nautilus_event_listener())
+    
+    yield
+    
+    # Shutdown logic
+    logger.info("Shutting down NautilusTrader...")
+    await nautilus_manager.stop()
+    await redis_manager.close()
+
+app = FastAPI(lifespan=lifespan, strict_content_type=False)
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -115,38 +149,9 @@ nautilus_manager = NautilusManager(host=IB_HOST, port=IB_PORT)
 # Event to trigger immediate status updates
 update_trigger = asyncio.Event()
 
-@app.on_event("startup")
-async def startup_event():
-    await redis_manager.connect()
-    app.state.redis = redis_manager
+# Removed deprecated on_event("startup") and on_event("shutdown") handlers
+# Logic migrated to lifespan context manager above
 
-    
-    async def start_nautilus():
-        logger.info("Starting NautilusTrader Manager...")
-        max_retries = 12
-        for i in range(max_retries):
-            try:
-                await nautilus_manager.start()
-                logger.info("NautilusTrader started successfully")
-                return
-            except Exception as e:
-                logger.error(f"Failed to start NautilusTrader (attempt {i+1}/{max_retries}): {e}")
-                if "BusyLoading" in str(e) or "loading the dataset in memory" in str(e):
-                    logger.info("Redis is still loading dataset in memory. Retrying in 5 seconds...")
-                    await asyncio.sleep(5)
-                else:
-                    # Give it a few seconds before retrying any other transient error just in case
-                    await asyncio.sleep(5)
-            
-    asyncio.create_task(start_nautilus())
-    asyncio.create_task(broadcast_status())
-    asyncio.create_task(nautilus_event_listener())
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    logger.info("Shutting down NautilusTrader...")
-    await nautilus_manager.stop()
-    await redis_manager.close()
 
 async def nautilus_event_listener():
     """Listen for NautilusTrader events on Redis and trigger UI updates"""

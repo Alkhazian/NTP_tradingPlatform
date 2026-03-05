@@ -102,7 +102,7 @@ services:
 
   # VictoriaLogs - Log storage with 14-day retention
   victorialogs:
-    image: victoriametrics/victoria-logs:v1.43.1
+    image: victoriametrics/victoria-logs:v1.47.0
     container_name: ntd-victorialogs
     command:
       - -storageDataPath=/data
@@ -119,7 +119,7 @@ services:
 
   # Vector - Container log collector (lightweight, Rust-based)
   vector:
-    image: timberio/vector:0.52.0-alpine
+    image: timberio/vector:0.53.0-alpine
     container_name: ntd-vector
     command: ["--config", "/etc/vector/vector.toml"]
     volumes:
