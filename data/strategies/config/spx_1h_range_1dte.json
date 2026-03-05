@@ -22,6 +22,9 @@
         "fill_timeout_seconds": 300,
         "entry_price_adjustment": 0.75,
         "commission_per_contract": 5.16,
-        "max_entry_attempts": 10
+        "max_entry_attempts": 10,
+        "sl_chase_timeout_seconds": 20,
+        "sl_chase_price_step": 0.10,
+        "sl_chase_max_retries": 3
     }
 }

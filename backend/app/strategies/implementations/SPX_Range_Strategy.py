@@ -96,6 +96,10 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self._sl_triggered: bool = False  # Prevents SL from re-triggering after first fire
         self._entry_order_id: Optional[ClientOrderId] = None  # Track entry order for fill timeout
         self._actual_qty: float = 0.0  # Track actual filled quantity for commission
+
+        # SL Order Chasing state
+        self._sl_chase_attempt: int = 0   # Counter of additional retry attempts (0 = only initial order sent)
+        self._sl_chase_order_id: Optional[ClientOrderId] = None  # ID of the currently active SL order
         
         # Telegram
         self.telegram = TelegramNotificationService()
@@ -189,6 +193,11 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self.entry_price_adjustment = float(params.get("entry_price_adjustment", 0.25))  # Bid + (Spread * adjustment)
         self.commission_per_contract = float(params.get("commission_per_contract", 0.0))
         self.max_entry_attempts = int(params.get("max_entry_attempts", 10))
+
+        # SL Order Chasing parameters
+        self.sl_chase_timeout_seconds = int(params.get("sl_chase_timeout_seconds", 20))
+        self.sl_chase_price_step = float(params.get("sl_chase_price_step", 0.10))
+        self.sl_chase_max_retries = int(params.get("sl_chase_max_retries", 3))
         
         range_end_time = "Range Close" # Will be calculated/logged by base
         
@@ -1440,11 +1449,19 @@ class SPXRangeStrategy(SPXBaseStrategy):
             )
             self._closing_in_progress = True
             self._sl_triggered = True
-            
-            # Use aggressive price (Limit below mid) or Market for SL
-            # Here we use Limit at mid - 0.05 for immediate fill
+            self._sl_chase_attempt = 0  # Reset chase counter for this new SL event
+
+            # Attempt 0: standard initial SL limit price
             sl_limit = mid - 0.05
-            self.close_spread_smart(limit_price=sl_limit)
+            self.logger.info(
+                f"🛑 SL Order Attempt 0 | Limit: {sl_limit:.4f} | Mid: {mid:.4f}",
+                extra={"extra": {"event_type": "sl_order_attempt", "attempt": 0, "limit_price": sl_limit, "mid": mid}}
+            )
+            result = self.close_spread_smart(limit_price=sl_limit)
+
+            # Schedule chasing timer if retries are enabled and order was submitted
+            if result and self.sl_chase_max_retries > 0:
+                self._schedule_sl_chase_timer()
             return
 
         # Now check closing flag (TP order might be pending)
@@ -1481,6 +1498,213 @@ class SPXRangeStrategy(SPXBaseStrategy):
 
             self.close_spread_smart(limit_price=tp_price)
             # Note: _spread_entry_price is reset in on_order_filled_safe when close is confirmed
+
+    # =========================================================================
+    # SL ORDER CHASING
+    # =========================================================================
+
+    def _schedule_sl_chase_timer(self):
+        """Schedule (or re-schedule) the SL order chase timer."""
+        try:
+            self.clock.cancel_timer(f"{self.id}_sl_chase")
+        except Exception:
+            pass
+        self.clock.set_time_alert(
+            name=f"{self.id}_sl_chase",
+            alert_time=self.clock.utc_now() + timedelta(seconds=self.sl_chase_timeout_seconds),
+            callback=self._on_sl_chase_timeout,
+        )
+        self.logger.info(
+            f"⏱️ SL Chase timer set | Next check in {self.sl_chase_timeout_seconds}s "
+            f"| Attempt so far: {self._sl_chase_attempt} | Max retries: {self.sl_chase_max_retries}",
+            extra={
+                "extra": {
+                    "event_type": "sl_chase_timer_set",
+                    "timeout_seconds": self.sl_chase_timeout_seconds,
+                    "current_attempt": self._sl_chase_attempt,
+                    "max_retries": self.sl_chase_max_retries,
+                }
+            }
+        )
+
+    def _on_sl_chase_timeout(self, event):
+        """
+        Called by timer after sl_chase_timeout_seconds.
+
+        If the SL limit order has not been filled yet, cancel it and submit
+        a new one with a more aggressive (lower) limit price.
+
+        Price formula:
+            attempt 0 (initial): mid - 0.05
+            attempt N retry:     mid_current - 0.05 - N * sl_chase_price_step
+        """
+        # Guard: chasing already resolved (position closed or state reset)
+        if not self._closing_in_progress:
+            self.logger.info(
+                "SL Chase timeout fired but _closing_in_progress=False | Ignoring",
+                extra={"extra": {"event_type": "sl_chase_skipped", "reason": "closing_not_in_progress"}}
+            )
+            return
+
+        effective_qty = self.get_effective_spread_quantity()
+        if effective_qty == 0:
+            self.logger.info(
+                "SL Chase timeout fired but position already flat | Ignoring",
+                extra={"extra": {"event_type": "sl_chase_skipped", "reason": "position_flat"}}
+            )
+            return
+
+        # Guard: retry limit exhausted
+        if self._sl_chase_attempt >= self.sl_chase_max_retries:
+            self.logger.critical(
+                f"🚨 SL ORDER CHASING EXHAUSTED | {self._sl_chase_attempt} retries done "
+                f"| Position still open ({effective_qty:.0f} lots) | MANUAL INTERVENTION REQUIRED",
+                extra={
+                    "extra": {
+                        "event_type": "sl_chase_exhausted",
+                        "attempts": self._sl_chase_attempt,
+                        "max_retries": self.sl_chase_max_retries,
+                        "effective_qty": effective_qty,
+                    }
+                }
+            )
+            self._notify(
+                f"🚨 SL CHASING EXHAUSTED after {self._sl_chase_attempt} retries! "
+                f"Position ({effective_qty:.0f} lots) may still be open. MANUAL CHECK REQUIRED."
+            )
+            return  # Do NOT reset _closing_in_progress — prevents new duplicate orders
+
+        # Check if there is still an open SL order that needs to be cancelled.
+        # Distinguish between PARTIALLY_FILLED (cancel remainder, retry for diff)
+        # and SUBMITTED/ACCEPTED (cancel entirely, retry for full remaining qty).
+        remaining_qty: float = abs(effective_qty)  # default: assume nothing filled
+
+        if self.spread_instrument:
+            active_orders = list(self.cache.orders_open(instrument_id=self.spread_instrument.id))
+            if active_orders:
+                sl_order = active_orders[0]
+                order_filled_qty = float(sl_order.filled_qty) if hasattr(sl_order, "filled_qty") else 0.0
+                order_total_qty  = float(sl_order.quantity)
+                is_partial = (
+                    sl_order.status == OrderStatus.PARTIALLY_FILLED
+                    or order_filled_qty > 0
+                )
+
+                if is_partial:
+                    # PARTIALLY_FILLED: cancel the remainder, then retry for the unfilled portion only
+                    remaining_qty = order_total_qty - order_filled_qty
+                    self.logger.warning(
+                        f"🔄 SL Chase | PARTIALLY FILLED: {order_filled_qty:.0f}/{order_total_qty:.0f} filled "
+                        f"| Cancelling remaining {remaining_qty:.0f} lot(s) and retrying",
+                        extra={
+                            "extra": {
+                                "event_type": "sl_chase_partial_fill",
+                                "filled_qty": order_filled_qty,
+                                "total_qty": order_total_qty,
+                                "remaining_qty": remaining_qty,
+                                "order_id": str(sl_order.client_order_id),
+                            }
+                        }
+                    )
+                else:
+                    # SUBMITTED / ACCEPTED — nothing filled at all
+                    remaining_qty = abs(effective_qty)
+                    self.logger.info(
+                        f"🔄 SL Chase | Order not filled (status: {sl_order.status.name}) "
+                        f"| Cancelling and retrying for {remaining_qty:.0f} lot(s)",
+                        extra={
+                            "extra": {
+                                "event_type": "sl_chase_cancel_pending",
+                                "order_count": len(active_orders),
+                                "order_status": sl_order.status.name,
+                                "orders": [str(o.client_order_id) for o in active_orders],
+                            }
+                        }
+                    )
+
+                self.cancel_all_orders(self.spread_instrument.id)
+            else:
+                # No open order found — it may have been filled between timer fire and now.
+                # on_order_filled_safe will handle state reset; bail out safely.
+                self.logger.info(
+                    "SL Chase timeout fired but no open orders found | "
+                    "Fill may be in-flight; will re-check on next timer if needed",
+                    extra={"extra": {"event_type": "sl_chase_no_open_order"}}
+                )
+                # Re-schedule one more check to confirm
+                if self._sl_chase_attempt < self.sl_chase_max_retries:
+                    self._schedule_sl_chase_timer()
+                return
+
+        # Get fresh market data for the new price
+        if not self.spread_instrument:
+            self.logger.warning(
+                "SL Chase: spread_instrument is None, cannot get quote | Aborting chase",
+                extra={"extra": {"event_type": "sl_chase_no_instrument"}}
+            )
+            return
+
+        quote = self.cache.quote_tick(self.spread_instrument.id)
+        if not quote:
+            self.logger.warning(
+                "SL Chase: no quote available for spread instrument | "
+                "Skipping this retry; will try on next timer",
+                extra={"extra": {"event_type": "sl_chase_no_quote"}}
+            )
+            # Re-schedule despite missing quote — market may return a quote shortly
+            if self._sl_chase_attempt < self.sl_chase_max_retries:
+                self._schedule_sl_chase_timer()
+            return
+
+        bid = quote.bid_price.as_double()
+        ask = quote.ask_price.as_double()
+        mid = (bid + ask) / 2
+
+        # Increment attempt counter BEFORE calculating price (attempt 1 = first retry)
+        self._sl_chase_attempt += 1
+        new_sl_limit = mid - 0.05 - (self._sl_chase_attempt * self.sl_chase_price_step)
+
+        self.logger.warning(
+            f"🔄 SL ORDER CHASE RETRY #{self._sl_chase_attempt} "
+            f"| Qty: {remaining_qty:.0f} "
+            f"| New Limit: {new_sl_limit:.4f} "
+            f"| Mid: {mid:.4f} (Bid: {bid:.4f}, Ask: {ask:.4f}) "
+            f"| Step: -{self.sl_chase_price_step:.2f} each retry "
+            f"| Retries left: {self.sl_chase_max_retries - self._sl_chase_attempt}",
+            extra={
+                "extra": {
+                    "event_type": "sl_chase_retry",
+                    "attempt": self._sl_chase_attempt,
+                    "max_retries": self.sl_chase_max_retries,
+                    "retry_qty": remaining_qty,
+                    "new_limit_price": new_sl_limit,
+                    "current_mid": mid,
+                    "current_bid": bid,
+                    "current_ask": ask,
+                    "price_step": self.sl_chase_price_step,
+                    "retries_remaining": self.sl_chase_max_retries - self._sl_chase_attempt,
+                }
+            }
+        )
+        self._notify(
+            f"🔄 SL Chase Retry #{self._sl_chase_attempt}/{self.sl_chase_max_retries} "
+            f"| Qty: {remaining_qty:.0f} | New Limit: {new_sl_limit:.4f} | Mid: {mid:.4f}"
+        )
+
+        # Submit closing order for the REMAINING (unfilled) quantity only.
+        # close_spread_smart() reads get_effective_spread_quantity() which reflects
+        # actual filled positions — so it correctly handles partial fills:
+        # e.g. if 3/5 already filled, position is down to 2, and close_spread_smart
+        # will submit for exactly 2.
+        result = self.close_spread_smart(limit_price=new_sl_limit)
+
+        # Schedule next chase check if retries remain
+        if result and self._sl_chase_attempt < self.sl_chase_max_retries:
+            self._schedule_sl_chase_timer()
+
+    # =========================================================================
+    # FALLBACK POLLING (existing, unchanged below)
+    # =========================================================================
 
     def _start_fallback_polling(self, event):
         """
@@ -2072,6 +2296,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
             "_sl_triggered": self._sl_triggered,
             "_current_trade_id": self._current_trade_id,
             "_actual_qty": self._actual_qty,
+            "_sl_chase_attempt": self._sl_chase_attempt,
         })
         return state
 
@@ -2091,6 +2316,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self._sl_triggered = state.get("_sl_triggered", False)
         self._current_trade_id = state.get("_current_trade_id")
         self._actual_qty = state.get("_actual_qty", 0.0)
+        self._sl_chase_attempt = state.get("_sl_chase_attempt", 0)
         
         self.logger.info(
             f"State restored | Range: {self.daily_low}-{self.daily_high} | Calculated: {self.range_calculated} | Traded: {self.traded_today} | Dir: {self._signal_direction}",
@@ -2428,10 +2654,18 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self._actual_qty = 0.0
         self._skipped_quote_count = 0
         self._last_valid_spread_quote = None
-        
+        self._sl_chase_attempt = 0
+        self._sl_chase_order_id = None
+
+        # Cancel SL chase timer if it is still pending
+        try:
+            self.clock.cancel_timer(f"{self.id}_sl_chase")
+        except Exception:
+            pass
+
         # Clean up tracked order limits to prevent stale entries
         self._active_spread_order_limits.clear()
-        
+
         self.save_state()
 
     # --- Close Order Failsafe Handlers ---
@@ -2470,6 +2704,17 @@ class SPXRangeStrategy(SPXBaseStrategy):
             f"\u26a0\ufe0f CLOSE ORDER {reason} | Position still open ({effective_qty:.0f} lots) | SL/TP monitoring resumed"
         )
         self._closing_in_progress = False
+        self._sl_chase_attempt = 0
+        self._sl_chase_order_id = None
+
+        # Cancel any pending chase timer to avoid submitting a duplicate order
+        # after the broker already CANCELLED/REJECTED this one.
+        # (The next tick of _manage_open_position will re-trigger SL from scratch.)
+        try:
+            self.clock.cancel_timer(f"{self.id}_sl_chase")
+        except Exception:
+            pass
+
         self.save_state()
 
     def get_custom_status(self) -> Dict[str, Any]:
