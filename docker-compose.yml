@@ -106,8 +106,9 @@ services:
     container_name: ntd-victorialogs
     command:
       - -storageDataPath=/data
-      - -retentionPeriod=14d
+      - -retentionPeriod=7d
       - -httpListenAddr=:9428
+      - -storage.minFreeDiskSpaceBytes=1073741824  # 1GB - proactively trim old logs before going read-only
     volumes:
       - victorialogs-data:/data
     expose:
