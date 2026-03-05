@@ -282,7 +282,8 @@ class BaseStrategy(Strategy):
         self.logger.info(f"Strategy {self.strategy_id} stopping...")
         try:
             self.on_stop_safe()
-            self.save_state()
+            if self._functional_ready:
+                self.save_state()
         except Exception as e:
             self.on_unexpected_error(e)
 
