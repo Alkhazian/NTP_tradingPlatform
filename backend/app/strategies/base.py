@@ -122,6 +122,10 @@ class BaseStrategy(Strategy):
         #   "last_fill_time": str | None,
         # }}
         self._leg_fill_accumulator: Dict[str, Dict] = {}
+        # Tracks client_order_id of the most recently submitted spread order.
+        # Used by subclasses to capture order IDs after close_spread_smart() calls
+        # without needing to change the bool return type of open_spread_position().
+        self._last_spread_order_id: Optional[ClientOrderId] = None
 
 
     # =========================================================================
@@ -606,7 +610,10 @@ class BaseStrategy(Strategy):
         
         # Track this as a spread order
         self._pending_spread_orders.add(order.client_order_id)
-        
+
+        # Expose order ID for callers that need to track it (e.g. SL chase accumulator)
+        self._last_spread_order_id = order.client_order_id
+
         # Submit order
         self.submit_order(order)
         
@@ -1875,6 +1882,69 @@ class BaseStrategy(Strategy):
             "total_qty": min(sell_qty, buy_qty),
             "fill_time": acc["last_fill_time"],
             "venue_order_id": acc["venue_order_id"],
+        }
+
+    def get_accumulated_spread_price_multi(
+        self,
+        order_ids: List[str],
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Calculate the weighted-average net spread price across MULTIPLE closing orders.
+
+        Used when a position is closed in more than one order (e.g. a partial SL fill
+        followed by a chase retry that fills the remainder).  Aggregates all LEG fills
+        from every supplied order_id and returns a single composite price.
+
+        Falls back gracefully:
+        - IDs that have no entry in _leg_fill_accumulator are silently skipped.
+        - Returns None if the combined accumulator has no usable sell+buy fills.
+
+        Args:
+            order_ids: List of parent spread order ID strings to aggregate.
+
+        Returns:
+            Same shape as get_accumulated_spread_price():
+                net_price      – weighted-average net spread exit price (always negative)
+                total_qty      – total contracts filled across all orders
+                fill_time      – timestamp of the LAST leg fill seen
+                venue_order_id – venue order ID of the LAST order that had a fill
+            Or None if nothing could be aggregated.
+        """
+        combined_sell_fills: List[tuple] = []
+        combined_buy_fills:  List[tuple] = []
+        last_fill_time: Optional[str]    = None
+        last_venue_order_id: Optional[str] = None
+
+        for oid in order_ids:
+            acc = self._leg_fill_accumulator.get(oid)
+            if not acc:
+                continue
+            combined_sell_fills.extend(acc.get("sell_fills", []))
+            combined_buy_fills.extend(acc.get("buy_fills", []))
+            # Keep the last (most recent) metadata
+            if acc.get("last_fill_time"):
+                last_fill_time = acc["last_fill_time"]
+            if acc.get("venue_order_id"):
+                last_venue_order_id = acc["venue_order_id"]
+
+        if not combined_sell_fills or not combined_buy_fills:
+            return None
+
+        sell_qty = sum(q for q, _ in combined_sell_fills)
+        sell_wp  = sum(q * p for q, p in combined_sell_fills)
+        buy_qty  = sum(q for q, _ in combined_buy_fills)
+        buy_wp   = sum(q * p for q, p in combined_buy_fills)
+
+        sell_avg = sell_wp / sell_qty if sell_qty else 0.0
+        buy_avg  = buy_wp  / buy_qty  if buy_qty  else 0.0
+
+        net_price = -(abs(sell_avg - buy_avg))
+
+        return {
+            "net_price":      round(net_price, 4),
+            "total_qty":      min(sell_qty, buy_qty),
+            "fill_time":      last_fill_time,
+            "venue_order_id": last_venue_order_id,
         }
 
     def _on_entry_filled(self, event):

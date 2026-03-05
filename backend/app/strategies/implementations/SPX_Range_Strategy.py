@@ -100,6 +100,10 @@ class SPXRangeStrategy(SPXBaseStrategy):
         # SL Order Chasing state
         self._sl_chase_attempt: int = 0   # Counter of additional retry attempts (0 = only initial order sent)
         self._sl_chase_order_id: Optional[ClientOrderId] = None  # ID of the currently active SL order
+
+        # Tracks ALL close order IDs for this trade (SL, TP, chase retries, on_stop).
+        # Used to compute weighted-average exit price across partial/multi-order closes.
+        self._close_order_ids: List[str] = []
         
         # Telegram
         self.telegram = TelegramNotificationService()
@@ -1458,6 +1462,9 @@ class SPXRangeStrategy(SPXBaseStrategy):
                 extra={"extra": {"event_type": "sl_order_attempt", "attempt": 0, "limit_price": sl_limit, "mid": mid}}
             )
             result = self.close_spread_smart(limit_price=sl_limit)
+            # Track order ID for multi-order fill price aggregation
+            if result and self._last_spread_order_id:
+                self._close_order_ids.append(str(self._last_spread_order_id))
 
             # Schedule chasing timer if retries are enabled and order was submitted
             if result and self.sl_chase_max_retries > 0:
@@ -1497,6 +1504,9 @@ class SPXRangeStrategy(SPXBaseStrategy):
             self.cancel_all_orders(self.spread_instrument.id)
 
             self.close_spread_smart(limit_price=tp_price)
+            # Track order ID for multi-order fill price aggregation
+            if self._last_spread_order_id:
+                self._close_order_ids.append(str(self._last_spread_order_id))
             # Note: _spread_entry_price is reset in on_order_filled_safe when close is confirmed
 
     # =========================================================================
@@ -1697,6 +1707,14 @@ class SPXRangeStrategy(SPXBaseStrategy):
         # e.g. if 3/5 already filled, position is down to 2, and close_spread_smart
         # will submit for exactly 2.
         result = self.close_spread_smart(limit_price=new_sl_limit)
+        # Track order ID for multi-order fill price aggregation
+        if result and self._last_spread_order_id:
+            self._close_order_ids.append(str(self._last_spread_order_id))
+            self.logger.debug(
+                f"📋 SL Chase | Tracking close order: {self._last_spread_order_id} "
+                f"| Total tracked: {len(self._close_order_ids)}",
+                extra={"extra": {"event_type": "sl_chase_order_tracked", "order_id": str(self._last_spread_order_id)}}
+            )
 
         # Schedule next chase check if retries remain
         if result and self._sl_chase_attempt < self.sl_chase_max_retries:
@@ -2371,6 +2389,9 @@ class SPXRangeStrategy(SPXBaseStrategy):
                 }
             )
             self.close_spread_smart()
+            # Track order ID for multi-order fill price aggregation
+            if self._last_spread_order_id:
+                self._close_order_ids.append(str(self._last_spread_order_id))
         
         super().on_stop_safe()
         self.logger.info(
@@ -2458,11 +2479,23 @@ class SPXRangeStrategy(SPXBaseStrategy):
                     order_id_to_check = ClientOrderId(parent_order_id_str)
                     self.logger.info(f"🔍 LEG order detected | LEG: {event.client_order_id} | Parent: {order_id_to_check}")
 
-                # PRIORITY 0: Actual net spread price from accumulated LEG fills
-                fills_data = self.get_accumulated_spread_price(str(order_id_to_check))
-                if fills_data:
-                    fill_price = fills_data["net_price"]
-                    self.logger.info(f"✅ Using accumulated LEG fills for spread exit price: {fill_price} (from order {order_id_to_check})")
+                # PRIORITY 0: Weighted-average across ALL close orders for this trade
+                # (handles partial SL fill + chase retry scenarios correctly)
+                if self._close_order_ids:
+                    fills_data = self.get_accumulated_spread_price_multi(self._close_order_ids)
+                    if fills_data:
+                        fill_price = fills_data["net_price"]
+                        self.logger.info(
+                            f"✅ Using MULTI-ORDER accumulated LEG fills for spread exit price: {fill_price} "
+                            f"(from {len(self._close_order_ids)} order(s): {self._close_order_ids})"
+                        )
+
+                # Fallback: single order from event (original behaviour)
+                if fill_price == 0.0:
+                    fills_data = self.get_accumulated_spread_price(str(order_id_to_check))
+                    if fills_data:
+                        fill_price = fills_data["net_price"]
+                        self.logger.info(f"✅ Using accumulated LEG fills for spread exit price: {fill_price} (from order {order_id_to_check})")
                 
                 if fill_price == 0.0:
                     # PRIORITY 1: Tracked limit price
@@ -2656,6 +2689,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self._last_valid_spread_quote = None
         self._sl_chase_attempt = 0
         self._sl_chase_order_id = None
+        self._close_order_ids = []  # Reset for next trade
 
         # Cancel SL chase timer if it is still pending
         try:
@@ -2706,6 +2740,7 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self._closing_in_progress = False
         self._sl_chase_attempt = 0
         self._sl_chase_order_id = None
+        self._close_order_ids = []  # Reset so next SL/TP attempt starts fresh
 
         # Cancel any pending chase timer to avoid submitting a duplicate order
         # after the broker already CANCELLED/REJECTED this one.
