@@ -35,7 +35,7 @@ POLL_INTERVAL = int(os.getenv("MONITOR_POLL_INTERVAL", "5"))          # seconds 
 CPU_THRESHOLD = float(os.getenv("MONITOR_CPU_THRESHOLD", "150"))      # total CPU % (across all cores)
 MEM_THRESHOLD = float(os.getenv("MONITOR_MEM_THRESHOLD", "90"))       # RAM usage %
 ALERT_COOLDOWN = int(os.getenv("MONITOR_ALERT_COOLDOWN", "300"))      # seconds between repeat alerts
-TOP_PROCESSES = int(os.getenv("MONITOR_TOP_PROCESSES", "3"))          # how many top processes to show
+TOP_PROCESSES = int(os.getenv("MONITOR_TOP_PROCESSES", "5"))          # how many top processes to show
 
 # Telegram config — read from the same .env used by docker-compose
 # Dynamically resolve root directory relative to this script (assumes script is in <root>/scripts/)
@@ -90,17 +90,43 @@ def send_telegram(token: str, chat_id: str, text: str):
         log.error(f"Failed to send Telegram alert: {e}")
 
 
-def get_top_cpu_processes(n: int = 3) -> list[dict]:
-    """Return top-N processes by CPU usage."""
-    procs = []
-    for p in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent", "cmdline"]):
+# Global cache to keep psutil.Process objects alive for accurate CPU tracking across polls
+_PROC_CACHE = {}
+
+def get_all_processes_info() -> list[dict]:
+    """
+    Fetch info for all processes, reusing Process objects to get accurate CPU %.
+    """
+    global _PROC_CACHE
+    current_procs = []
+    new_cache = {}
+
+    # Use process_iter to efficiently get basic info for all processes
+    for p in psutil.process_iter(["pid", "name", "memory_percent", "create_time"]):
         try:
-            info = p.info
-            procs.append(info)
+            pid = p.info["pid"]
+            ctime = p.info["create_time"]
+            
+            # Reuse existing Process object if PID and start time match (prevents PID reuse issues)
+            if pid in _PROC_CACHE and _PROC_CACHE[pid].create_time() == ctime:
+                proc_obj = _PROC_CACHE[pid]
+            else:
+                proc_obj = p
+                # Prime CPU calculation: the first call sets the point of reference and returns 0.0
+                proc_obj.cpu_percent(None)
+            
+            # Get CPU % since the last call to cpu_percent(None) on this specific object
+            cpu = proc_obj.cpu_percent(None)
+            
+            info = p.info.copy()
+            info["cpu_percent"] = cpu
+            current_procs.append(info)
+            new_cache[pid] = proc_obj
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
-    procs.sort(key=lambda x: x.get("cpu_percent", 0) or 0, reverse=True)
-    return procs[:n]
+            
+    _PROC_CACHE = new_cache
+    return current_procs
 
 
 def get_docker_container_name(pid: int) -> str | None:
@@ -135,7 +161,7 @@ def get_docker_container_name(pid: int) -> str | None:
         return None
 
 
-def format_alert(cpu_total: float, mem, swap, load_avg: tuple, top_procs: list[dict]) -> str:
+def format_alert(cpu_total: float, mem, swap, load_avg: tuple, top_cpu: list[dict], top_mem: list[dict]) -> str:
     """Format a rich Telegram alert message."""
     lines = [
         "🔴 <b>SERVER OVERLOAD ALERT</b>",
@@ -145,23 +171,30 @@ def format_alert(cpu_total: float, mem, swap, load_avg: tuple, top_procs: list[d
         f"💾 <b>RAM:</b> {mem.percent:.0f}% ({mem.used // (1024**2)}MB / {mem.total // (1024**2)}MB)",
         f"💿 <b>Swap:</b> {swap.percent:.0f}% ({swap.used // (1024**2)}MB / {swap.total // (1024**2)}MB)",
         "",
-        "<b>Top processes:</b>",
+        "<b>Top processes (CPU):</b>",
     ]
 
-    for i, p in enumerate(top_procs, 1):
+    for i, p in enumerate(top_cpu, 1):
         name = p.get("name", "?")
         cpu = p.get("cpu_percent", 0) or 0
         mem_pct = p.get("memory_percent", 0) or 0
         pid = p.get("pid", 0)
 
-        # Try to identify Docker container
         container = get_docker_container_name(pid)
         container_tag = f" [{container}]" if container else ""
-
         lines.append(f"  {i}. <code>{name}</code>{container_tag} — CPU: {cpu:.0f}%, MEM: {mem_pct:.1f}%")
 
     lines.append("")
-    lines.append("⚠️ Consider restarting the heavy container or the server.")
+    lines.append("<b>Top processes (Memory):</b>")
+    for i, p in enumerate(top_mem, 1):
+        name = p.get("name", "?")
+        cpu = p.get("cpu_percent", 0) or 0
+        mem_pct = p.get("memory_percent", 0) or 0
+        pid = p.get("pid", 0)
+
+        container = get_docker_container_name(pid)
+        container_tag = f" [{container}]" if container else ""
+        lines.append(f"  {i}. <code>{name}</code>{container_tag} — MEM: {mem_pct:.1f}%, CPU: {cpu:.0f}%")
 
     return "\n".join(lines)
 
@@ -221,28 +254,25 @@ def main():
     last_alert_time = 0.0
     was_overloaded = False
 
-    # Prime psutil cpu_percent (first call always returns 0)
+    # Prime psutil metrics (first call establishes the baseline for deltas)
     psutil.cpu_percent(interval=None)
-    for p in psutil.process_iter(["cpu_percent"]):
-        try:
-            p.cpu_percent(interval=None)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
+    get_all_processes_info()
 
     time.sleep(POLL_INTERVAL)
 
     while running:
         try:
-            # Collect metrics
-            # cpu_percent with percpu=False gives total % across all cores
-            # On a 2-core machine: max is 200%
+            # Collect metrics (total and per-process)
             per_cpu = psutil.cpu_percent(interval=None, percpu=True)
-            cpu_total = sum(per_cpu)  # e.g. 200% on a 2-core box
+            cpu_total = sum(per_cpu)
+            
+            # Gather all process stats once per loop to keep CPU tracking consistent
+            all_procs = get_all_processes_info()
 
             mem = psutil.virtual_memory()
             swap = psutil.swap_memory()
             load_avg = os.getloadavg()
-
+            
             now = time.time()
 
             # Check CPU threshold
@@ -257,10 +287,11 @@ def main():
                         f"MEM: {mem.percent:.0f}% | Load: {load_avg[0]:.2f}"
                     )
 
-                    # Collect top processes (need a short interval for accurate per-process CPU)
-                    top_procs = get_top_cpu_processes(TOP_PROCESSES)
+                    # Sort for top lists using the pre-collected data
+                    top_cpu = sorted(all_procs, key=lambda x: x.get("cpu_percent", 0) or 0, reverse=True)[:TOP_PROCESSES]
+                    top_mem = sorted(all_procs, key=lambda x: x.get("memory_percent", 0) or 0, reverse=True)[:TOP_PROCESSES]
 
-                    alert_text = format_alert(cpu_total, mem, swap, load_avg, top_procs)
+                    alert_text = format_alert(cpu_total, mem, swap, load_avg, top_cpu, top_mem)
                     send_telegram(tg_token, tg_chat_id, alert_text)
                     last_alert_time = now
                     was_overloaded = True

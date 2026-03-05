@@ -1,7 +1,7 @@
 {
     "id": "tfmith_qqq",
     "name": "TFMITH QQQ BleedingEdge",
-    "enabled": true,
+    "enabled": false,
     "instrument_id": "QQQ.NASDAQ",
     "strategy_type": "TFMITHStrategy",
     "order_size": 1,
@@ -26,6 +26,6 @@
         "hard_end_time": "14:00",
         "start_time_str": "09:30:03",
         "allocation": 10000,
-        "commission_per_contract": 1.85
+        "commission_per_contract": 0.7
     }
 }
