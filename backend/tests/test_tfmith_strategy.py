@@ -198,6 +198,16 @@ def make():
     s._delta_searches = {}
     s._option_instrument = None
     s._option_instrument_id = None
+    s.stop_loss_pct = 0.0          # disabled by default
+    s._sl_triggered = False
+    s._tfmith_entry_orders = set()
+    s._tfmith_exit_orders = set()
+    s.option_type = None
+    s._last_known_delta = None
+    s._entry_fill_qty = 0.0
+    s._entry_fill_wavg = 0.0
+    s._exit_fill_qty = 0.0
+    s._exit_fill_wavg = 0.0
 
     # Mock dependencies
     s.cache = MagicMock()
@@ -518,13 +528,44 @@ def t20():
     ok("traded_today reset (allows monitoring)", not s.traded_today)
 
 
+def t21():
+    print("\n═══ 21: Monitor — Stop Loss Triggered ═══")
+    s = make()
+    s.stop_loss_pct = 50.0          # 50% loss triggers SL
+    s._sl_triggered = False
+    s.position_open = True; s.entry_price = 2.00
+    s._option_instrument_id = "QQQ-OPT"; s.actual_position_size = 5
+    # Mid = 0.90 → PnL = -55% ≤ -50% → SL fires
+    s.cache.quote_tick.return_value = MQ("QQQ-OPT", 0.87, 0.93)
+    with patch.object(s, '_close_position') as cp:
+        s._check_monitor_exits(dtime(10, 30))
+        ok("close called for SL", cp.called)
+        ok("reason=STOP_LOSS", cp.call_args[0][0] == "STOP_LOSS", str(cp.call_args))
+        ok("_sl_triggered set", s._sl_triggered)
+
+
+def t22():
+    print("\n═══ 22: Monitor — Stop Loss Disabled (pct=0) ═══")
+    s = make()
+    s.stop_loss_pct = 0.0            # disabled
+    s._sl_triggered = False
+    s.position_open = True; s.entry_price = 2.00
+    s._option_instrument_id = "QQQ-OPT"; s.actual_position_size = 5
+    # Mid = 0.50 → -75%, but SL disabled
+    s.cache.quote_tick.return_value = MQ("QQQ-OPT", 0.47, 0.53)
+    with patch.object(s, '_close_position') as cp:
+        s._check_monitor_exits(dtime(10, 30))
+        ok("close NOT called when SL=0", not cp.called)
+        ok("_sl_triggered stays False", not s._sl_triggered)
+
+
 # ═══ RUN ═════════════════════════════════════════════════════════════════════
 
 def main():
     print("=" * 60)
     print(" TFMITH Strategy — Logic Simulation")
     print("=" * 60)
-    tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20]
+    tests = [t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11,t12,t13,t14,t15,t16,t17,t18,t19,t20,t21,t22]
     for fn in tests:
         try:
             fn()

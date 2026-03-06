@@ -89,6 +89,11 @@ class TFMITHStrategy(BaseStrategy):
         self.soft_profit_target_pct = float(params.get("soft_profit_target_pct", 5.0))
         self.soft_profit_flag = bool(params.get("soft_profit_flag", False))
 
+        # ── Stop loss ────────────────────────────────────────────────────────
+        # Percentage loss from entry mid price. 0.0 = disabled.
+        # Example: stop_loss_pct=50 closes the position when PnL <= -50%.
+        self.stop_loss_pct = float(params.get("stop_loss_pct", 0.0))
+
         # ── Allocation ───────────────────────────────────────────────────────
         self.initial_allocation = float(params.get("allocation", 10000.0))
 
@@ -123,6 +128,7 @@ class TFMITHStrategy(BaseStrategy):
         # Entry flow
         self.entry_in_progress: bool = False
         self._closing_in_progress: bool = False
+        self._sl_triggered: bool = False          # guard: prevents SL from re-firing
         self._current_trade_id: Optional[str] = None
         self._entry_order_id = None
         self._exit_order_id = None
@@ -214,15 +220,16 @@ class TFMITHStrategy(BaseStrategy):
 
     def on_start_safe(self):
         """Called after primary instrument ready. Subscribe to underlying + option chain."""
+        sl_str = f"{self.stop_loss_pct}%" if self.stop_loss_pct > 0 else "OFF"
         self.logger.info(
             f"🚀 TFMITH starting | Symbol={self.underlying_symbol} | "
             f"Delta={self.option_delta} | Threshold={self.entry_threshold_pct}% | "
-            f"LossStreak={self.loss_streak} | Allocation=${self.current_allocation:.2f}"
+            f"SL={sl_str} | LossStreak={self.loss_streak} | Allocation=${self.current_allocation:.2f}"
         )
         self._notify(
             f"🚀 STARTED | {self.tz} | Symbol={self.underlying_symbol} | "
             f"Delta={self.option_delta} | Threshold={self.entry_threshold_pct}% | "
-            f"LossStreak={self.loss_streak} | Allocation=${self.current_allocation:.2f}"
+            f"SL={sl_str} | LossStreak={self.loss_streak} | Allocation=${self.current_allocation:.2f}"
         )
         #self._noify(f"✅ Underlying {self.underlying_symbol} ready")
         
@@ -414,6 +421,7 @@ class TFMITHStrategy(BaseStrategy):
 
         self.entry_in_progress = False
         self._closing_in_progress = False
+        self._sl_triggered = False
         self._last_minute = -1
 
         # Reset partial fill accumulators on daily reset
@@ -912,14 +920,30 @@ class TFMITHStrategy(BaseStrategy):
 
     def _check_monitor_exits(self, current_time: dtime):
         """
-        Monitor engine — called on each minute close when position is open.
+        Monitor engine — called on every option tick when position is open.
 
+        Check 0: Stop Loss (PnL% <= -stop_loss_pct) — disabled when stop_loss_pct=0
         Check 1: Soft Time Stop (now >= soft_end_time)
         Check 2: Hard Time Stop (now >= hard_end_time)
         Check 3: Profit Target (PnL% >= profit_target_pct)
         Check 4: Soft Profit Target (PnL% >= soft_profit_target_pct)
         """
         pnl_pct = self._get_position_pnl_pct()
+
+        # ── Check 0 (Stop Loss) — tick-level, guard prevents re-firing ───────
+        if self.stop_loss_pct > 0.0 and not self._sl_triggered:
+            if pnl_pct <= -self.stop_loss_pct:
+                self._sl_triggered = True
+                self.logger.info(
+                    f"🛑 STOP LOSS TRIGGERED | PnL={pnl_pct:.1f}% <= -{self.stop_loss_pct}% | "
+                    f"Entry=${self.entry_price:.2f}"
+                )
+                self._notify(
+                    f"🛑 STOP LOSS | PnL={pnl_pct:.1f}% | SL={self.stop_loss_pct}% | "
+                    f"Entry=${self.entry_price:.2f}"
+                )
+                self._close_position("STOP_LOSS")
+                return
 
         # ── Check 3 (Profit Target) — always active ─────────────────────────
         if pnl_pct >= self.profit_target_pct:
@@ -986,6 +1010,10 @@ class TFMITHStrategy(BaseStrategy):
                 health = "🔴 LOSS"
 
             # Update UI state — use cached delta (updated only at log interval)
+            sl_price_ui = (
+                self.entry_price * (1 - self.stop_loss_pct / 100)
+                if (self.entry_price and self.stop_loss_pct > 0.0) else None
+            )
             self._last_position_status = {
                 "symbol": self.current_option_id,
                 "quantity": self.actual_position_size,
@@ -999,6 +1027,8 @@ class TFMITHStrategy(BaseStrategy):
                 "health": health,
                 "underlying_price": self.current_underlying_price,
                 "delta": self._last_known_delta,
+                "sl_pct": self.stop_loss_pct,
+                "sl_price": sl_price_ui,
             }
 
             # Periodic logging + Greeks calculation (once per log interval, not per tick)
@@ -1018,10 +1048,17 @@ class TFMITHStrategy(BaseStrategy):
                     except Exception:
                         pass
 
+                # Stop loss price for log (None when disabled)
+                sl_price = (
+                    self.entry_price * (1 - self.stop_loss_pct / 100)
+                    if self.stop_loss_pct > 0.0 else None
+                )
+                sl_str = f" | SL=${sl_price:.2f} ({-self.stop_loss_pct:.0f}%)" if sl_price else ""
+
                 self.logger.info(
                     f"📊 POSITION | {health} | {self.trade_direction} {self.actual_position_size}x | "
                     f"Entry=${self.entry_price:.2f} | Mid=${mid:.2f} | "
-                    f"PnL=${pnl_dollars:+.2f} ({pnl_pct:+.1f}%) | "
+                    f"PnL=${pnl_dollars:+.2f} ({pnl_pct:+.1f}%){sl_str} | "
                     f"{self.underlying_symbol}=${self.current_underlying_price:.2f}{delta_str}"
                 )
 
