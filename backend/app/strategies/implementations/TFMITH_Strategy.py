@@ -131,6 +131,7 @@ class TFMITHStrategy(BaseStrategy):
         self._last_position_log_time = None
         self._position_log_interval_seconds: int = 30
         self._last_position_status: Dict[str, Any] = {}
+        self._last_known_delta: Optional[str] = None   # cached delta — updated only at log interval
 
         # Private order tracking — NOT added to BaseStrategy's _pending_entry_orders
         # so BaseStrategy._on_entry_filled never fires (same pattern as SPX strategies)
@@ -447,8 +448,9 @@ class TFMITHStrategy(BaseStrategy):
                 self._option_chain_requested_today = True
 
         # ── Monitor existing position ────────────────────────────────────────
+        # Exit conditions (profit target + time stops) are now checked on every
+        # option tick inside _monitor_position for immediate reaction.
         if self.position_open and not self._closing_in_progress:
-            self._check_monitor_exits(current_time)
             return
 
         # ── Scanner for new entry ────────────────────────────────────────────
@@ -962,7 +964,7 @@ class TFMITHStrategy(BaseStrategy):
         pass
 
     def _monitor_position(self, tick: QuoteTick):
-        """Called on every option tick — updates UI status and logs status."""
+        """Called on every option tick — updates UI status, logs periodically, checks exits."""
         bid = float(tick.bid_price)
         ask = float(tick.ask_price)
         if bid <= 0 or ask <= 0:
@@ -970,7 +972,7 @@ class TFMITHStrategy(BaseStrategy):
 
         mid = (bid + ask) / 2.0
 
-        # Update UI status
+        # Update UI status on every tick (no Greeks here — too expensive)
         if self.entry_price is not None:
             pnl_dollars = (mid - self.entry_price) * 100 * self.actual_position_size
             pnl_pct = ((mid - self.entry_price) / self.entry_price * 100) if self.entry_price > 0 else 0
@@ -983,17 +985,7 @@ class TFMITHStrategy(BaseStrategy):
             else:
                 health = "🔴 LOSS"
 
-            # Delta (if available)
-            delta_str = ""
-            if hasattr(self, 'greeks') and self.greeks:
-                try:
-                    greeks_data = self.greeks.instrument_greeks(tick.instrument_id)
-                    if greeks_data and greeks_data.delta is not None:
-                        delta_str = f" | Δ={float(greeks_data.delta):.3f}"
-                except Exception:
-                    pass
-
-            # Update UI state
+            # Update UI state — use cached delta (updated only at log interval)
             self._last_position_status = {
                 "symbol": self.current_option_id,
                 "quantity": self.actual_position_size,
@@ -1006,21 +998,37 @@ class TFMITHStrategy(BaseStrategy):
                 "direction": self.trade_direction,
                 "health": health,
                 "underlying_price": self.current_underlying_price,
-                "delta": delta_str.strip(" | Δ=") if delta_str else None
+                "delta": self._last_known_delta,
             }
 
-            # Periodic position status logging (30 seconds)
+            # Periodic logging + Greeks calculation (once per log interval, not per tick)
             now = self.clock.utc_now()
             if (self._last_position_log_time is None or
                     (now - self._last_position_log_time).total_seconds() >= self._position_log_interval_seconds):
                 self._last_position_log_time = now
-                
+
+                # Greeks are computed only here — avoids hundreds of BSM calls per second
+                delta_str = ""
+                if hasattr(self, 'greeks') and self.greeks:
+                    try:
+                        greeks_data = self.greeks.instrument_greeks(tick.instrument_id)
+                        if greeks_data and greeks_data.delta is not None:
+                            delta_str = f" | Δ={float(greeks_data.delta):.3f}"
+                            self._last_known_delta = f"{float(greeks_data.delta):.3f}"
+                    except Exception:
+                        pass
+
                 self.logger.info(
                     f"📊 POSITION | {health} | {self.trade_direction} {self.actual_position_size}x | "
                     f"Entry=${self.entry_price:.2f} | Mid=${mid:.2f} | "
                     f"PnL=${pnl_dollars:+.2f} ({pnl_pct:+.1f}%) | "
                     f"{self.underlying_symbol}=${self.current_underlying_price:.2f}{delta_str}"
                 )
+
+        # ── Exit condition check on every tick (replaces on_minute_closed check) ──
+        # _close_position is guarded by _closing_in_progress — safe to call repeatedly
+        now_et = self.clock.utc_now().astimezone(self.tz)
+        self._check_monitor_exits(now_et.time())
 
     def _get_position_pnl_pct(self) -> float:
         """Get current position PnL as percentage."""
@@ -1333,7 +1341,22 @@ class TFMITHStrategy(BaseStrategy):
         self._total_commission = 0.0
         self._actual_qty = 0.0
         self._last_position_status = {}
+        self._last_known_delta = None
         # traded_today stays True — blocks re-entry
+
+        # ── Unsubscribe from option quotes (prevent tick flood after close) ──
+        # Must be done AFTER position state reset so on_quote_tick_safe stops
+        # dispatching to _monitor_position. Null out AFTER unsubscribe.
+        if self._option_instrument_id:
+            try:
+                self.unsubscribe_quote_ticks(self._option_instrument_id)
+                self.logger.info(
+                    f"📴 Unsubscribed option quotes: {self._option_instrument_id}"
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to unsubscribe option quotes: {e}")
+            self._option_instrument_id = None
+            self._option_instrument = None
 
         self.save_state()
 
@@ -1439,6 +1462,15 @@ class TFMITHStrategy(BaseStrategy):
                 self.unsubscribe_quote_ticks(self.underlying_instrument_id)
             except Exception:
                 pass
+
+        # Unsubscribe from option quotes (covers forced stop without natural close)
+        if self._option_instrument_id:
+            try:
+                self.unsubscribe_quote_ticks(self._option_instrument_id)
+            except Exception:
+                pass
+            self._option_instrument_id = None
+            self._option_instrument = None
 
         self.logger.info("🛑 TFMITH Strategy stopped")
 
