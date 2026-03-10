@@ -2216,6 +2216,18 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self.entry_in_progress = False
         self.entry_attempts = 0
         self._found_legs.clear()
+        # Unsubscribe from the previous day's spread instrument (0DTE expired)
+        # before clearing the reference, to release the IB market data subscription.
+        if self.spread_instrument is not None:
+            try:
+                self.unsubscribe_quote_ticks(self.spread_instrument.id)
+            except Exception:
+                pass
+        self.spread_id = None
+        self.spread_instrument = None
+        self._spread_legs.clear()
+        self._waiting_for_spread = False
+        self._pending_spread_orders.clear()
         self._spread_entry_price = None
         self._signal_direction = None
         self._signal_time = None
