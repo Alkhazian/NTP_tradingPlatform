@@ -4,10 +4,11 @@ import { Badge } from './ui/badge';
 import { StatCard } from './ui/stat-card';
 import { SystemStatusPanel } from './ui/status-indicator';
 import { Header, Sidebar, SidebarItem } from './layout';
-import { Icons } from './ui/icons';
 import Strategies from './Strategies';
 import Analytics from './Analytics';
 import LogViewer from './LogViewer';
+import { TrendingUp, TrendingDown } from 'lucide-react';
+
 
 interface SystemStatus {
     connected: boolean;
@@ -85,6 +86,7 @@ export default function Dashboard() {
     //const [activeNav, setActiveNav] = useState('logs');
     const [activeNav, setActiveNav] = useState('dashboard');
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+    const [closedPositions, setClosedPositions] = useState<any[]>([]);
 
     const [, setCurrentTime] = useState(new Date());
 
@@ -99,6 +101,39 @@ export default function Dashboard() {
         setActiveNav(navInfo);
         setIsSidebarOpen(false);
     };
+
+    // Fetch closed positions for Recent Activity
+    useEffect(() => {
+        const fetchPositions = async () => {
+            try {
+                const getUrl = (path: string) => {
+                    const base = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+                    return `${base}${path.startsWith('/') ? path : '/' + path}`;
+                };
+                const res = await fetch(getUrl('/analytics/reports/positions'));
+                const data = await res.json();
+                if (Array.isArray(data)) {
+                    // Filter closed positions
+                    const closed = data.filter((p: any) => p.ts_closed != null);
+                    // Sort descending by ts_closed
+                    const sorted = closed.sort((a: any, b: any) => {
+                        const timeA = typeof a.ts_closed === 'number' && a.ts_closed > 1e12 ? a.ts_closed / 1_000_000 : new Date(a.ts_closed).getTime();
+                        const timeB = typeof b.ts_closed === 'number' && b.ts_closed > 1e12 ? b.ts_closed / 1_000_000 : new Date(b.ts_closed).getTime();
+                        return timeB - timeA;
+                    });
+                    setClosedPositions(sorted.slice(0, 50));
+                }
+            } catch (e) {
+                console.error("Failed to fetch positions reports", e);
+            }
+        };
+
+        if (activeNav === 'dashboard') {
+            fetchPositions();
+            const interval = setInterval(fetchPositions, 10000);
+            return () => clearInterval(interval);
+        }
+    }, [activeNav]);
 
     useEffect(() => {
         let wsUrl: string;
@@ -172,6 +207,16 @@ export default function Dashboard() {
     ];
 
 
+
+    const formatTime = (value: string | number | null) => {
+        if (!value) return '-';
+        let dateVal = value;
+        if (typeof value === 'number' && value > 1e12) {
+            dateVal = value / 1_000_000;
+        }
+        const date = new Date(dateVal);
+        return !isNaN(date.getTime()) ? date.toLocaleString('en-US') : String(value);
+    };
 
     const handleLogout = async () => {
         try {
@@ -440,33 +485,84 @@ export default function Dashboard() {
                                         <div>
                                             <CardTitle>Recent Activity</CardTitle>
                                             <p className="text-sm text-muted-foreground mt-1">
-                                                Latest trades (Current Session)
+                                                Closed Positions
                                             </p>
                                         </div>
-                                        <Badge variant="outline" className="border-cyan-500/20 text-cyan-400 bg-cyan-500/5">
-                                            Live
-                                        </Badge>
                                     </CardHeader>
                                     <CardContent>
-                                        <div className="space-y-4">
-                                            {/* Activity items */}
-                                            {status.recent_trades && status.recent_trades.length > 0 ? (
-                                                status.recent_trades.map((trade, index) => (
-                                                    <ActivityItem
-                                                        key={`${trade.symbol}-${index}`}
-                                                        type={trade.type}
-                                                        symbol={trade.symbol}
-                                                        quantity={trade.quantity}
-                                                        price={trade.price}
-                                                        time={trade.time}
-                                                        currency={status.account_currency}
-                                                    />
-                                                ))
-                                            ) : (
-                                                <div className="text-center py-8 text-muted-foreground text-sm">
-                                                    No recent trades in current session
-                                                </div>
-                                            )}
+                                        <div className="overflow-x-auto">
+                                            <table className="w-full text-left text-sm">
+                                                <thead className="border-b border-white/10 text-sm font-medium text-muted-foreground">
+                                                    <tr>
+                                                        <th className="px-4 py-3">Time (Open / Close)</th>
+                                                        <th className="px-4 py-3">Strategy</th>
+                                                        <th className="px-4 py-3">Instrument</th>
+                                                        <th className="px-4 py-3 text-right">Peak Qty</th>
+                                                        <th className="px-4 py-3 text-right">Avg Px Open</th>
+                                                        <th className="px-4 py-3 text-right">Avg Px Close</th>
+                                                        <th className="px-4 py-3 text-right">Commission</th>
+                                                        <th className="px-4 py-3 text-right">Realized PnL</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-white/5">
+                                                    {closedPositions && closedPositions.length > 0 ? (
+                                                        closedPositions.map((pos, idx) => {
+                                                            const parseNumeric = (val: any) => {
+                                                                if (Array.isArray(val)) val = val[0];
+                                                                const n = parseFloat(String(val || 0).replace(/[^0-9.-]/g, ''));
+                                                                return isNaN(n) ? 0 : n;
+                                                            };
+                                                            const pnl = parseNumeric(pos.realized_pnl);
+                                                            const commissionVal = parseNumeric(pos.commissions);
+                                                            const entryDirection = pos.entry || pos.side || "UNKNOWN";
+                                                            const isLong = entryDirection.toLowerCase() === 'long' || entryDirection.toLowerCase() === 'buy';
+                                                            const Icon = isLong ? TrendingUp : TrendingDown;
+
+                                                            return (
+                                                                <tr key={idx} className="hover:bg-white/5 transition-colors">
+                                                                    <td className="px-4 py-3 text-xs text-muted-foreground whitespace-nowrap">
+                                                                        <div className="flex flex-col gap-0.5">
+                                                                            <span>{formatTime(pos.ts_opened)}</span>
+                                                                            <span>{formatTime(pos.ts_closed)}</span>
+                                                                        </div>
+                                                                    </td>
+                                                                    <td className="px-4 py-3 font-medium text-xs">
+                                                                        {pos.strategy_id}
+                                                                    </td>
+                                                                    <td className="px-4 py-3 font-medium text-xs flex items-center gap-1.5">
+                                                                        <div className={`p-1 rounded-sm ${isLong ? 'bg-emerald-500/10 text-emerald-400' : 'bg-red-500/10 text-red-400'}`} title={entryDirection.toUpperCase()}>
+                                                                            <Icon className="w-3 h-3" />
+                                                                        </div>
+                                                                        {pos.instrument_id}
+                                                                    </td>
+                                                                    <td className="px-4 py-3 text-right tabular-nums text-xs whitespace-nowrap">
+                                                                        {pos.peak_qty || pos.quantity || 0}
+                                                                    </td>
+                                                                    <td className="px-4 py-3 text-right tabular-nums text-xs whitespace-nowrap">
+                                                                        {formatCurrency(pos.avg_px_open || 0)}
+                                                                    </td>
+                                                                    <td className="px-4 py-3 text-right tabular-nums text-xs whitespace-nowrap">
+                                                                        {formatCurrency(pos.avg_px_close || 0)}
+                                                                    </td>
+                                                                    <td className="px-4 py-3 text-right tabular-nums text-xs whitespace-nowrap text-orange-400/80">
+                                                                        {formatCurrency(commissionVal)}
+                                                                    </td>
+                                                                    <td className={`px-4 py-3 text-right tabular-nums font-medium text-xs whitespace-nowrap ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                                                        {pnl >= 0 ? '+' : ''}{formatCurrency(pnl)}
+                                                                    </td>
+                                                                </tr>
+                                                            );
+                                                        })
+                                                    ) : (
+
+                                                        <tr>
+                                                            <td colSpan={8} className="px-4 py-8 text-center text-muted-foreground">
+                                                                No recent closed positions
+                                                            </td>
+                                                        </tr>
+                                                    )}
+                                                </tbody>
+                                            </table>
                                         </div>
                                     </CardContent>
                                 </Card>
@@ -479,86 +575,3 @@ export default function Dashboard() {
     );
 }
 
-interface ActivityItemProps {
-    type: 'buy' | 'sell' | 'dividend';
-    symbol: string;
-    quantity?: number;
-    price?: number;
-    amount?: number;
-    time: string;
-    currency?: string;
-}
-
-function ActivityItem({ type, symbol, quantity, price, amount, time, currency }: ActivityItemProps) {
-    const getTypeStyles = () => {
-        switch (type) {
-            case 'buy':
-                return {
-                    bg: 'bg-emerald-500/10',
-                    text: 'text-emerald-400',
-                    icon: Icons.trendingUp,
-                    label: 'BUY'
-                };
-            case 'sell':
-                return {
-                    bg: 'bg-red-500/10',
-                    text: 'text-red-400',
-                    icon: Icons.trendingDown,
-                    label: 'SELL'
-                };
-            case 'dividend':
-                return {
-                    bg: 'bg-purple-500/10',
-                    text: 'text-purple-400',
-                    icon: Icons.dollarSign,
-                    label: 'DIV'
-                };
-        }
-    };
-
-    const styles = getTypeStyles();
-    const IconComponent = styles.icon;
-
-    const format = (value: number) => {
-        return new Intl.NumberFormat('en-US', {
-            style: 'currency',
-            currency: currency || 'USD',
-            minimumFractionDigits: 2
-        }).format(value);
-    };
-
-    return (
-        <div className="flex items-center justify-between p-4 rounded-xl bg-white/5 hover:bg-white/8 transition-colors">
-            <div className="flex items-center gap-4">
-                <div className={`p-3 rounded-xl ${styles.bg}`}>
-                    <IconComponent className={`w-5 h-5 ${styles.text}`} />
-                </div>
-                <div>
-                    <div className="flex items-center gap-2">
-                        <span className="font-semibold">{symbol}</span>
-                        <Badge variant={type === 'sell' ? 'destructive' : type === 'buy' ? 'success' : 'info'} className="text-[10px]">
-                            {styles.label}
-                        </Badge>
-                    </div>
-                    <p className="text-sm text-muted-foreground">
-                        {type === 'dividend'
-                            ? `Dividend received: ${format(amount || 0)}`
-                            : `${quantity} shares @ ${format(price || 0)}`
-                        }
-                    </p>
-                </div>
-            </div>
-            <div className="text-right">
-                <p className={`font-semibold tabular-nums ${type === 'sell' ? 'text-red-400' : type === 'buy' ? 'text-emerald-400' : 'text-purple-400'}`}>
-                    {type === 'dividend'
-                        ? `+${format(amount || 0)}`
-                        : type === 'buy'
-                            ? `-${format((quantity || 0) * (price || 0))}`
-                            : `+${format((quantity || 0) * (price || 0))}`
-                    }
-                </p>
-                <p className="text-xs text-muted-foreground">{time}</p>
-            </div>
-        </div>
-    );
-}

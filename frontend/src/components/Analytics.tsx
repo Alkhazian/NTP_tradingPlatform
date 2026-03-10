@@ -4,7 +4,6 @@ import { createChart, ColorType } from 'lightweight-charts';
 import {
     Activity,
     TrendingUp,
-    TrendingDown,
     DollarSign,
     Percent,
     ArrowUpRight,
