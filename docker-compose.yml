@@ -21,6 +21,7 @@ services:
   backend:
     build: ./backend
     container_name: ntd-backend
+    restart: unless-stopped
     expose:
       - "8000"
     environment:

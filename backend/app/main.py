@@ -619,7 +619,7 @@ async def restart_backend():
     # Schedule exit shortly after returning the response
     def _exit():
         logger.warning("Exiting process now")
-        os._exit(0)
+        os._exit(1)  # Non-zero exit ensures docker 'on-failure' policy triggers
     
     asyncio.get_event_loop().call_later(0.5, _exit)
     return {"status": "restarting"}
