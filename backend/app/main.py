@@ -604,3 +604,22 @@ async def get_report(report_type: str):
     except Exception as e:
         logger.error(f"Error generating report: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/system/restart")
+async def restart_backend():
+    """
+    Restart the backend API and trading engine safely.
+    Exits the process with code 0 - container/systemd will automatically restart it.
+    """
+    logger.warning("Backend restart requested via API")
+    if nautilus_manager and nautilus_manager.strategy_manager:
+        logger.info("Stopping all strategies before restart...")
+        await nautilus_manager.strategy_manager.stop_all_strategies()
+    
+    # Schedule exit shortly after returning the response
+    def _exit():
+        logger.warning("Exiting process now")
+        os._exit(0)
+    
+    asyncio.get_event_loop().call_later(0.5, _exit)
+    return {"status": "restarting"}

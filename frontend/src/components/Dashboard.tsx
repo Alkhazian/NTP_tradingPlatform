@@ -83,10 +83,10 @@ export default function Dashboard() {
     });
 
 
-    //const [activeNav, setActiveNav] = useState('logs');
     const [activeNav, setActiveNav] = useState('dashboard');
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
     const [closedPositions, setClosedPositions] = useState<any[]>([]);
+    const [isRestarting, setIsRestarting] = useState(false);
 
     const [, setCurrentTime] = useState(new Date());
 
@@ -225,6 +225,25 @@ export default function Dashboard() {
         } catch (error) {
             console.error('Logout failed:', error);
             window.location.href = '/login';
+        }
+    };
+
+    const handleRestart = async () => {
+        if (!confirm("Are you sure you want to restart the backend? This will momentarily stop trading.")) return;
+        
+        setIsRestarting(true);
+        try {
+            const getUrl = (path: string) => {
+                const base = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+                return `${base}${path.startsWith('/') ? path : '/' + path}`;
+            };
+            await fetch(getUrl('/system/restart'), { method: 'POST' });
+            
+            // Re-enable button after 10s (gives time for reconnect)
+            setTimeout(() => setIsRestarting(false), 10000);
+        } catch (error) {
+            console.error('Failed to trigger restart:', error);
+            setIsRestarting(false);
         }
     };
 
@@ -412,11 +431,24 @@ export default function Dashboard() {
 
                                 {/* System Status */}
                                 <Card variant="glass">
-                                    <CardHeader>
-                                        <CardTitle>System Status</CardTitle>
-                                        <p className="text-sm text-muted-foreground mt-1">
-                                            Connection health monitoring
-                                        </p>
+                                    <CardHeader className="flex flex-row items-center justify-between pb-2">
+                                        <div>
+                                            <CardTitle>System Status</CardTitle>
+                                            <p className="text-sm text-muted-foreground mt-1">
+                                                Connection health monitoring
+                                            </p>
+                                        </div>
+                                        <button 
+                                            onClick={handleRestart}
+                                            disabled={isRestarting}
+                                            className={`px-3 py-1 text-xs font-medium rounded-md border transition-colors ${
+                                                isRestarting 
+                                                ? 'bg-amber-500/10 text-amber-500 border-amber-500/20 cursor-wait' 
+                                                : 'bg-white/5 text-muted-foreground border-white/10 hover:bg-white/10 hover:text-white'
+                                            }`}
+                                        >
+                                            {isRestarting ? 'Restarting...' : 'Restart Backend'}
+                                        </button>
                                     </CardHeader>
                                     <CardContent>
                                         <SystemStatusPanel statuses={systemStatuses} />
