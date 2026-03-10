@@ -1,7 +1,7 @@
 {
     "id": "tfmith_qqq",
     "name": "TFMITH QQQ BleedingEdge",
-    "enabled": false,
+    "enabled": true,
     "instrument_id": "QQQ.NASDAQ",
     "strategy_type": "TFMITHStrategy",
     "order_size": 1,
@@ -20,13 +20,13 @@
         "entry_threshold_pct": 0.25,
         "profit_target_pct": 30,
         "start_time": "10:10",
-        "soft_end_time": "11:00",
+        "soft_end_time": "10:55",
         "soft_profit_target_pct": 5,
         "soft_profit_flag": true,
-        "hard_end_time": "14:00",
+        "hard_end_time": "12:00",
         "start_time_str": "09:30:03",
         "allocation": 10000,
         "commission_per_contract": 1.85,
-        "stop_loss_pct": 80
+        "stop_loss_pct": 60
     }
 }
