@@ -122,8 +122,14 @@ class TFMITHStrategy(BaseStrategy):
         self.last_underlying_ask: float = 0.0
 
         self.current_trading_day: Optional[date] = None
-        self._last_minute: int = -1
         self._option_chain_loaded: bool = False
+
+        # ── Second-loop timer state ──────────────────────────────────────────
+        self._timer_active: bool = False
+        self._last_underlying_tick_time: Optional[datetime] = None  # freshness guard
+        self._last_option_tick_time: Optional[datetime] = None      # freshness guard
+        self._current_option_bid: float = 0.0   # latest option bid (updated on tick)
+        self._current_option_ask: float = 0.0   # latest option ask (updated on tick)
 
         # Entry flow
         self.entry_in_progress: bool = False
@@ -237,8 +243,8 @@ class TFMITHStrategy(BaseStrategy):
         self.underlying_instrument = self.instrument
         self.underlying_instrument_id = self.instrument.id
         self.underlying_subscribed = True
-        # Option chain will be requested 2 minutes before start time
-        pass
+        # Option chain pre-load and all strategy logic is driven by the 1-second timer
+        self._start_second_loop()
     def _subscribe_data(self):
         """Subscribe to quote ticks for the primary instrument."""
         self.subscribe_quote_ticks(self.instrument_id)
@@ -322,7 +328,10 @@ class TFMITHStrategy(BaseStrategy):
     # =========================================================================
 
     def on_quote_tick_safe(self, tick: QuoteTick):
-        """Process incoming quote ticks."""
+        """
+        Pure data-collector — updates price caches only.
+        All strategy logic (entry, exit, monitoring) runs in the 1-second timer loop.
+        """
         tick_instrument_id = tick.instrument_id
 
         # ── Underlying ticks ─────────────────────────────────────────────────
@@ -334,26 +343,81 @@ class TFMITHStrategy(BaseStrategy):
                 self.last_underlying_bid = bid
                 self.last_underlying_ask = ask
                 self.current_underlying_price = (bid + ask) / 2.0
-                self._process_underlying_tick(tick)
+                self._last_underlying_tick_time = self.clock.utc_now()
 
-        # ── Option ticks (monitor open position) ─────────────────────────────
+        # ── Option ticks — store latest bid/ask for timer-driven monitoring ──
         elif (self._option_instrument_id and
-                tick_instrument_id == self._option_instrument_id and
-                self.position_open and not self._closing_in_progress):
-            self._monitor_position(tick)
+                tick_instrument_id == self._option_instrument_id):
+            bid = float(tick.bid_price)
+            ask = float(tick.ask_price)
+            if bid > 0 and ask > 0:
+                self._current_option_bid = bid
+                self._current_option_ask = ask
+                self._last_option_tick_time = self.clock.utc_now()
 
     # =========================================================================
-    # MINUTE-CLOSE EMULATION
-    # (analogous to SPXBaseStrategy._process_spx_tick_unified)
+    # SECOND-LOOP TIMER
+    # Replaces tick-driven _process_underlying_tick + on_minute_closed.
+    # Pattern: cancel_timer → set_time_alert → reschedule (SPX_Range_Strategy style).
     # =========================================================================
 
-    def _process_underlying_tick(self, tick: QuoteTick):
-        """Emulate 1-minute bar close from ticks. Handles daily reset."""
+    def _start_second_loop(self):
+        """Start the 1-second heartbeat timer that drives all strategy logic."""
+        self._timer_active = True
+        timer_name = f"{self.id}_second_loop"
+        try:
+            self.clock.cancel_timer(timer_name)
+        except Exception:
+            pass
+        self.clock.set_time_alert(
+            name=timer_name,
+            alert_time=self.clock.utc_now() + timedelta(seconds=1),
+            callback=self._on_second_timer,
+        )
+        self.logger.info("⏱️ 1-second heartbeat timer started")
+
+    def _on_second_timer(self, event):
+        """
+        1-second heartbeat — replaces tick-driven strategy logic.
+
+        Drives:
+          - Daily reset detection
+          - Opening price capture & change_since_open
+          - Option chain pre-load (3 min before start_time)
+          - Entry scanner (_check_entry)
+          - Position monitoring & exit checks (_monitor_position_from_timer)
+        """
+        # ── Stop the loop when strategy is stopping ──────────────────────────
+        if not self._timer_active:
+            return
+
+        # ── Reschedule FIRST (Nautilus holds the timer name until callback
+        # returns, so set_time_alert with the same name would fail without
+        # cancel_timer first — see SPX_Range_Strategy.py lines 2008-2019). ──
+        timer_name = f"{self.id}_second_loop"
+        try:
+            self.clock.cancel_timer(timer_name)
+        except Exception:
+            pass
+        self.clock.set_time_alert(
+            name=timer_name,
+            alert_time=self.clock.utc_now() + timedelta(seconds=1),
+            callback=self._on_second_timer,
+        )
+
+        # ── Underlying price freshness check ─────────────────────────────────
+        # No recent tick → market closed or feed issue → skip all decisions.
+        if self._last_underlying_tick_time is None:
+            return
         now_utc = self.clock.utc_now()
+        staleness = (now_utc - self._last_underlying_tick_time).total_seconds()
+        if staleness > 10.0 or self.current_underlying_price <= 0:
+            return
+
+        # ── Time / date context ──────────────────────────────────────────────
         now_et = now_utc.astimezone(self.tz)
         current_date = now_et.date()
         current_time = now_et.time()
-        current_minute = now_et.hour * 60 + now_et.minute
 
         # ── Daily reset ──────────────────────────────────────────────────────
         if self.current_trading_day is None or current_date != self.current_trading_day:
@@ -374,14 +438,28 @@ class TFMITHStrategy(BaseStrategy):
                 / self.opening_price * 100
             )
 
-        # ── Minute boundary detection ────────────────────────────────────────
-        if current_minute != self._last_minute and self._last_minute >= 0:
-            self.on_minute_closed(
-                close_price=self.current_underlying_price,
-                current_time=current_time,
-            )
+        # ── Option Chain Pre-load (3 min before start_time) ─────────────────
+        if not getattr(self, '_option_chain_requested_today', False):
+            current_minutes = current_time.hour * 60 + current_time.minute
+            start_minutes = self.start_time.hour * 60 + self.start_time.minute
+            end_minutes = self.soft_end_time.hour * 60 + self.soft_end_time.minute
+            if start_minutes - 3 <= current_minutes <= end_minutes:
+                self.logger.info(
+                    f"🔄 Pre-loading option chain 3 mins before start_time ({self.start_time})..."
+                )
+                self._request_option_chain()
+                self._option_chain_requested_today = True
 
-        self._last_minute = current_minute
+        # ── Entry scanner ────────────────────────────────────────────────────
+        if (not self.traded_today
+                and not self.entry_in_progress
+                and not self.position_open
+                and self.opening_price is not None):
+            self._check_entry(self.current_underlying_price, current_time)
+
+        # ── Position monitoring ──────────────────────────────────────────────
+        if self.position_open and not self._closing_in_progress:
+            self._monitor_position_from_timer(current_time)
 
     # =========================================================================
     # DAILY RESET
@@ -422,7 +500,9 @@ class TFMITHStrategy(BaseStrategy):
         self.entry_in_progress = False
         self._closing_in_progress = False
         self._sl_triggered = False
-        self._last_minute = -1
+        self._current_option_bid = 0.0
+        self._current_option_ask = 0.0
+        self._last_option_tick_time = None
 
         # Reset partial fill accumulators on daily reset
         self._entry_fill_qty = 0.0
@@ -438,35 +518,9 @@ class TFMITHStrategy(BaseStrategy):
         # Reset the flag so the chain requests again 2 minutes before today's start_time
         self._option_chain_requested_today = False
     # =========================================================================
-    # SCANNER (on_minute_closed → _check_entry)
+    # SCANNER (_check_entry — called from the 1-second timer)
     # =========================================================================
-
-    def on_minute_closed(self, close_price: float, current_time: dtime):
-        """Called on each minute close. Runs scanner and monitor."""
-        # ── Option Chain Pre-load ────────────────────────────────────────────
-        if not getattr(self, '_option_chain_requested_today', False):
-            current_minutes = current_time.hour * 60 + current_time.minute
-            start_minutes = self.start_time.hour * 60 + self.start_time.minute
-            end_minutes = self.soft_end_time.hour * 60 + self.soft_end_time.minute
-            
-            # Request 3 minutes before start_time (or immediately if started late, but before end_time)
-            if start_minutes - 3 <= current_minutes <= end_minutes:
-                self.logger.info(f"🔄 Pre-loading option chain 3 mins before start_time ({self.start_time})...")
-                self._request_option_chain()
-                self._option_chain_requested_today = True
-
-        # ── Monitor existing position ────────────────────────────────────────
-        # Exit conditions (profit target + time stops) are now checked on every
-        # option tick inside _monitor_position for immediate reaction.
-        if self.position_open and not self._closing_in_progress:
-            return
-
-        # ── Scanner for new entry ────────────────────────────────────────────
-        if (not self.traded_today
-                and not self.entry_in_progress
-                and not self.position_open
-                and self.opening_price is not None):
-            self._check_entry(close_price, current_time)
+    # on_minute_closed() removed — all scanner logic now lives in _on_second_timer.
 
     def _check_entry(self, close_price: float, current_time: dtime):
         """
@@ -984,19 +1038,36 @@ class TFMITHStrategy(BaseStrategy):
             return
 
         # ── Position status logging (throttled) ──────────────────────────────
-        # Logging moved to _monitor_position (tick-driven) for better frequency and data accuracy.
+        # Logging handled in _monitor_position_from_timer (1-second heartbeat).
         pass
 
-    def _monitor_position(self, tick: QuoteTick):
-        """Called on every option tick — updates UI status, logs periodically, checks exits."""
-        bid = float(tick.bid_price)
-        ask = float(tick.ask_price)
+    def _monitor_position_from_timer(self, current_time: dtime):
+        """
+        Called every second by _on_second_timer when a position is open.
+
+        Uses the last stored bid/ask from _current_option_bid/_current_option_ask
+        (updated on every incoming QuoteTick) rather than the tick object itself.
+        Includes a staleness guard: if no option tick arrived in the last 5 seconds,
+        skip exit checks to avoid acting on a frozen/dead quote.
+        """
+        bid = self._current_option_bid
+        ask = self._current_option_ask
         if bid <= 0 or ask <= 0:
+            return
+
+        # ── Option quote freshness check ─────────────────────────────────────
+        if self._last_option_tick_time is None:
+            return  # No option quote received yet
+        now_utc = self.clock.utc_now()
+        opt_staleness = (now_utc - self._last_option_tick_time).total_seconds()
+        if opt_staleness > 5.0:
+            self.logger.debug(
+                f"Option quote stale ({opt_staleness:.1f}s) — skipping exit check"
+            )
             return
 
         mid = (bid + ask) / 2.0
 
-        # Update UI status on every tick (no Greeks here — too expensive)
         if self.entry_price is not None:
             pnl_dollars = (mid - self.entry_price) * 100 * self.actual_position_size
             pnl_pct = ((mid - self.entry_price) / self.entry_price * 100) if self.entry_price > 0 else 0
@@ -1031,24 +1102,22 @@ class TFMITHStrategy(BaseStrategy):
                 "sl_price": sl_price_ui,
             }
 
-            # Periodic logging + Greeks calculation (once per log interval, not per tick)
+            # Periodic logging + Greeks (throttled to log interval — BSM is expensive)
             now = self.clock.utc_now()
             if (self._last_position_log_time is None or
                     (now - self._last_position_log_time).total_seconds() >= self._position_log_interval_seconds):
                 self._last_position_log_time = now
 
-                # Greeks are computed only here — avoids hundreds of BSM calls per second
                 delta_str = ""
                 if hasattr(self, 'greeks') and self.greeks:
                     try:
-                        greeks_data = self.greeks.instrument_greeks(tick.instrument_id)
+                        greeks_data = self.greeks.instrument_greeks(self._option_instrument_id)
                         if greeks_data and greeks_data.delta is not None:
                             delta_str = f" | Δ={float(greeks_data.delta):.3f}"
                             self._last_known_delta = f"{float(greeks_data.delta):.3f}"
                     except Exception:
                         pass
 
-                # Stop loss price for log (None when disabled)
                 sl_price = (
                     self.entry_price * (1 - self.stop_loss_pct / 100)
                     if self.stop_loss_pct > 0.0 else None
@@ -1062,10 +1131,9 @@ class TFMITHStrategy(BaseStrategy):
                     f"{self.underlying_symbol}=${self.current_underlying_price:.2f}{delta_str}"
                 )
 
-        # ── Exit condition check on every tick (replaces on_minute_closed check) ──
+        # ── Exit condition checks (once per second) ──────────────────────────
         # _close_position is guarded by _closing_in_progress — safe to call repeatedly
-        now_et = self.clock.utc_now().astimezone(self.tz)
-        self._check_monitor_exits(now_et.time())
+        self._check_monitor_exits(current_time)
 
     def _get_position_pnl_pct(self) -> float:
         """Get current position PnL as percentage."""
@@ -1379,11 +1447,13 @@ class TFMITHStrategy(BaseStrategy):
         self._actual_qty = 0.0
         self._last_position_status = {}
         self._last_known_delta = None
+        self._current_option_bid = 0.0
+        self._current_option_ask = 0.0
+        self._last_option_tick_time = None
         # traded_today stays True — blocks re-entry
 
         # ── Unsubscribe from option quotes (prevent tick flood after close) ──
-        # Must be done AFTER position state reset so on_quote_tick_safe stops
-        # dispatching to _monitor_position. Null out AFTER unsubscribe.
+        # Must be done AFTER position state reset. Null out AFTER unsubscribe.
         if self._option_instrument_id:
             try:
                 self.unsubscribe_quote_ticks(self._option_instrument_id)
@@ -1485,6 +1555,13 @@ class TFMITHStrategy(BaseStrategy):
 
     def on_stop_safe(self):
         """Clean up when strategy stops."""
+        # Halt the 1-second timer loop FIRST so no decisions are made during teardown
+        self._timer_active = False
+        try:
+            self.clock.cancel_timer(f"{self.id}_second_loop")
+        except Exception:
+            pass
+
         self.logger.info(
             f"🛑 STOPPING | Traded={self.traded_today} | "
             f"PosOpen={self.position_open} | Streak={self.loss_streak}"
