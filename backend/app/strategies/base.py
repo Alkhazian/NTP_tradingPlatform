@@ -2030,7 +2030,7 @@ class BaseStrategy(Strategy):
                 # Generate trade ID
                 from datetime import datetime
                 now = datetime.now()
-                self.active_trade_id = f"T-{self.strategy_id[:8]}-{now.strftime('%Y%m%d-%H%M%S')}"
+                self.active_trade_id = f"T-{self.strategy_id[:20]}-{now.strftime('%Y%m%d-%H%M%S')}"
                 
                 self.logger.info(
                     f"Initiating trade record for {self.strategy_id} | {direction}",
