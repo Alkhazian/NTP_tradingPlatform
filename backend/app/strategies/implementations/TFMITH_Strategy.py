@@ -461,6 +461,28 @@ class TFMITHStrategy(BaseStrategy):
         if self.position_open and not self._closing_in_progress:
             self._monitor_position_from_timer(current_time)
 
+        # ── Auto-unsubscribe past hard_end_time (no position, day is done) ──
+        # Runs when: day traded + position closed, OR no signal fired all day.
+        # Safe for multi-instance: Nautilus only stops the IB feed when the
+        # LAST subscriber unsubscribes — other TFMITH instances are unaffected.
+        # NOTE: We intentionally keep _timer_active = True so the 1-second loop
+        # continues. Without QQQ ticks, _last_underlying_tick_time goes stale
+        # and the timer exits immediately via the staleness guard (cost ≈ 0).
+        # Next morning the timer sees current_date != current_trading_day and
+        # fires _reset_daily_state → re-subscribe QQQ automatically.
+        if (self.underlying_subscribed
+                and not self.position_open
+                and self.current_trading_day is not None
+                and current_time > self.hard_end_time):
+            try:
+                self.unsubscribe_quote_ticks(self.underlying_instrument_id)
+                self.underlying_subscribed = False
+                self.logger.info(
+                    "📴 Unsubscribed QQQ ticks — past hard_end_time, no open position. Timer stays alive to auto-re-subscribe next morning."
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to unsubscribe underlying at EOD: {e}")
+
     # =========================================================================
     # DAILY RESET
     # =========================================================================
@@ -514,9 +536,24 @@ class TFMITHStrategy(BaseStrategy):
         # loss_streak and current_allocation survive
 
         self.save_state()
-        
+
         # Reset the flag so the chain requests again 2 minutes before today's start_time
         self._option_chain_requested_today = False
+
+        # ── Re-subscribe to QQQ if we unsubscribed at EOD yesterday ─────────
+        # Uses direct subscribe (not _subscribe_data) because the instrument
+        # is guaranteed to be in cache since we already traded with it.
+        if not self.underlying_subscribed and self.underlying_instrument_id:
+            try:
+                self.subscribe_quote_ticks(self.underlying_instrument_id)
+                self.underlying_subscribed = True
+                self.logger.info("📡 Re-subscribed QQQ ticks for new trading day")
+            except Exception as e:
+                self.logger.warning(f"Failed to re-subscribe underlying: {e}")
+
+        # ── Restart 1-second timer if it was stopped at EOD ──────────────────
+        if not self._timer_active:
+            self._start_second_loop()
     # =========================================================================
     # SCANNER (_check_entry — called from the 1-second timer)
     # =========================================================================
@@ -1466,6 +1503,20 @@ class TFMITHStrategy(BaseStrategy):
             self._option_instrument = None
 
         self.save_state()
+
+        # ── Unsubscribe from underlying (QQQ) — no longer needed today ──────
+        # DB writes and save_state are complete at this point.
+        # Nautilus isolates per-strategy subscriptions, so other instances
+        # of TFMITH continue receiving QQQ ticks unaffected.
+        if self.underlying_subscribed and self.underlying_instrument_id:
+            try:
+                self.unsubscribe_quote_ticks(self.underlying_instrument_id)
+                self.underlying_subscribed = False
+                self.logger.info(
+                    "📴 Unsubscribed QQQ ticks — trade complete for today. Other strategy instances are unaffected."
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to unsubscribe underlying after exit: {e}")
 
     # =========================================================================
     # STATE PERSISTENCE

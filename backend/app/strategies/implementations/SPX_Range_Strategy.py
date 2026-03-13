@@ -384,6 +384,24 @@ class SPXRangeStrategy(SPXBaseStrategy):
                     }
                 }
             )
+            # ── Unsubscribe from SPX when entry window has permanently closed ──
+            # Only safe when no position is open (position monitoring still needs
+            # SPX ticks via _process_spx_tick_unified for PnL display).
+            # Nautilus isolates per-strategy subscriptions, so sibling instances
+            # with different configs (e.g. spx_1h_range) are unaffected.
+            if self.spx_subscribed and self.get_effective_spread_quantity() == 0:
+                try:
+                    self.unsubscribe_quote_ticks(self.spx_instrument_id)
+                    self.spx_subscribed = False
+                    self.logger.info(
+                        "📴 Unsubscribed SPX ticks — past entry_cutoff_time, no open position."
+                        " Other strategy instances are unaffected."
+                    )
+                    # Schedule a wake-up alarm for next morning so we re-subscribe
+                    # even though no more SPX ticks will arrive for this instance.
+                    self._schedule_spx_resubscribe()
+                except Exception as e:
+                    self.logger.warning(f"Failed to unsubscribe SPX at cutoff: {e}")
             return
 
         # 2. Check BEARISH entry (close below Low, High not breached first)
@@ -2310,6 +2328,17 @@ class SPXRangeStrategy(SPXBaseStrategy):
             f"📅 NEW TRADING DAY: {new_date} | Previous: {old_date} | Range Start: {self.start_time}"
         )
 
+        # ── Re-subscribe to SPX if we unsubscribed at EOD yesterday ────────────
+        # Uses direct subscribe_quote_ticks (not _subscribe_to_spx) because
+        # the instrument is guaranteed to be in cache — no polling needed.
+        if not self.spx_subscribed and self.spx_instrument_id:
+            try:
+                self.subscribe_quote_ticks(self.spx_instrument_id)
+                self.spx_subscribed = True
+                self.logger.info("📡 Re-subscribed SPX ticks for new trading day")
+            except Exception as e:
+                self.logger.warning(f"Failed to re-subscribe SPX: {e}")
+
     def get_state(self) -> Dict[str, Any]:
         """Return strategy-specific state for persistence."""
         state = super().get_state()
@@ -2713,6 +2742,95 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self._active_spread_order_limits.clear()
 
         self.save_state()
+
+        # ── Unsubscribe from SPX (position closed, no re-entry today) ─────────
+        # All DB writes and save_state are complete above.
+        # traded_today is True at this point (set in _check_and_submit_entry).
+        # Nautilus isolates per-strategy subscriptions, so other SPX strategy
+        # instances with different configs continue receiving SPX unaffected.
+        if self.spx_subscribed:
+            try:
+                self.unsubscribe_quote_ticks(self.spx_instrument_id)
+                self.spx_subscribed = False
+                self.logger.info(
+                    "📴 Unsubscribed SPX ticks — position closed for today."
+                    " Other strategy instances are unaffected."
+                )
+                # Schedule a wake-up alarm for next morning so we re-subscribe
+                # even though no more SPX ticks will arrive for this instance.
+                self._schedule_spx_resubscribe()
+            except Exception as e:
+                self.logger.warning(f"Failed to unsubscribe SPX after position close: {e}")
+
+    def _schedule_spx_resubscribe(self):
+        """
+        Set a one-shot time_alert for 09:20 ET next trading day.
+
+        SPX_Range has no internal heartbeat timer, so after unsubscribing from
+        SPX ticks it would never 'wake up' to re-subscribe. This alarm fires
+        _resubscribe_spx_for_new_day() at 09:20 ET, before the range window
+        opens, guaranteeing the strategy is ready for the next session.
+
+        Safe to call multiple times: replaces any existing alarm with the same
+        name, so only one alarm is ever pending.
+        """
+        from datetime import timedelta
+        import pytz
+
+        et_tz = self.tz  # already set in on_start_safe
+        now_utc = self.clock.utc_now()
+        now_et = now_utc.astimezone(et_tz)
+
+        # Target: 10 minutes before configured start_time for the next calendar day.
+        # Weekends are included — the alarm fires and re-schedules itself if no ticks.
+        # We calculate hour/minute from (self.start_time - 10 minutes).
+        from datetime import datetime as dt_class
+        start_dt = dt_class.combine(now_et.date(), self.start_time)
+        wakeup_et = start_dt - timedelta(minutes=10)
+
+        next_day_et = (now_et + timedelta(days=1)).replace(
+            hour=wakeup_et.hour,
+            minute=wakeup_et.minute,
+            second=0,
+            microsecond=0
+        )
+        next_day_utc = next_day_et.astimezone(pytz.utc).replace(tzinfo=None)
+        # Nautilus clocks are timezone-naive UTC internally
+        from nautilus_trader.core.datetime import dt_to_unix_nanos
+        alert_name = f"{self.id}_spx_resubscribe"
+        try:
+            self.clock.cancel_timer(alert_name)
+        except Exception:
+            pass
+        self.clock.set_time_alert(
+            name=alert_name,
+            alert_time=next_day_utc,
+            callback=self._resubscribe_spx_for_new_day,
+        )
+        self.logger.info(
+            f"⏰ SPX re-subscribe alarm set for {next_day_et.strftime('%Y-%m-%d %H:%M ET')}"
+        )
+
+    def _resubscribe_spx_for_new_day(self, event):
+        """
+        Callback fired by the morning alarm set in _schedule_spx_resubscribe.
+        Re-subscribes to SPX ticks so the new trading day is processed normally.
+        Idempotent: skips if already subscribed (e.g. manual restart occurred).
+        """
+        if self.spx_subscribed:
+            self.logger.info("⏰ Morning alarm fired — SPX already subscribed, skipping.")
+            return
+        if not self.spx_instrument_id:
+            self.logger.warning("⏰ Morning alarm fired — spx_instrument_id not set, cannot re-subscribe.")
+            return
+        try:
+            self.subscribe_quote_ticks(self.spx_instrument_id)
+            self.spx_subscribed = True
+            self.logger.info(
+                f"📡 SPX re-subscribed via morning alarm | {self.spx_instrument_id}"
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to re-subscribe SPX via morning alarm: {e}")
 
     # --- Close Order Failsafe Handlers ---
 
