@@ -1,6 +1,6 @@
 {
-    "id": "tfmith_qqq",
-    "name": "TFMITH QQQ BleedingEdge",
+    "id": "tfmith_qqq_1010_05Delta",
+    "name": "TFMITH QQQ 10:10 0.5Delta",
     "enabled": false,
     "instrument_id": "QQQ.NASDAQ",
     "strategy_type": "TFMITHStrategy",
@@ -15,7 +15,7 @@
         "position_size_2": 50,
         "position_size_3": 100,
         "position_size_4": 0.1,
-        "option_delta": 0.45,
+        "option_delta": 0.5,
         "dte": 0,
         "entry_threshold_pct": 0.25,
         "profit_target_pct": 30,
@@ -25,7 +25,7 @@
         "soft_profit_flag": true,
         "hard_end_time": "12:00",
         "start_time_str": "09:30:03",
-        "allocation": 10000,
+        "allocation": 5000,
         "commission_per_contract": 1.85,
         "stop_loss_pct": 60
     }
