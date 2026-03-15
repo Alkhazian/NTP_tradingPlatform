@@ -111,6 +111,11 @@ class SPXRangeStrategy(SPXBaseStrategy):
         # Position monitoring
         self._last_position_log_time: Optional[datetime] = None
         self._position_log_interval_seconds: int = 30  # Log position status every N seconds
+        
+        # Cached leg deltas (updated every _position_log_interval_seconds to avoid BSM overhead)
+        self._cached_delta_short: Optional[str] = None
+        self._cached_delta_long: Optional[str] = None
+        self._cached_spread_delta: Optional[str] = None
         self._cache_poll_interval_seconds: int = 2     # Poll cache for instruments every N seconds
         self._required_legs_count: int = 2             # Number of option legs required for spread
 
@@ -1069,8 +1074,14 @@ class SPXRangeStrategy(SPXBaseStrategy):
             # Round price before submission and logging
             rounded_mid = self.round_to_tick(mid, self.spread_instrument)
             
+            # Extract leg deltas at entry time
+            d_short, d_long, d_net = self._get_leg_deltas()
+            delta_entry_str = ""
+            if d_short is not None:
+                delta_entry_str = f" | Δ Short: {d_short:.3f} | Δ Long: {d_long:.3f} | Δ Net: {d_net:.3f}"
+            
             self.logger.info(
-                f"✅ ENTRY ORDER SUBMITTED | {self._signal_direction.upper()} | Qty: {self.config_quantity} | Limit: {rounded_mid:.4f} | Credit: ${abs(rounded_mid) * 100:.2f}",
+                f"✅ ENTRY ORDER SUBMITTED | {self._signal_direction.upper()} | Qty: {self.config_quantity} | Limit: {rounded_mid:.4f} | Credit: ${abs(rounded_mid) * 100:.2f}{delta_entry_str}",
                 extra={
                     "extra": {
                         "event_type": "entry_submitted",
@@ -1080,7 +1091,10 @@ class SPXRangeStrategy(SPXBaseStrategy):
                         "credit_per_spread": abs(rounded_mid) * 100,
                         "total_credit": abs(rounded_mid) * 100 * self.config_quantity,
                         "stop_loss": self.fixed_stop_loss_amount,
-                        "take_profit": self.take_profit_amount
+                        "take_profit": self.take_profit_amount,
+                        "delta_short": d_short,
+                        "delta_long": d_long,
+                        "spread_delta": d_net
                     }
                 }
             )
@@ -1300,6 +1314,40 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self._found_legs.clear()
         self._last_entry_log_time = None  # Reset logging throttler
 
+    def _get_leg_deltas(self):
+        """
+        Extract deltas for both spread legs using Nautilus Greeks engine.
+        
+        Uses self._spread_legs which contains:
+          [0] = (long_leg_id, +1)  — bought protection
+          [1] = (short_leg_id, -1) — sold for credit
+        
+        Returns:
+            Tuple (delta_short, delta_long, net_delta) or (None, None, None)
+            if Greeks are unavailable.
+            Net delta = -delta_short + delta_long (short is sold).
+        """
+        if not self._spread_legs or not hasattr(self, 'greeks') or not self.greeks:
+            return None, None, None
+        try:
+            long_leg_id = self._spread_legs[0][0]   # ratio +1
+            short_leg_id = self._spread_legs[1][0]   # ratio -1
+            
+            g_long = self.greeks.instrument_greeks(long_leg_id)
+            g_short = self.greeks.instrument_greeks(short_leg_id)
+            
+            if (not g_short or g_short.delta is None or
+                    not g_long or g_long.delta is None):
+                return None, None, None
+            
+            d_short = float(g_short.delta)
+            d_long = float(g_long.delta)
+            # Net spread delta: we are short the short leg, long the long leg
+            d_net = -d_short + d_long
+            return d_short, d_long, d_net
+        except Exception:
+            return None, None, None
+
     def _manage_open_position(self):
         """Monitor open position for stop loss and take profit."""
         # Skip if close order already submitted (waiting for fill)
@@ -1389,8 +1437,19 @@ class SPXRangeStrategy(SPXBaseStrategy):
             else:
                 health = "🔴 LOSS"
             
+            # Update cached leg deltas (every 30s to avoid BSM overhead)
+            d_short, d_long, d_net = self._get_leg_deltas()
+            if d_short is not None:
+                self._cached_delta_short = f"{d_short:.3f}"
+                self._cached_delta_long = f"{d_long:.3f}"
+                self._cached_spread_delta = f"{d_net:.3f}"
+            
+            delta_str = ""
+            if self._cached_delta_short:
+                delta_str = f" | Δ Short: {self._cached_delta_short} | Δ Long: {self._cached_delta_long} | Δ Net: {self._cached_spread_delta}"
+            
             self.logger.info(
-                f"📊 POSITION STATUS | {health} | Qty: {current_qty:.1f} | P&L: ${total_pnl:+.2f} | Mid: {mid:.4f} | Bid: {bid:.4f} ({bid_size}) | Ask: {ask:.4f} ({ask_size}) | SL: {stop_price:.4f} | TP: {tp_price:.4f}",
+                f"📊 POSITION STATUS | {health} | Qty: {current_qty:.1f} | P&L: ${total_pnl:+.2f} | Mid: {mid:.4f} | Bid: {bid:.4f} ({bid_size}) | Ask: {ask:.4f} ({ask_size}) | SL: {stop_price:.4f} | TP: {tp_price:.4f}{delta_str}",
                 extra={
                     "extra": {
                         "event_type": "position_status",
@@ -1404,7 +1463,10 @@ class SPXRangeStrategy(SPXBaseStrategy):
                         "stop_price": stop_price,
                         "tp_price": tp_price,
                         "distance_sl": distance_to_sl,
-                        "distance_tp": distance_to_tp
+                        "distance_tp": distance_to_tp,
+                        "delta_short": self._cached_delta_short,
+                        "delta_long": self._cached_delta_long,
+                        "spread_delta": self._cached_spread_delta
                     }
                 }
             )
@@ -1448,8 +1510,14 @@ class SPXRangeStrategy(SPXBaseStrategy):
                     self.cancel_all_orders(self.spread_instrument.id)
                     orders_cancelled = True
             
+            # Snapshot leg deltas at SL trigger for post-mortem
+            sl_d_short, sl_d_long, sl_d_net = self._get_leg_deltas()
+            sl_delta_str = ""
+            if sl_d_short is not None:
+                sl_delta_str = f" | Δ Short: {sl_d_short:.3f} | Δ Long: {sl_d_long:.3f} | Δ Net: {sl_d_net:.3f}"
+            
             self.logger.info(
-                f"🛑 STOP LOSS TRIGGERED | Bid: {bid:.4f} ({bid_size}) | Ask: {ask:.4f} ({ask_size}) | Mid: {mid:.4f} <= Stop: {stop_price:.4f} | P&L: ${total_pnl:.2f}",
+                f"🛑 STOP LOSS TRIGGERED | Bid: {bid:.4f} ({bid_size}) | Ask: {ask:.4f} ({ask_size}) | Mid: {mid:.4f} <= Stop: {stop_price:.4f} | P&L: ${total_pnl:.2f}{sl_delta_str}",
                 extra={
                     "extra": {
                         "event_type": "stop_loss_trigger",
@@ -1462,7 +1530,10 @@ class SPXRangeStrategy(SPXBaseStrategy):
                         "pnl": total_pnl,
                         "entry_credit": entry_credit,
                         "quantity": current_qty,
-                        "override_active": orders_cancelled
+                        "override_active": orders_cancelled,
+                        "delta_short": sl_d_short,
+                        "delta_long": sl_d_long,
+                        "spread_delta": sl_d_net
                     }
                 }
             )
@@ -1496,8 +1567,14 @@ class SPXRangeStrategy(SPXBaseStrategy):
 
         # Check TAKE PROFIT (tp_price already calculated above)
         if mid >= tp_price:
+            # Snapshot leg deltas at TP trigger for post-mortem
+            tp_d_short, tp_d_long, tp_d_net = self._get_leg_deltas()
+            tp_delta_str = ""
+            if tp_d_short is not None:
+                tp_delta_str = f" | Δ Short: {tp_d_short:.3f} | Δ Long: {tp_d_long:.3f} | Δ Net: {tp_d_net:.3f}"
+            
             self.logger.info(
-                f"💰 TAKE PROFIT TRIGGERED | Bid: {bid:.4f} ({bid_size}) | Ask: {ask:.4f} ({ask_size}) | Mid: {mid:.4f} >= TP: {tp_price:.4f} | P&L: ${total_pnl:.2f}",
+                f"💰 TAKE PROFIT TRIGGERED | Bid: {bid:.4f} ({bid_size}) | Ask: {ask:.4f} ({ask_size}) | Mid: {mid:.4f} >= TP: {tp_price:.4f} | P&L: ${total_pnl:.2f}{tp_delta_str}",
                 extra={
                     "extra": {
                         "event_type": "take_profit_trigger",
@@ -1509,7 +1586,10 @@ class SPXRangeStrategy(SPXBaseStrategy):
                         "tp_price": tp_price,
                         "pnl": total_pnl,
                         "entry_credit": entry_credit,
-                        "quantity": current_qty
+                        "quantity": current_qty,
+                        "delta_short": tp_d_short,
+                        "delta_long": tp_d_long,
+                        "spread_delta": tp_d_net
                     }
                 }
             )
@@ -2257,6 +2337,9 @@ class SPXRangeStrategy(SPXBaseStrategy):
         self._skipped_quote_count = 0
         self._last_valid_spread_quote = None
         self._last_entry_log_time = None
+        self._cached_delta_short = None
+        self._cached_delta_long = None
+        self._cached_spread_delta = None
         
         # Cancel fill timeout timer if active
         try:

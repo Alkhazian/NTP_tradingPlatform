@@ -1,7 +1,7 @@
 {
     "id": "tfmith_qqq_0940_05Delta",
     "name": "TFMITH QQQ 09:40 0.5Delta",
-    "enabled": false,
+    "enabled": true,
     "instrument_id": "QQQ.NASDAQ",
     "strategy_type": "TFMITHStrategy",
     "order_size": 1,
